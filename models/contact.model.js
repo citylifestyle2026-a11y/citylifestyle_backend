@@ -39,6 +39,20 @@ const contactSchema = new mongoose.Schema(
       default: "",
     },
 
+    // Company Designation (e.g. "Owner", "Manager", "Sales Head") — the
+    // contact person's role/title within companyName. Optional at the
+    // schema level (kept consistent with companyName/companyCategory
+    // above, which are also not `required` here); "all fields except
+    // Address are compulsory" is enforced at the request layer instead,
+    // see validators/contact.validator.js, the same place
+    // fullName/whatsappNumber's required-ness is already enforced
+    // alongside this schema's own `required: true`.
+    designation: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+
     address: {
       type: String,
       trim: true,

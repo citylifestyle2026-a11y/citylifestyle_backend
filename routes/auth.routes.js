@@ -30,17 +30,18 @@ router.post("/login", loginValidation, validateRequest, login);
 router.get("/profile", protect, getProfile);
 
 // @route   PUT /api/auth/profile
-// `upload.single("profileImage")` runs BEFORE validation so an optional
-// avatar file is parsed into req.file and the rest of the multipart
-// fields (name, etc.) land in req.body exactly like a JSON body would —
-// same multer-then-validate order already used by routes/user.routes.js.
-// Reuses the existing 5 MB image upload middleware (same allowed
-// types/size limit as every other profile-photo upload); no new upload
-// configuration was introduced.
+// `upload.largeImageUpload.single("profileImage")` runs BEFORE
+// validation so an optional avatar file is parsed into req.file and the
+// rest of the multipart fields (name, etc.) land in req.body exactly
+// like a JSON body would — same multer-then-validate order already used
+// by routes/user.routes.js. Uses the 100 MB image upload middleware
+// (middlewares/upload.middleware.js), same as User profile and
+// Registration photo uploads — the file is re-encoded to WEBP and
+// compressed by uploadToLocal before it's ever written to disk.
 router.put(
     "/profile",
     protect,
-    upload.single("profileImage"),
+    upload.largeImageUpload.single("profileImage"),
     updateProfileValidation,
     validateRequest,
     updateProfile

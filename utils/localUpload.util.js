@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const sharp = require("sharp");
+const heicConvert = require("heic-convert");
 const { UPLOAD_ROOT, PUBLIC_BASE_URL, FOLDER_MAP } = require("../config/uploadPaths");
 
 const MIME_TO_EXT = {
@@ -20,10 +21,36 @@ const IMAGE_MIME_TYPES = new Set([
   "image/jpg",
   "image/png",
   "image/webp",
+  "image/heic",
+  "image/heif",
 ]);
+
+// iPhone's default camera photo format. sharp/libvips can't reliably
+// decode these on every build (HEIC decode support is patent-encumbered
+// and often left out of prebuilt sharp binaries), so these are decoded
+// to a plain buffer via `heic-convert` FIRST, then handed to the same
+// sharp resize+webp pipeline as every other format below.
+const HEIC_MIME_TYPES = new Set(["image/heic", "image/heif"]);
 
 const sanitizeSegment = (value) =>
   String(value).replace(/[^a-zA-Z0-9_-]/g, "-");
+
+// ================= WEBP COMPRESSION SETTINGS =================
+// Applied by the "GLOBAL IMAGE -> WEBP RULE" below to every
+// user-uploaded image (Event image, Admin/User profile photo,
+// Public/Private Registration attendee photo). Two independent knobs:
+//   - MAX_IMAGE_DIMENSION: caps the longer edge of very large photos
+//     (e.g. a 4000x3000 upload) down to a sane on-screen size. Small
+//     images are left at their original resolution — `withoutEnlargement`
+//     below means this never *upscales* a small image.
+//   - WEBP_QUALITY: sharp's WEBP encoder quality (0-100, sharp default
+//     is 80). 75 keeps visual quality close to the original while
+//     meaningfully shrinking file size for photos.
+// Together these mean a "very large" (e.g. 100 MB) upload is resized +
+// re-encoded down to a much smaller compressed file before it's ever
+// written to disk, instead of just having its format renamed to .webp.
+const MAX_IMAGE_DIMENSION = 1920; // px, longer edge
+const WEBP_QUALITY = 75;
 
 /**
  * Save a file to local disk, under uploads/<subfolder>, and return a
@@ -66,11 +93,12 @@ const uploadToLocal = async (input, folder, resourceType = "image", extraOptions
   // Applies to every user-uploaded image that comes in as a multer file
   // with a recognized image mimetype (Event image, User/Admin profile
   // photo, attendee registration photo, etc. — every caller that passes
-  // `input` = the raw multer `file` object). JPG/JPEG/PNG are converted
-  // to WEBP; a file that is already WEBP is stored as-is (no
-  // unnecessary reconversion). The final file on disk — and therefore
-  // the `.url`/`.public_id` saved to the database by every caller —
-  // always ends in `.webp` for these uploads.
+  // `input` = the raw multer `file` object). JPG/JPEG/PNG/HEIC/HEIF are
+  // all converted to compressed WEBP (HEIC/HEIF via `heic-convert` first
+  // — see below); an uploaded WEBP is re-compressed too, not just passed
+  // through, in case it was itself very large. The final file on disk —
+  // and therefore the `.url`/`.public_id` saved to the database by
+  // every caller — always ends in `.webp` for these uploads.
   //
   // Deliberately gated on `!extraOptions.format`: callers that
   // explicitly force an output format are NOT user-uploaded images —
@@ -88,14 +116,36 @@ const uploadToLocal = async (input, folder, resourceType = "image", extraOptions
   let ext;
 
   if (isUploadedImage) {
-    if (input.mimetype === "image/webp") {
-      // Already WEBP — keep as WEBP, no reconversion needed.
-      ext = ".webp";
-    } else {
-      // JPG/JPEG/PNG -> WEBP
-      buffer = await sharp(buffer).webp().toBuffer();
-      ext = ".webp";
+    // HEIC/HEIF (iPhone's default camera format) -> decode to a plain
+    // raster buffer FIRST via `heic-convert`, since sharp can't reliably
+    // read HEIC on every build. Every other allowed format (JPG/PNG/
+    // WEBP) skips straight to the sharp pipeline below unchanged.
+    if (HEIC_MIME_TYPES.has(input.mimetype)) {
+      buffer = await heicConvert({
+        buffer,
+        format: "JPEG",
+        quality: 1, // lossless handoff — WEBP_QUALITY below does the actual compression
+      });
     }
+
+    // JPG/JPEG/PNG/WEBP/(decoded HEIC) -> compressed WEBP. Resize only
+    // ever shrinks (withoutEnlargement), so a small image's dimensions
+    // are untouched; a very large upload gets capped to
+    // MAX_IMAGE_DIMENSION on its longer edge and re-encoded at
+    // WEBP_QUALITY, so it's stored on disk meaningfully smaller than
+    // what was uploaded. Applied even when the original is already
+    // WEBP, since an oversized WEBP upload should still be compressed,
+    // not just passed through as-is.
+    buffer = await sharp(buffer)
+      .resize({
+        width: MAX_IMAGE_DIMENSION,
+        height: MAX_IMAGE_DIMENSION,
+        fit: "inside",
+        withoutEnlargement: true,
+      })
+      .webp({ quality: WEBP_QUALITY })
+      .toBuffer();
+    ext = ".webp";
   } else if (extraOptions.format) {
     ext = `.${String(extraOptions.format).replace(/^\./, "")}`;
   } else if (isMulterFile && input.mimetype && MIME_TO_EXT[input.mimetype]) {

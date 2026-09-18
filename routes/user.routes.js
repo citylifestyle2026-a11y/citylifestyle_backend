@@ -11,10 +11,14 @@ const {
 } = require("../validators/user.validator");
 
 // Create User
+// Uses the 100 MB image upload middleware (middlewares/upload.middleware.js),
+// same as Admin profile and Registration photo uploads — the file is
+// re-encoded to WEBP and compressed by uploadToLocal before it's ever
+// written to disk.
 router.post(
   "/",
   protect,
-  upload.single("profileImage"),
+  upload.largeImageUpload.single("profileImage"),
   createUserValidation,
   validate,
   userController.createUser
@@ -26,10 +30,11 @@ router.get(
   userController.getUsers
 );
 //update user
+// Same 100 MB image upload middleware as Create User above.
 router.put(
   "/:id",
   protect,
-  upload.single("profileImage"),
+  upload.largeImageUpload.single("profileImage"),
   updateUserValidation,
   validate,
   userController.updateUser

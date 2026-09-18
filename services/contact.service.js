@@ -17,6 +17,7 @@ const SORTABLE_FIELDS = [
   "fullName",
   "whatsappNumber",
   "companyName",
+  "designation",
   "createdAt",
   "updatedAt",
 ];
@@ -38,6 +39,7 @@ const createContact = async (data, adminId) => {
     fullName,
     whatsappNumber,
     companyName,
+    designation,
     address,
     references,
     companyCategory,
@@ -59,6 +61,7 @@ const createContact = async (data, adminId) => {
   if (existingContact) {
     return mergeIntoExistingContact(existingContact, {
       companyName,
+      designation,
       address,
       references,
       companyCategory,
@@ -75,6 +78,7 @@ const createContact = async (data, adminId) => {
     fullName,
     whatsappNumber,
     companyName,
+    designation,
     address,
     references: Array.isArray(references) ? references : [],
     companyCategory: companyCategory || null,
@@ -97,12 +101,17 @@ const createContact = async (data, adminId) => {
 //    Contact.model.js's pre-findOneAndUpdate hook, same as every other
 //    write path for this field.
 async function mergeIntoExistingContact(existingContact, incoming) {
-  const { companyName, address, references, companyCategory } = incoming;
+  const { companyName, designation, address, references, companyCategory } =
+    incoming;
 
   const updateFields = {};
 
   if (companyName && !existingContact.companyName) {
     updateFields.companyName = companyName;
+  }
+
+  if (designation && !existingContact.designation) {
+    updateFields.designation = designation;
   }
 
   if (address && !existingContact.address) {
@@ -155,6 +164,7 @@ function buildContactQuery(query) {
       { fullName: { $regex: search, $options: "i" } },
       { whatsappNumber: { $regex: search, $options: "i" } },
       { companyName: { $regex: search, $options: "i" } },
+      { designation: { $regex: search, $options: "i" } },
       { address: { $regex: search, $options: "i" } },
     ];
   }
@@ -262,6 +272,7 @@ const exportContacts = async (query, res) => {
     { header: "Full Name", key: "fullName", width: 25 },
     { header: "WhatsApp Number", key: "whatsappNumber", width: 20 },
     { header: "Company Name", key: "companyName", width: 25 },
+    { header: "Designation", key: "designation", width: 22 },
     { header: "Company Category", key: "companyCategory", width: 22 },
     { header: "Address", key: "address", width: 30 },
     { header: "Reference", key: "references", width: 30 },
@@ -299,6 +310,7 @@ const exportContacts = async (query, res) => {
       fullName: contact.fullName || "-",
       whatsappNumber: contact.whatsappNumber || "-",
       companyName: contact.companyName || "-",
+      designation: contact.designation || "-",
       companyCategory: contact.companyCategory?.name || "-",
       address: contact.address || "-",
       references: references.length ? references.join(", ") : "-",
@@ -378,6 +390,7 @@ const updateContact = async (id, data) => {
   if (data.fullName !== undefined) updateFields.fullName = data.fullName;
   if (data.whatsappNumber !== undefined) updateFields.whatsappNumber = data.whatsappNumber;
   if (data.companyName !== undefined) updateFields.companyName = data.companyName;
+  if (data.designation !== undefined) updateFields.designation = data.designation;
   if (data.address !== undefined) updateFields.address = data.address;
   if (data.references !== undefined) updateFields.references = data.references;
   if (data.companyCategory !== undefined) {

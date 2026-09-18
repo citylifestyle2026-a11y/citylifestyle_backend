@@ -1,5 +1,7 @@
 const BookingTicket = require("../models/bookingTicket.model");
 const Event = require("../models/event.model");
+const User = require("../models/user.model");
+const Admin = require("../models/admin.model");
 const ExcelJS = require("exceljs");
 
 // Shared search fields for the toolbar "quick search" — Booking Id, Ticket
@@ -127,6 +129,46 @@ const applyScannerScope = (filter, currentUser) => {
   if (currentUser && currentUser.role !== "admin") {
     filter.scannedBy = currentUser._id;
   }
+};
+
+// ================= RESOLVE "SCANNED BY" NAMES (SHARED) =================
+// BookingTicket.scannedBy stores the authenticated req.user._id at
+// check-in time (see controllers/qr.controller.js) — which can be either
+// an Admin document or a User (Checker) document (see
+// middlewares/auth.middleware.js's protect), even though the schema's
+// `ref` only points at "User". A plain `.populate("scannedBy")` would
+// therefore silently come back empty for every ticket an Admin scanned,
+// since that id doesn't exist in the User collection. This looks it up
+// in BOTH collections instead and returns a single id -> name map, so
+// the Entry Report table's new "Scanned By" column is correct regardless
+// of whether an Admin or a Checker did the scan. Read-only lookups by
+// id — does not touch/rename anything on BookingTicket, User or Admin,
+// so no other functionality is affected.
+const resolveScannedByNames = async (tickets) => {
+  const scannedByIds = [
+    ...new Set(
+      tickets
+        .map((t) => t.scannedBy)
+        .filter(Boolean)
+        .map((id) => String(id))
+    ),
+  ];
+
+  if (scannedByIds.length === 0) {
+    return {};
+  }
+
+  const [users, admins] = await Promise.all([
+    User.find({ _id: { $in: scannedByIds } }).select("_id name").lean(),
+    Admin.find({ _id: { $in: scannedByIds } }).select("_id name").lean(),
+  ]);
+
+  const nameMap = {};
+  [...users, ...admins].forEach((person) => {
+    nameMap[String(person._id)] = person.name;
+  });
+
+  return nameMap;
 };
 
 // ================= GET ACTIVE EVENTS (FOR EVENT DROPDOWN) =================
@@ -261,6 +303,11 @@ const getAllEntryReports = async (query, currentUser) => {
     BookingTicket.countDocuments(filter),
   ]);
 
+  // Resolves each ticket's scannedBy id to a display name, checking both
+  // the User (Checker) and Admin collections — see
+  // resolveScannedByNames above for why a plain populate() isn't enough.
+  const scannedByNameMap = await resolveScannedByNames(tickets);
+
   // ================= FORMAT ROWS =================
 
   const rows = tickets.map((ticket) => ({
@@ -281,6 +328,10 @@ const getAllEntryReports = async (query, currentUser) => {
     passDate: ticket.passDate || null,
 
     scannedAt: ticket.scannedAt || null,
+
+    scannedBy: ticket.scannedBy
+      ? scannedByNameMap[String(ticket.scannedBy)] || "-"
+      : "-",
   }));
 
   return {

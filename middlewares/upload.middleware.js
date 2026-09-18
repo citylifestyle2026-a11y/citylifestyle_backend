@@ -10,18 +10,25 @@ const allowedMimeTypes = [
   "image/jpg",
   "image/png",
   "image/webp",
+  "image/heic",
+  "image/heif",
 ];
 
 // File Filter
 // Shared by every upload limit variant below — the existing allowed
-// image formats/types are NOT changed by this file.
+// image formats/types are NOT changed by this file, except for the
+// addition of HEIC/HEIF (iPhone's default camera photo format) below —
+// uploadToLocal (utils/localUpload.util.js) decodes and converts these
+// to compressed WEBP the same way it already does for JPG/PNG.
 const fileFilter = (req, file, cb) => {
   const allowedMimeTypes = [
     "image/jpeg",
     "image/jpg",
     "image/png",
     "image/webp",
-    "application/octet-stream", // fallback
+    "image/heic",
+    "image/heif",
+    "application/octet-stream", // fallback — also covers some browsers/OS that send HEIC files with this generic mimetype
   ];
 
   const allowedExtensions = [
@@ -29,6 +36,8 @@ const fileFilter = (req, file, cb) => {
     ".jpeg",
     ".png",
     ".webp",
+    ".heic",
+    ".heif",
   ];
 
   const ext = path.extname(file.originalname).toLowerCase();
@@ -42,7 +51,7 @@ const fileFilter = (req, file, cb) => {
 
   return cb(
     new AppError(
-      "Only JPG, JPEG, PNG and WEBP images are allowed.",
+      "Only JPG, JPEG, PNG, WEBP, HEIC and HEIF images are allowed.",
       400
     ),
     false
@@ -70,19 +79,25 @@ const buildUploadMiddleware = (maxFileSizeBytes) =>
 // the registration-specific increase below.
 const upload = buildUploadMiddleware(5 * 1024 * 1024); // 5 MB
 
-// ================= REGISTRATION PHOTO UPLOAD MIDDLEWARE =================
-// Used ONLY by the two attendee-photo upload routes that make up the
-// Registration flow:
-//   - routes/bookingTicket.routes.js  PUT /register-user/:ticketId  (Private Registration, staff-authenticated)
-//   - routes/publicRegistration.routes.js  PUT /:token  (Public Registration, no-login)
-// Raised from the previous 20 MB cap to 100 MB per the updated
-// requirement (<=100MB now allowed, >100MB still rejected with the same
-// multer file-size error as before — only the threshold changed). Same
-// storage + fileFilter as the default upload middleware above, so
-// allowed image formats/types are unchanged; every other upload route
-// (Event image, User profile, etc.) keeps using `upload` above and is
-// unaffected by this higher limit.
-const registrationPhotoUpload = buildUploadMiddleware(100 * 1024 * 1024); // 100 MB
+// ================= LARGE IMAGE UPLOAD MIDDLEWARE (100 MB) =================
+// Shared by every "profile photo" style upload route that now allows
+// images up to 100 MB:
+//   - routes/auth.routes.js           PUT /profile              (Admin profile photo)
+//   - routes/user.routes.js           POST /, PUT /:id           (User profile photo)
+//   - routes/bookingTicket.routes.js  PUT /register-user/:ticketId  (Private Registration attendee photo, staff-authenticated)
+//   - routes/publicRegistration.routes.js  PUT /:token  (Public Registration attendee photo, no-login)
+// Same storage + fileFilter as the default upload middleware above, so
+// allowed image formats/types are unchanged. Every file that comes
+// through here is later re-encoded to WEBP and size-capped by
+// `uploadToLocal` (utils/localUpload.util.js) before being written to
+// disk, so a large upload is compressed down, not stored at its full
+// original size. Event image upload (routes/event.routes.js) is NOT
+// part of this group and keeps using the default 5 MB `upload` above.
+const largeImageUpload = buildUploadMiddleware(100 * 1024 * 1024); // 100 MB
 
 module.exports = upload;
-module.exports.registrationPhotoUpload = registrationPhotoUpload;
+module.exports.largeImageUpload = largeImageUpload;
+// Alias kept so existing imports of `upload.registrationPhotoUpload`
+// (bookingTicket.routes.js, publicRegistration.routes.js) keep working
+// unchanged — both names point at the exact same 100 MB middleware.
+module.exports.registrationPhotoUpload = largeImageUpload;

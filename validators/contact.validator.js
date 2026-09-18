@@ -6,6 +6,8 @@ const { body, validationResult } = require("express-validator");
 // (models/contact.model.js's pre-save/pre-findOneAndUpdate hooks), same
 // separation of concerns already used elsewhere in this project (e.g.
 // User.model.js hashes `password` in a hook rather than the validator).
+// Every field is compulsory EXCEPT `address` — see the matching
+// `updateContactValidation` below, which mirrors this field-for-field.
 const createContactValidation = [
   body("fullName")
     .trim()
@@ -20,21 +22,26 @@ const createContactValidation = [
     .withMessage("Invalid WhatsApp Number"),
 
   body("companyName")
-    .optional({ values: "falsy" })
-    .trim(),
+    .trim()
+    .notEmpty()
+    .withMessage("Company Name is required"),
 
+  body("designation")
+    .trim()
+    .notEmpty()
+    .withMessage("Designation is required"),
+
+  // Address is the one field that's allowed to be blank.
   body("address")
     .optional({ values: "falsy" })
     .trim(),
 
-  // A contact can be created with zero references, but if the field is
-  // present it must be a real array of non-empty strings. Duplicate
-  // removal (case-insensitive, within this same contact) is the model's
-  // job, not this validator's.
+  // At least one reference is required — duplicate removal
+  // (case-insensitive, within this same contact) is the model's job,
+  // not this validator's.
   body("references")
-    .optional()
-    .isArray()
-    .withMessage("References must be an array"),
+    .isArray({ min: 1 })
+    .withMessage("At least one Reference is required"),
 
   body("references.*")
     .isString()
@@ -44,14 +51,21 @@ const createContactValidation = [
     .withMessage("Reference cannot be empty"),
 
   body("companyCategory")
-    .optional({ values: "falsy" })
+    .notEmpty()
+    .withMessage("Company Category is required")
     .isMongoId()
     .withMessage("Invalid Company Category"),
 ];
 
 // Update Contact Validation
-// Mirrors createContactValidation field-for-field, but every field is
-// `.optional()` since an edit may only send a subset of fields.
+// Mirrors createContactValidation field-for-field — the Edit form
+// (CreateContactModal.jsx in edit mode) always resubmits the full set
+// of fields, so the same "every field except Address is compulsory"
+// rule applies here too. `fullName`/`whatsappNumber` keep `.optional()`
+// (checked only when present) purely so a value that's already valid
+// on the existing document is never re-rejected just for being
+// "missing" from a differently-shaped request; every other field below
+// is required outright, same as create.
 const updateContactValidation = [
   body("fullName")
     .optional()
@@ -68,17 +82,22 @@ const updateContactValidation = [
     .withMessage("Invalid WhatsApp Number"),
 
   body("companyName")
-    .optional({ values: "falsy" })
-    .trim(),
+    .trim()
+    .notEmpty()
+    .withMessage("Company Name is required"),
+
+  body("designation")
+    .trim()
+    .notEmpty()
+    .withMessage("Designation is required"),
 
   body("address")
     .optional({ values: "falsy" })
     .trim(),
 
   body("references")
-    .optional()
-    .isArray()
-    .withMessage("References must be an array"),
+    .isArray({ min: 1 })
+    .withMessage("At least one Reference is required"),
 
   body("references.*")
     .isString()
@@ -88,7 +107,8 @@ const updateContactValidation = [
     .withMessage("Reference cannot be empty"),
 
   body("companyCategory")
-    .optional({ values: "falsy" })
+    .notEmpty()
+    .withMessage("Company Category is required")
     .isMongoId()
     .withMessage("Invalid Company Category"),
 ];
