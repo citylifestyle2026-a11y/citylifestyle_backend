@@ -25,6 +25,8 @@ const corsOptions = {
     "https://citytoppers.in",
     "https://www.citytoppers.in",
     "http://localhost:5173",
+    "https://localhost",
+    "capacitor://localhost",
   ],
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
