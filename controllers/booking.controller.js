@@ -83,8 +83,40 @@ const getBookingById = async (req, res, next) => {
   }
 };
 
+// ================= BULK IMPORT BOOKINGS FROM CSV =================
+// File arrives via multer (csvUpload.single("file") on the route) as
+// req.file.buffer. Each CSV row is turned into a booking by
+// bookingService.bulkImportBookings, which internally calls the same
+// createBooking used by the single-booking endpoint above — so every
+// successful row also gets its registration link sent automatically,
+// exactly like a normal booking does.
+const importBookingsCsv = async (req, res, next) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: "CSV file is required",
+      });
+    }
+
+    const result = await bookingService.bulkImportBookings(
+      req.file.buffer,
+      req.user.id
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: `Processed ${result.totalRows} row(s): ${result.successCount} booking(s) created, ${result.duplicateCount} duplicate(s) skipped, ${result.failureCount - result.duplicateCount} failed`,
+      data: result,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   createBooking,
+  importBookingsCsv,
   getAllBookings,
   deleteBooking,
   getBookingById,

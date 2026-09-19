@@ -95,9 +95,41 @@ const upload = buildUploadMiddleware(5 * 1024 * 1024); // 5 MB
 // part of this group and keeps using the default 5 MB `upload` above.
 const largeImageUpload = buildUploadMiddleware(100 * 1024 * 1024); // 100 MB
 
+// ================= CSV UPLOAD MIDDLEWARE (BULK BOOKING IMPORT) =================
+// Separate multer instance (own storage + own fileFilter) so the image
+// fileFilter above is completely untouched — this one only ever accepts
+// a single .csv file, used by POST /api/bookings/import-csv
+// (routes/booking.routes.js -> bookingController.importBookingsCsv).
+const csvFileFilter = (req, file, cb) => {
+  const allowedCsvMimeTypes = [
+    "text/csv",
+    "application/vnd.ms-excel",
+    "application/csv",
+    "text/plain",
+    "application/octet-stream", // fallback — some browsers/OS send CSV with a generic mimetype
+  ];
+
+  const ext = path.extname(file.originalname).toLowerCase();
+
+  if (ext === ".csv" && allowedCsvMimeTypes.includes(file.mimetype)) {
+    return cb(null, true);
+  }
+
+  return cb(new AppError("Only .csv files are allowed.", 400), false);
+};
+
+const csvUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 5 * 1024 * 1024, // 5 MB — plenty for a booking list CSV
+  },
+  fileFilter: csvFileFilter,
+});
+
 module.exports = upload;
 module.exports.largeImageUpload = largeImageUpload;
 // Alias kept so existing imports of `upload.registrationPhotoUpload`
 // (bookingTicket.routes.js, publicRegistration.routes.js) keep working
 // unchanged — both names point at the exact same 100 MB middleware.
 module.exports.registrationPhotoUpload = largeImageUpload;
+module.exports.csvUpload = csvUpload;

@@ -315,6 +315,374 @@ const createBooking = async (data, createdBy) => {
   }
 };
 
+// ================= BULK IMPORT BOOKINGS FROM CSV =================
+// Parses the uploaded CSV buffer with ExcelJS's built-in CSV reader (no
+// new dependency needed — exceljs is already used for exportBookings
+// below), then creates one booking per data row by calling the exact
+// same createBooking(data, createdBy) above — line by line, in order,
+// awaited one at a time (not Promise.all) so two rows never race each
+// other for the same ticketType.availableCount, and so a later row's
+// failure never affects an earlier row's already-committed booking.
+//
+// Since each row goes through createBooking unchanged, every existing
+// createBooking behavior — the transaction, availableCount decrement,
+// amount validation, ticket/QR generation, and the "send the public
+// registration link over WhatsApp" step (sendRegistrationWhatsAppNotification)
+// — happens exactly the same way for each row as it does for a single
+// manual booking. Nothing about createBooking itself is modified.
+//
+// Expected CSV header row (case-insensitive, order-independent):
+//   Either eventId OR eventName (event's exact title) — not both required
+//   Either ticketTypeId OR ticketTypeName (ticket's exact name within that event)
+//   quantity, amount, name, mobileNumber, email, discount, remark
+//
+// eventId/ticketTypeId (raw Mongo ObjectIds) are still supported and take
+// priority when present — but most admins don't have those IDs handy, so
+// eventName/ticketTypeName (looked up below in resolveEventAndTicketType)
+// let the CSV be filled in with the same Event/Ticket names shown on the
+// Booking/Event pages instead.
+//
+// A row that fails (bad data, sold out, wrong amount, name not found,
+// etc.) is recorded with its error and processing continues with the
+// next row — one bad row must never abort the rows before or after it.
+const REQUIRED_CSV_COLUMNS = ["quantity", "amount", "name", "mobileNumber"];
+// At least one column from each pair below must be present in the header.
+const REQUIRED_COLUMN_ALTERNATIVES = [
+  { columns: ["eventId", "eventName"], label: "eventId or eventName" },
+  {
+    columns: ["ticketTypeId", "ticketTypeName"],
+    label: "ticketTypeId or ticketTypeName",
+  },
+];
+
+// Cell values that mean "blank" in an admin-filled CSV.
+const CSV_EMPTY_PLACEHOLDERS = new Set(["", "-", "--", "n/a", "na", "null", "nil"]);
+
+const parseBookingCsvBuffer = async (buffer) => {
+  const ExcelJS = require("exceljs");
+  const { Readable } = require("stream");
+
+  const workbook = new ExcelJS.Workbook();
+  const worksheet = await workbook.csv.read(Readable.from(buffer.toString("utf-8")));
+
+  const rows = [];
+  let headerMap = null;
+
+  worksheet.eachRow((row, rowNumber) => {
+    const cellValues = row.values; // 1-indexed, index 0 is unused
+    if (rowNumber === 1) {
+      headerMap = {};
+      cellValues.forEach((cell, idx) => {
+        if (cell === null || cell === undefined) return;
+        const key = String(cell).trim();
+        if (key) headerMap[key.toLowerCase()] = idx;
+      });
+      return;
+    }
+
+    if (!headerMap) return;
+
+    const getValue = (columnName) => {
+      const idx = headerMap[columnName.toLowerCase()];
+      if (!idx) return undefined;
+      const value = cellValues[idx];
+      if (value === null || value === undefined) return undefined;
+      // ExcelJS can hand back rich-text / formula / hyperlink cells as
+      // objects — unwrap to plain text so String(value) never yields
+      // "[object Object]".
+      const raw =
+        typeof value === "object" && value !== null
+          ? value.text ?? value.result ?? value.hyperlink ?? ""
+          : value;
+      const trimmed = String(raw).trim();
+      // Admins often type "-" / "N/A" for "nothing here". Treat these
+      // placeholders as an empty cell so they never reach Number() (which
+      // turns "-" into NaN) or get saved as a real email/remark.
+      return CSV_EMPTY_PLACEHOLDERS.has(trimmed.toLowerCase())
+        ? undefined
+        : trimmed;
+    };
+
+    // Skip fully blank rows (trailing newlines etc.)
+    const isBlankRow = cellValues.slice(1).every(
+      (v) => v === null || v === undefined || String(v).trim() === ""
+    );
+    if (isBlankRow) return;
+
+    rows.push({
+      rowNumber,
+      data: {
+        eventId: getValue("eventId"),
+        eventName: getValue("eventName") || getValue("event"),
+        ticketTypeId: getValue("ticketTypeId"),
+        ticketTypeName:
+          getValue("ticketTypeName") ||
+          getValue("ticketType") ||
+          getValue("ticketName"),
+        quantity: getValue("quantity"),
+        amount: getValue("amount"),
+        name: getValue("name"),
+        mobileNumber: getValue("mobileNumber"),
+        email: getValue("email") || "",
+        discount: getValue("discount") || 0,
+        remark: getValue("remark") || "",
+      },
+    });
+  });
+
+  if (!headerMap) {
+    throw new AppError("CSV file is empty or missing a header row", 400);
+  }
+
+  const missingColumns = REQUIRED_CSV_COLUMNS.filter(
+    (col) => !(col.toLowerCase() in headerMap)
+  );
+
+  REQUIRED_COLUMN_ALTERNATIVES.forEach(({ columns, label }) => {
+    const hasOne = columns.some((col) => col.toLowerCase() in headerMap);
+    if (!hasOne) missingColumns.push(label);
+  });
+
+  if (missingColumns.length > 0) {
+    throw new AppError(
+      `CSV is missing required column(s): ${missingColumns.join(", ")}`,
+      400
+    );
+  }
+
+  return rows;
+};
+
+// ================= RESOLVE EVENT / TICKET TYPE BY NAME =================
+// Lets a CSV row use eventName/ticketTypeName instead of the raw Mongo
+// ObjectIds. If eventId/ticketTypeId are already given, they're trusted
+// as-is (unchanged, fastest path). Otherwise the event is looked up by
+// an exact, case-insensitive match on its title, and the ticket type by
+// an exact, case-insensitive match on its ticketName WITHIN that
+// resolved event (so the same ticket type name in two different events
+// can never be confused with each other). Deleted events/ticket types
+// are never matched. Escapes the name before using it in a RegExp so a
+// stray regex special character in a CSV cell can't do anything
+// unexpected.
+const escapeRegExp = (value) =>
+  String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const resolveEventAndTicketType = async (data) => {
+  let { eventId, eventName, ticketTypeId, ticketTypeName } = data;
+
+  if (!eventId) {
+    if (!eventName) {
+      throw new AppError("Event is required (eventId or eventName)", 400);
+    }
+
+    const event = await Event.findOne({
+      title: new RegExp(`^${escapeRegExp(eventName)}$`, "i"),
+      isDeleted: { $ne: true },
+    }).select("_id");
+
+    if (!event) {
+      throw new AppError(`Event not found for name "${eventName}"`, 404);
+    }
+
+    eventId = event._id.toString();
+  }
+
+  if (!ticketTypeId) {
+    if (!ticketTypeName) {
+      throw new AppError(
+        "Ticket Type is required (ticketTypeId or ticketTypeName)",
+        400
+      );
+    }
+
+    const ticketType = await TicketType.findOne({
+      eventId,
+      ticketName: new RegExp(`^${escapeRegExp(ticketTypeName)}$`, "i"),
+      isDeleted: false,
+    }).select("_id");
+
+    if (!ticketType) {
+      throw new AppError(
+        `Ticket Type not found for name "${ticketTypeName}" in the resolved event`,
+        404
+      );
+    }
+
+    ticketTypeId = ticketType._id.toString();
+  }
+
+  return { ...data, eventId, ticketTypeId };
+};
+
+// ================= NORMALISE NUMERIC FIELDS =================
+// Validates quantity / discount / amount for one CSV row and returns them
+// as real numbers, so a blank or malformed cell produces a clear row-level
+// error instead of a NaN reaching Mongoose (which is what caused
+// `Cast to Number failed for value "NaN" ... path "amount"` in
+// findDuplicateBooking's query).
+//
+// amount is OPTIONAL in the CSV: createBooking only accepts
+// amount === ticketType.amount * quantity - discount anyway, so when the
+// cell is blank the one valid value is filled in here. When an amount IS
+// given it is used as-is and createBooking still validates it.
+const normalizeRowNumbers = async (data) => {
+  const quantity = Number(data.quantity);
+  if (!Number.isInteger(quantity) || quantity <= 0) {
+    throw new AppError(
+      `Invalid quantity "${data.quantity ?? ""}" — must be a whole number greater than 0`,
+      400
+    );
+  }
+
+  const discount = Number(data.discount ?? 0);
+  if (!Number.isFinite(discount) || discount < 0) {
+    throw new AppError(
+      `Invalid discount "${data.discount}" — must be a number 0 or greater (leave blank for none)`,
+      400
+    );
+  }
+
+  let amount;
+  const amountIsBlank =
+    data.amount === undefined || data.amount === null || data.amount === "";
+
+  if (amountIsBlank) {
+    const ticketType = await TicketType.findOne({
+      _id: data.ticketTypeId,
+      eventId: data.eventId,
+      isDeleted: false,
+    }).select("amount");
+
+    if (!ticketType) {
+      throw new AppError("Ticket Type not found for this event", 404);
+    }
+
+    amount = ticketType.amount * quantity - discount;
+  } else {
+    amount = Number(data.amount);
+  }
+
+  if (!Number.isFinite(amount) || amount < 0) {
+    throw new AppError(
+      `Invalid amount "${data.amount ?? ""}" — must be a number 0 or greater (or leave blank to use the ticket price)`,
+      400
+    );
+  }
+
+  return { ...data, quantity, discount, amount };
+};
+
+// ================= DUPLICATE BOOKING CHECK =================
+// A "duplicate" here means the exact same booking request — same event,
+// same ticket type, same mobile number, same quantity, same amount —
+// already exists as a non-deleted Booking. This catches both:
+//   1. The SAME CSV file being imported twice (by accident, or a retry
+//      after the admin thinks it failed) — every row would otherwise
+//      silently create a second full set of tickets/QR codes and send a
+//      second WhatsApp registration link.
+//   2. The SAME row appearing twice INSIDE one CSV (copy-paste mistake)
+//      — since bulkImportBookings below processes rows strictly one at
+//      a time (never Promise.all), the first occurrence's booking is
+//      already committed to the DB by the time the second occurrence's
+//      check runs, so it is caught the same way.
+// isDeleted: false so a booking the admin has since deleted (e.g. it was
+// itself created by mistake) does NOT block re-importing that same row.
+// Intentionally does NOT match on `name`/`remark` — a customer's name
+// spelling or an admin's remark can vary row to row without this being
+// a different booking; event + ticket type + mobile + qty + amount is
+// what actually identifies "the same booking request".
+const findDuplicateBooking = async (data) => {
+  const { eventId, ticketTypeId, mobileNumber, quantity, amount } = data;
+
+  return Booking.findOne({
+    eventId,
+    ticketTypeId,
+    mobileNumber: String(mobileNumber || "").trim(),
+    quantity: Number(quantity),
+    amount: Number(amount),
+    isDeleted: { $ne: true },
+  })
+    .select("bookingNumber")
+    .lean();
+};
+
+const bulkImportBookings = async (fileBuffer, createdBy) => {
+  if (!fileBuffer || fileBuffer.length === 0) {
+    throw new AppError("CSV file is required", 400);
+  }
+
+  const rows = await parseBookingCsvBuffer(fileBuffer);
+
+  if (rows.length === 0) {
+    throw new AppError("CSV file has no data rows", 400);
+  }
+
+  const results = [];
+
+  // Sequential, on purpose — see the comment above this function for why
+  // this is not parallelized with Promise.all. Being sequential is also
+  // what lets the duplicate check below catch a repeated row within the
+  // same file, not just a repeated file upload.
+  for (const { rowNumber, data: rawData } of rows) {
+    try {
+      // Resolves eventName/ticketTypeName -> eventId/ticketTypeId when the
+      // row didn't already provide the raw IDs (see resolveEventAndTicketType
+      // above). Thrown AppErrors (event/ticket not found) are caught by the
+      // catch block below exactly like any other row-level failure.
+      const resolved = await resolveEventAndTicketType(rawData);
+
+      // Validates quantity/discount/amount and fills a blank amount from
+      // the ticket price (see normalizeRowNumbers above).
+      const data = await normalizeRowNumbers(resolved);
+
+      const existing = await findDuplicateBooking(data);
+
+      if (existing) {
+        results.push({
+          row: rowNumber,
+          success: false,
+          duplicate: true,
+          name: data.name,
+          mobileNumber: data.mobileNumber,
+          existingBookingNumber: existing.bookingNumber,
+          error: `Skipped — duplicate of existing booking ${existing.bookingNumber} (same event, ticket type, mobile number, quantity & amount). No new booking or tickets were created.`,
+        });
+        continue;
+      }
+
+      const result = await createBooking(data, createdBy);
+
+      results.push({
+        row: rowNumber,
+        success: true,
+        bookingNumber: result.booking.bookingNumber,
+        bookingId: result.booking._id,
+        totalTickets: result.totalTickets,
+      });
+    } catch (error) {
+      results.push({
+        row: rowNumber,
+        success: false,
+        name: rawData.name,
+        mobileNumber: rawData.mobileNumber,
+        error: error.message || "Failed to create booking",
+      });
+    }
+  }
+
+  const successCount = results.filter((r) => r.success).length;
+  const duplicateCount = results.filter((r) => r.duplicate).length;
+  const failureCount = results.length - successCount;
+
+  return {
+    totalRows: results.length,
+    successCount,
+    duplicateCount,
+    failureCount,
+    results,
+  };
+};
+
 // ================= RESOLVE EVENT SCOPE (MULTIPLE ACTIVE EVENTS) =================
 // Shared by getAllBookings and exportBookings so the table and the export
 // can never diverge on which events they cover.
@@ -895,6 +1263,7 @@ const getBookingById = async (bookingId) => {
 };
 module.exports = {
   createBooking,
+  bulkImportBookings,
   getAllBookings,
   deleteBooking,
   getBookingById,
