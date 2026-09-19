@@ -2,19 +2,33 @@ const BookingTicket = require("../models/bookingTicket.model");
 const Event = require("../models/event.model");
 const User = require("../models/user.model");
 const Admin = require("../models/admin.model");
+const TicketType = require("../models/ticketType.model");
+const AppError = require("../utils/AppError");
 const ExcelJS = require("exceljs");
 
 // Shared search fields for the toolbar "quick search" — Booking Id, Ticket
 // Id, QR Code, Name, Mobile Number, per the Entry Report spec. Used by both
 // getAllEntryReports and exportEntryReport so search behaves identically
 // in the table and in the exported file.
-const buildSearchOr = (search) => [
-  { bookingNumber: { $regex: search, $options: "i" } },
-  { ticketNumber: { $regex: search, $options: "i" } },
-  { qrImage: { $regex: search, $options: "i" } },
-  { "attendee.name": { $regex: search, $options: "i" } },
-  { "attendee.mobileNumber": { $regex: search, $options: "i" } },
-];
+//
+// User-typed text is escaped before it is used as a regex. Without this,
+// typing a character such as "(" or "[" in any search box made MongoDB
+// throw "Regular expression is invalid" and the page received a raw 500
+// error instead of simply finding no match.
+const escapeRegex = (value) =>
+  String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const buildSearchOr = (rawSearch) => {
+  const search = escapeRegex(rawSearch);
+
+  return [
+    { bookingNumber: { $regex: search, $options: "i" } },
+    { ticketNumber: { $regex: search, $options: "i" } },
+    { qrImage: { $regex: search, $options: "i" } },
+    { "attendee.name": { $regex: search, $options: "i" } },
+    { "attendee.mobileNumber": { $regex: search, $options: "i" } },
+  ];
+};
 
 // Applies the end-of-day boundary in UTC explicitly. setHours() would
 // apply the Node process's local timezone, which can shift the boundary
@@ -57,6 +71,167 @@ const istEndOfDayUtc = (dateStr) => {
     istMidnightUtc(dateStr).getTime() + 24 * 60 * 60 * 1000
   );
   return new Date(nextDayIstMidnight.getTime() - 1);
+};
+
+// ================= PASS DATE HELPERS (TICKET TYPE allowDates) =================
+// "Pass Date" on this page means the date(s) a ticket's TicketType allows
+// entry on (TicketType.allowDates) — NOT just the single date copied onto
+// BookingTicket.passDate at booking time (that is always allowDates[0],
+// so a 2-day pass only ever showed its first day).
+//
+// A stored allowDate is the UTC instant of IST midnight (e.g. 14 Aug IST
+// is 2026-08-13T18:30:00.000Z). toIstDateKey converts it back to the IST
+// calendar day as a plain "YYYY-MM-DD" string, which is what the frontend
+// date picker and the table display work with.
+const toIstDateKey = (date) => {
+  const time = new Date(date).getTime();
+  if (Number.isNaN(time)) return null;
+  return new Date(time + IST_OFFSET_MS).toISOString().slice(0, 10);
+};
+
+const toSortedUniqueIstDateKeys = (dates = []) =>
+  [...new Set(dates.map(toIstDateKey).filter(Boolean))].sort();
+
+// Every date that any TicketType of the given events allows. Feeds the
+// Pass Date picker so only dates a ticket type really allows are
+// selectable. Soft-deleted ticket types are intentionally included: their
+// already-scanned tickets still appear in this report, so their dates
+// must stay filterable.
+const getAllowedPassDates = async (eventIds) => {
+  const ticketTypes = await TicketType.find({ eventId: { $in: eventIds } })
+    .select("allowDates")
+    .lean();
+
+  return toSortedUniqueIstDateKeys(
+    ticketTypes.flatMap((ticketType) => ticketType.allowDates || [])
+  );
+};
+
+// ticketTypeId -> ["YYYY-MM-DD", ...] for the tickets being displayed.
+// One extra query per request (not per row).
+const resolvePassDatesByTicketType = async (tickets) => {
+  const ticketTypeIds = [
+    ...new Set(
+      tickets
+        .map((t) => t.ticketTypeId)
+        .filter(Boolean)
+        .map((id) => String(id))
+    ),
+  ];
+
+  if (ticketTypeIds.length === 0) {
+    return {};
+  }
+
+  const ticketTypes = await TicketType.find({ _id: { $in: ticketTypeIds } })
+    .select("_id allowDates")
+    .lean();
+
+  const map = {};
+  ticketTypes.forEach((ticketType) => {
+    map[String(ticketType._id)] = toSortedUniqueIstDateKeys(
+      ticketType.allowDates || []
+    );
+  });
+
+  return map;
+};
+
+// A ticket's pass dates: its ticket type's allowDates; falls back to the
+// ticket's own stored passDate only when the ticket type has none (or no
+// longer exists).
+const getTicketPassDates = (ticket, passDatesByTicketType) => {
+  const fromTicketType = passDatesByTicketType[String(ticket.ticketTypeId)];
+
+  if (fromTicketType && fromTicketType.length > 0) {
+    return fromTicketType;
+  }
+
+  const fallback = ticket.passDate ? toIstDateKey(ticket.passDate) : null;
+  return fallback ? [fallback] : [];
+};
+
+// ================= BUILD ENTRY REPORT FILTER (SHARED) =================
+// Single place that turns the query params into a BookingTicket filter,
+// used by BOTH getAllEntryReports and exportEntryReport, so the table and
+// the exported file can never disagree about what a filter means.
+const buildEntryReportFilter = async (params, eventIds, currentUser) => {
+  const { bookingId, ticketId, mobileNumber, name, search, startDate, endDate } =
+    params;
+
+  const filter = {
+    eventId: { $in: eventIds },
+    status: "Used",
+  };
+
+  // Checker-scoping — combined with the optional filters below via a
+  // normal AND. Admin is unaffected (no-op for admin).
+  applyScannerScope(filter, currentUser);
+
+  if (bookingId) {
+    filter.bookingNumber = { $regex: escapeRegex(bookingId), $options: "i" };
+  }
+
+  if (ticketId) {
+    filter.ticketNumber = { $regex: escapeRegex(ticketId), $options: "i" };
+  }
+
+  if (mobileNumber) {
+    filter["attendee.mobileNumber"] = {
+      $regex: escapeRegex(mobileNumber),
+      $options: "i",
+    };
+  }
+
+  if (name) {
+    filter["attendee.name"] = { $regex: escapeRegex(name), $options: "i" };
+  }
+
+  // Both the toolbar search and the Pass Date filter need an $or, so they
+  // are combined through $and instead of competing for filter.$or.
+  const andClauses = [];
+
+  if (search) {
+    andClauses.push({ $or: buildSearchOr(search) });
+  }
+
+  // ================= PASS DATE FILTER =================
+  // Matches tickets whose TicketType allows ANY date inside the selected
+  // range (allowDates is an array, so $elemMatch), plus tickets whose own
+  // stored passDate falls in the range (covers a ticket type whose dates
+  // were edited after the ticket was booked). Boundaries are IST calendar
+  // days — see istMidnightUtc / istEndOfDayUtc above.
+  if (startDate || endDate) {
+    const range = {};
+
+    if (startDate) {
+      range.$gte = istMidnightUtc(startDate);
+    }
+
+    if (endDate) {
+      range.$lte = istEndOfDayUtc(endDate);
+    }
+
+    const matchingTicketTypes = await TicketType.find({
+      eventId: { $in: eventIds },
+      allowDates: { $elemMatch: range },
+    })
+      .select("_id")
+      .lean();
+
+    andClauses.push({
+      $or: [
+        { ticketTypeId: { $in: matchingTicketTypes.map((t) => t._id) } },
+        { passDate: range },
+      ],
+    });
+  }
+
+  if (andClauses.length > 0) {
+    filter.$and = andClauses;
+  }
+
+  return filter;
 };
 
 // ================= ACTIVE EVENT FILTER (SHARED) =================
@@ -228,72 +403,21 @@ const getAllEntryReports = async (query, currentUser) => {
     return {
       event: null,
       rows: [],
+      allowedPassDates: [],
       pagination: { page, limit, total: 0, totalPages: 0 },
     };
   }
 
   // ================= FILTER =================
-
-  const filter = {
-    eventId: { $in: eventIds },
-    status: "Used",
-  };
-
-  // Checker-scoping — added BEFORE the optional filters below so it
-  // combines with them via a normal AND, exactly like every other base
-  // filter field already does. Admin is unaffected (no-op for admin).
-  applyScannerScope(filter, currentUser);
-
-  if (bookingId) {
-    filter.bookingNumber = {
-      $regex: bookingId,
-      $options: "i",
-    };
-  }
-
-  if (ticketId) {
-    filter.ticketNumber = {
-      $regex: ticketId,
-      $options: "i",
-    };
-  }
-
-  if (mobileNumber) {
-    filter["attendee.mobileNumber"] = {
-      $regex: mobileNumber,
-      $options: "i",
-    };
-  }
-
-  if (name) {
-    filter["attendee.name"] = {
-      $regex: name,
-      $options: "i",
-    };
-  }
-
-  // Toolbar quick-search — combines with the specific field filters above
-  // (Mongo ANDs every top-level key, including $or), so Search-button
-  // filters and toolbar search apply together correctly.
-  if (search) {
-    filter.$or = buildSearchOr(search);
-  }
-
-  if (startDate || endDate) {
-    filter.passDate = {};
-
-    if (startDate) {
-      filter.passDate.$gte = istMidnightUtc(startDate);
-    }
-
-    if (endDate) {
-      filter.passDate.$lte = istEndOfDayUtc(endDate);
-    }
-  }
+  const filter = await buildEntryReportFilter(
+    { bookingId, ticketId, mobileNumber, name, search, startDate, endDate },
+    eventIds,
+    currentUser
+  );
 
   // ================= FETCH DATA =================
 
-  const [tickets, total] = await Promise.all([
+  const [tickets, total, allowedPassDates] = await Promise.all([
     BookingTicket.find(filter)
       .sort({ scannedAt: -1 })
       .skip(skip)
@@ -301,12 +425,19 @@ const getAllEntryReports = async (query, currentUser) => {
       .lean(),
 
     BookingTicket.countDocuments(filter),
+
+    // Independent of the filters on purpose: the Pass Date picker must
+    // always offer every date the selected event scope allows.
+    getAllowedPassDates(eventIds),
   ]);
 
   // Resolves each ticket's scannedBy id to a display name, checking both
   // the User (Checker) and Admin collections — see
   // resolveScannedByNames above for why a plain populate() isn't enough.
-  const scannedByNameMap = await resolveScannedByNames(tickets);
+  const [scannedByNameMap, passDatesByTicketType] = await Promise.all([
+    resolveScannedByNames(tickets),
+    resolvePassDatesByTicketType(tickets),
+  ]);
 
   // ================= FORMAT ROWS =================
 
@@ -325,7 +456,11 @@ const getAllEntryReports = async (query, currentUser) => {
 
     mobileNumber: ticket.attendee?.mobileNumber || "-",
 
+    // Kept for backward compatibility (the ticket's own stored date).
     passDate: ticket.passDate || null,
+
+    // Every date this ticket's TicketType allows, as IST "YYYY-MM-DD".
+    passDates: getTicketPassDates(ticket, passDatesByTicketType),
 
     scannedAt: ticket.scannedAt || null,
 
@@ -338,6 +473,9 @@ const getAllEntryReports = async (query, currentUser) => {
     event: activeEvent,
 
     rows,
+
+    // IST "YYYY-MM-DD" list of every date the Pass Date picker may offer.
+    allowedPassDates,
 
     pagination: {
       page,
@@ -370,64 +508,19 @@ const exportEntryReport = async (query, res, currentUser) => {
   const { eventIds } = await resolveEventScope(requestedEventId);
 
   if (eventIds.length === 0) {
-    throw new Error("No active event found.");
+    // AppError (not a plain Error) so the client receives a 404 with this
+    // exact message, instead of a generic 500.
+    throw new AppError("No active event found.", 404);
   }
 
   // ================= FILTER =================
-
-  const filter = {
-    eventId: { $in: eventIds },
-    status: "Used",
-  };
-
-  // Same Checker-scoping as getAllEntryReports — export must never be a
-  // way for a Checker to bypass the same-user restriction the table
-  // enforces.
-  applyScannerScope(filter, currentUser);
-
-  if (bookingId) {
-    filter.bookingNumber = {
-      $regex: bookingId,
-      $options: "i",
-    };
-  }
-
-  if (ticketId) {
-    filter.ticketNumber = {
-      $regex: ticketId,
-      $options: "i",
-    };
-  }
-
-  if (name) {
-    filter["attendee.name"] = {
-      $regex: name,
-      $options: "i",
-    };
-  }
-
-  if (mobileNumber) {
-    filter["attendee.mobileNumber"] = {
-      $regex: mobileNumber,
-      $options: "i",
-    };
-  }
-
-  if (search) {
-    filter.$or = buildSearchOr(search);
-  }
-
-  if (startDate || endDate) {
-    filter.passDate = {};
-
-    if (startDate) {
-      filter.passDate.$gte = istMidnightUtc(startDate);
-    }
-
-    if (endDate) {
-      filter.passDate.$lte = istEndOfDayUtc(endDate);
-    }
-  }
+  // Same shared builder as the table (incl. Checker-scoping) — export
+  // must never be a way to bypass the restriction the table enforces.
+  const filter = await buildEntryReportFilter(
+    { bookingId, ticketId, mobileNumber, name, search, startDate, endDate },
+    eventIds,
+    currentUser
+  );
 
   // ================= DATA =================
 
@@ -438,10 +531,13 @@ const exportEntryReport = async (query, res, currentUser) => {
       qrImage
       scannedAt
       passDate
+      ticketTypeId
       attendee
     `)
     .sort({ scannedAt: -1 })
     .lean();
+
+  const passDatesByTicketType = await resolvePassDatesByTicketType(rows);
 
   // ================= WORKBOOK =================
 
@@ -518,19 +614,15 @@ const exportEntryReport = async (query, res, currentUser) => {
   };
 
   // ================= ROWS =================
-  // Pass Date now reflects each ticket's own stored passDate (from
-  // BookingTicket, copied from its TicketType's allowDates[0] at booking
-  // time), not the active event's date — so the exported file matches
-  // what's actually on each ticket, and matches the on-screen table
-  // (getAllEntryReports above uses the same field). The explicit
-  // Asia/Kolkata timeZone is required here: passDate is stored as the
-  // UTC instant of IST midnight (e.g. 14-08-2026 IST is stored as
-  // 2026-08-13T18:30:00.000Z), and toLocaleDateString without an explicit
-  // timeZone uses the Node process's own timezone — commonly UTC on a
-  // server — which would print 13/08/2026 instead of the correct
-  // 14/08/2026.
+  // Pass Date lists every date the ticket's TicketType allows (same as the
+  // on-screen table), formatted DD/MM/YYYY from the IST "YYYY-MM-DD" key —
+  // no server-timezone conversion involved.
 
   rows.forEach((item) => {
+    const passDates = getTicketPassDates(item, passDatesByTicketType)
+      .map((key) => key.split("-").reverse().join("/"))
+      .join(", ");
+
     worksheet.addRow({
       bookingId: item.bookingNumber,
 
@@ -540,11 +632,7 @@ const exportEntryReport = async (query, res, currentUser) => {
 
       mobile: item.attendee?.mobileNumber || "-",
 
-      passDate: item.passDate
-        ? new Date(item.passDate).toLocaleDateString("en-GB", {
-            timeZone: "Asia/Kolkata",
-          })
-        : "-",
+      passDate: passDates || "-",
 
       scannedAt: item.scannedAt
         ? new Date(item.scannedAt).toLocaleString("en-GB")

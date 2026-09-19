@@ -48,8 +48,11 @@ const getTodayBooking = async (eventId) => {
     const end = new Date();
     end.setHours(23, 59, 59, 999);
 
+    // Deleted (soft-deleted) bookings must not count — same rule as
+    // getTotalBooking / getPassBookingBreakdown below.
     return await Booking.countDocuments({
         eventId,
+        isDeleted: false,
         createdAt: {
             $gte: start,
             $lte: end,
@@ -181,6 +184,8 @@ const getBookingCounts = async (eventId) => {
         {
             $match: {
                 eventId,
+                // Deleted bookings must not appear in the booking chart.
+                isDeleted: false,
             },
         },
         {
@@ -268,6 +273,27 @@ const getDashboardCounts = async (eventId) => {
         };
     }
 
+    // Deleting a booking is a soft delete (Booking.isDeleted = true) and
+    // its BookingTickets are left in place, still with isRegistered:
+    // false. Counting tickets by eventId alone therefore kept a deleted
+    // booking's tickets in "Pending Registrations" (and, if they had been
+    // registered, in "Registered Tickets") forever, even though "Total
+    // Bookings" already excluded that booking. Tickets that belong to a
+    // deleted booking are excluded from those two counts here. Works for
+    // bookings deleted before this fix too, since it reads the current
+    // Booking.isDeleted flag rather than anything stored on the ticket.
+    const deletedBookingIds = await Booking.distinct("_id", {
+        eventId,
+        isDeleted: true,
+    });
+
+    const liveBookingTicketScope = {
+        eventId,
+        ...(deletedBookingIds.length > 0
+            ? { bookingId: { $nin: deletedBookingIds } }
+            : {}),
+    };
+
     const [totalBookingsAgg, registeredTickets, pendingRegistrations, scannedEntries] =
         await Promise.all([
             Booking.aggregate([
@@ -275,13 +301,16 @@ const getDashboardCounts = async (eventId) => {
                 { $group: { _id: null, qty: { $sum: "$quantity" } } },
             ]),
             BookingTicket.countDocuments({
-                eventId,
+                ...liveBookingTicketScope,
                 isRegistered: true,
             }),
             BookingTicket.countDocuments({
-                eventId,
+                ...liveBookingTicketScope,
                 isRegistered: false,
             }),
+            // Scanned Entries is intentionally NOT narrowed: an entry that
+            // was really scanned stays in the Entry Report, so the
+            // dashboard count keeps matching it.
             BookingTicket.countDocuments({
                 eventId,
                 status: "Used",

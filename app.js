@@ -93,8 +93,31 @@ app.use((req, res) => {
 // ---------- Global Error Handler ----------
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
+  // If a response (e.g. a streamed Excel export) has already started,
+  // headers can't be changed any more — hand over to Express's default
+  // handler, which closes the connection, instead of throwing
+  // "Cannot set headers after they are sent".
+  if (res.headersSent) {
+    return next(err);
+  }
+
   let statusCode = err.statusCode || 500;
   let message = err.message || "Internal Server Error";
+
+  // Malformed JSON body (thrown by express.json())
+  if (err.type === "entity.parse.failed") {
+    statusCode = 400;
+    message = "Invalid JSON in request body";
+  }
+
+  // File upload limits (multer) — was falling through as a 500.
+  if (err.name === "MulterError") {
+    statusCode = 400;
+    message =
+      err.code === "LIMIT_FILE_SIZE"
+        ? "Uploaded file is too large."
+        : err.message || "File upload failed";
+  }
 
   // Invalid MongoDB ObjectId
   if (err.name === "CastError") {

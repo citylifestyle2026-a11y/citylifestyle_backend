@@ -28,7 +28,7 @@ const getAllEntryReportValidation = [
     .optional()
     .trim()
     .matches(/^[0-9]{0,10}$/)
-    .withMessage("Invalid mobile number"),
+    .withMessage("Mobile number must contain digits only (maximum 10 digits)"),
 
   query("name")
     .optional()
@@ -46,7 +46,17 @@ const getAllEntryReportValidation = [
   query("endDate")
     .optional({ checkFalsy: true })
     .isISO8601()
-    .withMessage("Invalid end date"),
+    .withMessage("Invalid end date")
+    .bail()
+    .custom((endDate, { req }) => {
+      const startDate = req.query.startDate;
+
+      if (startDate && new Date(endDate) < new Date(startDate)) {
+        throw new Error("End date cannot be before start date");
+      }
+
+      return true;
+    }),
 ];
 // export entery report excel
 const exportEntryReportValidation = [
