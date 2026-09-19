@@ -4,7 +4,7 @@ const ticketTypeService = require("../services/ticketType.service");
 // Follows the same pattern as eventService.createEvent(req.body, req.file, req.user.id):
 // the authenticated admin's id is passed as its own argument, never taken
 // from (or spread into) req.body.
-const createTicketType = async (req, res) => {
+const createTicketType = async (req, res, next) => {
   try {
     const ticketType = await ticketTypeService.createTicketType(
       req.body,
@@ -17,17 +17,13 @@ const createTicketType = async (req, res) => {
       data: ticketType,
     });
   } catch (error) {
-    console.error("Create Ticket Type Error:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Internal Server Error",
-      error: error.message,
-    });
+    // Passed to the global error handler (app.js) so the client gets the
+    // real status + message instead of a blanket 500 "Internal Server Error".
+    next(error);
   }
 };
 // Get All Ticket Types
-const getAllTicketTypes = async (req, res) => {
+const getAllTicketTypes = async (req, res, next) => {
   try {
     const { page = 1, limit = 10, search = "" } = req.query;
     const { eventId } = req.params;
@@ -45,16 +41,13 @@ const getAllTicketTypes = async (req, res) => {
       ...result,
     });
   } catch (error) {
-    console.error("Get Ticket Types Error:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Internal Server Error",
-    });
+    // Passed to the global error handler (app.js) so the client gets the
+    // real status + message instead of a blanket 500 "Internal Server Error".
+    next(error);
   }
 };
 // upadate
-const updateTicketType = async (req, res) => {
+const updateTicketType = async (req, res, next) => {
   try {
     const ticketType = await ticketTypeService.updateTicketType(
       req.params.id,
@@ -74,16 +67,13 @@ const updateTicketType = async (req, res) => {
       data: ticketType,
     });
   } catch (error) {
-    console.error("Update Ticket Type Error:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Internal Server Error",
-    });
+    // Passed to the global error handler (app.js) so the client gets the
+    // real status + message instead of a blanket 500 "Internal Server Error".
+    next(error);
   }
 };
 // delete
-const deleteTicketType = async (req, res) => {
+const deleteTicketType = async (req, res, next) => {
   try {
     const ticketType = await ticketTypeService.deleteTicketType(req.params.id);
 
@@ -99,12 +89,9 @@ const deleteTicketType = async (req, res) => {
       message: "Ticket Type deleted successfully",
     });
   } catch (error) {
-    console.error("Delete Ticket Type Error:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Internal Server Error",
-    });
+    // Passed to the global error handler (app.js) so the client gets the
+    // real status + message instead of a blanket 500 "Internal Server Error".
+    next(error);
   }
 };
 module.exports = {

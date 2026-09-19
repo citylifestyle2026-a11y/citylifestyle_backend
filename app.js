@@ -151,8 +151,12 @@ app.use((err, req, res, next) => {
     message = "Token has expired";
   }
 
-  if (process.env.NODE_ENV !== "production" && !err.isOperational) {
-    console.error(err.stack);
+  // Unexpected (non-AppError) failures are logged in production too —
+  // previously they were silent there, so a live-only failure left no
+  // trace in the server logs. Expected AppErrors (validation, not found,
+  // etc.) stay quiet.
+  if (!err.isOperational) {
+    console.error(`[${req.method} ${req.originalUrl}]`, err.stack || err);
   }
 
   res.status(statusCode).json({
