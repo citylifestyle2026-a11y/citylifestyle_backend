@@ -5,6 +5,10 @@ const Admin = require("../models/admin.model");
 const TicketType = require("../models/ticketType.model");
 const AppError = require("../utils/AppError");
 const ExcelJS = require("exceljs");
+const {
+  normalizeMobileSearchTerm,
+  toMobileFilterDigits,
+} = require("../utils/normalizeMobileNumber");
 
 // Shared search fields for the toolbar "quick search" — Booking Id, Ticket
 // Id, QR Code, Name, Mobile Number, per the Entry Report spec. Used by both
@@ -19,7 +23,9 @@ const escapeRegex = (value) =>
   String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const buildSearchOr = (rawSearch) => {
-  const search = escapeRegex(rawSearch);
+  // A full number typed with 91 / +91 / spaces is reduced to its 10
+  // digits so it matches the stored attendee number.
+  const search = escapeRegex(normalizeMobileSearchTerm(rawSearch));
 
   return [
     { bookingNumber: { $regex: search, $options: "i" } },
@@ -178,7 +184,8 @@ const buildEntryReportFilter = async (params, eventIds, currentUser) => {
 
   if (mobileNumber) {
     filter["attendee.mobileNumber"] = {
-      $regex: escapeRegex(mobileNumber),
+      // "+91 98765 43210" / "919876543210" -> "9876543210".
+      $regex: escapeRegex(toMobileFilterDigits(mobileNumber)),
       $options: "i",
     };
   }

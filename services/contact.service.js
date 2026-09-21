@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const Contact = require("../models/contact.model")
 const CompanyCategory = require("../models/companycategory.model");
 const AppError = require("../utils/AppError");
+const { normalizeMobileSearchTerm } = require("../utils/normalizeMobileNumber");
 
 // Case-insensitive collation used for the reference filter below — same
 // settings as the collation-based indexes already defined on
@@ -150,7 +151,9 @@ async function mergeIntoExistingContact(existingContact, incoming) {
 // currently showing — never a separate, possibly-stale definition of
 // "search" or "sort" that could drift out of sync with the list API.
 function buildContactQuery(query) {
-  const search = (query.search || "").trim();
+  // A full number typed as "+91 98765 43210" / "919876543210" still finds
+  // the 10-digit stored WhatsApp number.
+  const search = normalizeMobileSearchTerm((query.search || "").trim());
 
   const sortField = SORTABLE_FIELDS.includes(query.sortBy)
     ? query.sortBy

@@ -104,9 +104,19 @@ const importBookingsCsv = async (req, res, next) => {
       req.user.id
     );
 
+    // The request itself succeeded (HTTP 200, per-row results are in
+    // `data.results`), but the message/`success` flag must not claim
+    // success when NOTHING was created — e.g. a file where every row is a
+    // duplicate or has an error.
+    const otherFailed = result.failureCount - result.duplicateCount;
+    const summary = `Processed ${result.totalRows} row(s): ${result.successCount} booking(s) created, ${result.duplicateCount} duplicate(s) skipped, ${otherFailed} failed`;
+
     return res.status(200).json({
-      success: true,
-      message: `Processed ${result.totalRows} row(s): ${result.successCount} booking(s) created, ${result.duplicateCount} duplicate(s) skipped, ${result.failureCount - result.duplicateCount} failed`,
+      success: result.status !== "failed",
+      message:
+        result.status === "failed"
+          ? `No bookings were created. ${summary}`
+          : summary,
       data: result,
     });
   } catch (error) {

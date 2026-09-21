@@ -1,5 +1,6 @@
 const User = require("../models/user.model");
 const AppError = require("../utils/AppError");
+const { normalizeMobileSearchTerm } = require("../utils/normalizeMobileNumber");
 const uploadImage = require("../utils/localUpload.util");
 const deleteImage = require("../utils/deleteLocalFile");
 // create user
@@ -85,7 +86,9 @@ const createUser = async (admin, data, file) => {
 const getUsers = async (query) => {
   const page = parseInt(query.page) || 1;
   const limit = parseInt(query.limit) || 10;
-  const search = query.search || "";
+  // A full number typed as "+91 98765 43210" / "919876543210" still finds
+  // the 10-digit stored mobile.
+  const search = normalizeMobileSearchTerm(query.search || "");
 
   const skip = (page - 1) * limit;
 

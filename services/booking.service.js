@@ -12,6 +12,13 @@ const eventService = require("./event.service");
 const whatsappService = require("./whatsapp.service");
 const buildRegistrationBodyParams = require("../utils/buildRegistrationBodyParams");
 const generateRegistrationToken = require("../utils/generateRegistrationToken");
+const {
+  normalizeMobileNumber,
+  getMobileNumberVariants,
+  normalizeMobileSearchTerm,
+  toMobileFilterDigits,
+  MOBILE_ERROR_MESSAGE,
+} = require("../utils/normalizeMobileNumber");
 const mongoose = require("mongoose");
 
 // ================= EVENT-WISE BOOKING NUMBER =================
@@ -123,6 +130,17 @@ const createBooking = async (data, createdBy) => {
       remark,
     } = data;
 
+    // ================= MOBILE NUMBER (WITH / WITHOUT 91) =================
+    // The POST /bookings/create route already validates + normalises this
+    // (validators/booking.validator.js), but the CSV import calls
+    // createBooking directly and never goes through that validator — so
+    // the same rule is enforced here too. Accepts 9876543210 /
+    // 919876543210 / +91 98765 43210 and always stores "91XXXXXXXXXX".
+    const normalizedMobileNumber = normalizeMobileNumber(mobileNumber);
+    if (!normalizedMobileNumber) {
+      throw new AppError(MOBILE_ERROR_MESSAGE, 400);
+    }
+
     const bookingQuantity = Number(quantity);
     const bookingAmount = Number(amount);
     const discountAmount = Number(discount || 0);
@@ -214,7 +232,7 @@ const createBooking = async (data, createdBy) => {
           quantity: bookingQuantity,
           amount: bookingAmount,
           name,
-          mobileNumber,
+          mobileNumber: normalizedMobileNumber,
           email,
           discount: discountAmount,
           remark,
@@ -363,7 +381,16 @@ const parseBookingCsvBuffer = async (buffer) => {
   const { Readable } = require("stream");
 
   const workbook = new ExcelJS.Workbook();
-  const worksheet = await workbook.csv.read(Readable.from(buffer.toString("utf-8")));
+  // `map` keeps every cell as the exact text that is in the file. By
+  // default ExcelJS turns numeric-looking cells into JS numbers, which
+  // silently corrupts mobile numbers Excel wrote in scientific notation
+  // ("9.87654E+09" would become the valid-looking 9876540000). As text it
+  // fails the mobile-number check with a clear row error instead. Numeric
+  // columns (quantity/amount/discount) are converted by Number() later.
+  const worksheet = await workbook.csv.read(
+    Readable.from(buffer.toString("utf-8")),
+    { map: (value) => value }
+  );
 
   const rows = [];
   let headerMap = null;
@@ -573,37 +600,69 @@ const normalizeRowNumbers = async (data) => {
 };
 
 // ================= DUPLICATE BOOKING CHECK =================
-// A "duplicate" here means the exact same booking request — same event,
-// same ticket type, same mobile number, same quantity, same amount —
-// already exists as a non-deleted Booking. This catches both:
-//   1. The SAME CSV file being imported twice (by accident, or a retry
-//      after the admin thinks it failed) — every row would otherwise
-//      silently create a second full set of tickets/QR codes and send a
-//      second WhatsApp registration link.
-//   2. The SAME row appearing twice INSIDE one CSV (copy-paste mistake)
-//      — since bulkImportBookings below processes rows strictly one at
-//      a time (never Promise.all), the first occurrence's booking is
-//      already committed to the DB by the time the second occurrence's
-//      check runs, so it is caught the same way.
-// isDeleted: false so a booking the admin has since deleted (e.g. it was
-// itself created by mistake) does NOT block re-importing that same row.
-// Intentionally does NOT match on `name`/`remark` — a customer's name
-// spelling or an admin's remark can vary row to row without this being
-// a different booking; event + ticket type + mobile + qty + amount is
-// what actually identifies "the same booking request".
+// A "duplicate" here means: the SAME MOBILE NUMBER already has a
+// non-deleted booking for the SAME event + SAME ticket type. The
+// customer's name (and quantity / amount / remark) is deliberately NOT
+// compared — "Rahul, 98765 43210" and "Rahul Patel, 98765 43210" are the
+// same person, and a differently-spelled name must never let a second
+// set of tickets/QR codes (and a second WhatsApp link) slip through.
+//
+// The mobile number is compared in normalised form, so the SAME number
+// typed differently is still caught:
+//     9876543210  ==  919876543210  ==  +91 98765 43210
+// Older bookings were saved exactly as typed (before normalisation
+// existed), so every spelling they may have been stored under is
+// matched (see getMobileNumberVariants).
+//
+// This catches:
+//   1. The SAME CSV file being imported twice (accident / retry).
+//   2. The SAME number appearing twice INSIDE one CSV — bulkImportBookings
+//      below processes rows strictly one at a time (never Promise.all),
+//      so the first row's booking is already committed by the time the
+//      second row's check runs.
+// isDeleted: false so a booking the admin has since deleted does NOT
+// block re-importing that number.
 const findDuplicateBooking = async (data) => {
-  const { eventId, ticketTypeId, mobileNumber, quantity, amount } = data;
+  const { eventId, ticketTypeId, mobileNumber } = data;
+
+  const mobileVariants = getMobileNumberVariants(mobileNumber);
+  if (mobileVariants.length === 0) return null;
 
   return Booking.findOne({
     eventId,
     ticketTypeId,
-    mobileNumber: String(mobileNumber || "").trim(),
-    quantity: Number(quantity),
-    amount: Number(amount),
+    mobileNumber: { $in: mobileVariants },
     isDeleted: { $ne: true },
   })
-    .select("bookingNumber")
+    .select("bookingNumber name mobileNumber")
     .lean();
+};
+
+// ================= CSV ROW: NAME / MOBILE / EMAIL VALIDATION =================
+// The CSV path never runs express-validator (that only guards the
+// single-booking route), so the same basic checks are done here per row
+// and reported as a normal row-level error — one bad row never stops the
+// rest of the file.
+const validateCsvContactFields = (data) => {
+  const name = String(data.name ?? "").trim();
+  if (!name) {
+    throw new AppError("Name is required", 400);
+  }
+
+  const normalizedMobileNumber = normalizeMobileNumber(data.mobileNumber);
+  if (!normalizedMobileNumber) {
+    throw new AppError(
+      `Invalid mobile number "${data.mobileNumber ?? ""}" — ${MOBILE_ERROR_MESSAGE}`,
+      400
+    );
+  }
+
+  const email = String(data.email ?? "").trim();
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new AppError(`Invalid email "${email}"`, 400);
+  }
+
+  return { ...data, name, mobileNumber: normalizedMobileNumber, email };
 };
 
 const bulkImportBookings = async (fileBuffer, createdBy) => {
@@ -629,7 +688,11 @@ const bulkImportBookings = async (fileBuffer, createdBy) => {
       // row didn't already provide the raw IDs (see resolveEventAndTicketType
       // above). Thrown AppErrors (event/ticket not found) are caught by the
       // catch block below exactly like any other row-level failure.
-      const resolved = await resolveEventAndTicketType(rawData);
+      // Name / mobile (with or without 91) / email checks — the CSV path
+      // skips the route-level express-validator, so it's done here.
+      const contactChecked = validateCsvContactFields(rawData);
+
+      const resolved = await resolveEventAndTicketType(contactChecked);
 
       // Validates quantity/discount/amount and fills a blank amount from
       // the ticket price (see normalizeRowNumbers above).
@@ -638,14 +701,20 @@ const bulkImportBookings = async (fileBuffer, createdBy) => {
       const existing = await findDuplicateBooking(data);
 
       if (existing) {
+        const sameName =
+          String(existing.name || "").trim().toLowerCase() ===
+          String(data.name).trim().toLowerCase();
+
         results.push({
           row: rowNumber,
           success: false,
           duplicate: true,
-          name: data.name,
-          mobileNumber: data.mobileNumber,
+          name: rawData.name,
+          mobileNumber: rawData.mobileNumber,
           existingBookingNumber: existing.bookingNumber,
-          error: `Skipped — duplicate of existing booking ${existing.bookingNumber} (same event, ticket type, mobile number, quantity & amount). No new booking or tickets were created.`,
+          error: `Duplicate — this mobile number already has booking ${existing.bookingNumber} for the same event & ticket type${
+            sameName ? "" : ` (under the name "${existing.name}")`
+          }. Skipped, no new booking or tickets were created.`,
         });
         continue;
       }
@@ -674,7 +743,19 @@ const bulkImportBookings = async (fileBuffer, createdBy) => {
   const duplicateCount = results.filter((r) => r.duplicate).length;
   const failureCount = results.length - successCount;
 
+  // Overall outcome, so the UI never has to guess:
+  //   "success" — every row created a booking
+  //   "partial" — some rows created, some duplicate/failed
+  //   "failed"  — NOTHING was created (all duplicates and/or errors)
+  const status =
+    successCount === 0
+      ? "failed"
+      : failureCount === 0
+      ? "success"
+      : "partial";
+
   return {
+    status,
     totalRows: results.length,
     successCount,
     duplicateCount,
@@ -790,8 +871,10 @@ const getAllBookings = async (query) => {
 
   // ================= MOBILE NUMBER FILTER =================
   if (mobileNumber?.trim()) {
+    // "+91 98765 43210" / "919876543210" -> "9876543210", which matches a
+    // booking stored either way; also regex-safe (a raw "+" used to throw).
     filter.mobileNumber = {
-      $regex: mobileNumber.trim(),
+      $regex: toMobileFilterDigits(mobileNumber),
       $options: "i",
     };
   }
@@ -811,7 +894,7 @@ const getAllBookings = async (query) => {
 
   // ================= GLOBAL SEARCH FILTER =================
   if (search?.trim()) {
-    const searchValue = search.trim();
+    const searchValue = normalizeMobileSearchTerm(search.trim());
 
     filter.$or = [
       {
@@ -978,8 +1061,10 @@ const exportBookings = async (query, res) => {
 
   // ================= MOBILE NUMBER FILTER =================
   if (mobileNumber?.trim()) {
+    // "+91 98765 43210" / "919876543210" -> "9876543210", which matches a
+    // booking stored either way; also regex-safe (a raw "+" used to throw).
     filter.mobileNumber = {
-      $regex: mobileNumber.trim(),
+      $regex: toMobileFilterDigits(mobileNumber),
       $options: "i",
     };
   }
@@ -999,7 +1084,7 @@ const exportBookings = async (query, res) => {
 
   // ================= GLOBAL SEARCH FILTER =================
   if (search?.trim()) {
-    const searchValue = search.trim();
+    const searchValue = normalizeMobileSearchTerm(search.trim());
 
     filter.$or = [
       {

@@ -1,4 +1,8 @@
 const { body, validationResult } = require("express-validator");
+const {
+  mobileCustomValidator,
+  toLocalMobileSanitizer,
+} = require("../utils/normalizeMobileNumber");
 
 // Create Contact Validation
 // This only checks shape/type/presence — trimming and case-insensitive
@@ -14,12 +18,19 @@ const createContactValidation = [
     .notEmpty()
     .withMessage("Full Name is required"),
 
+  // Accepts 9876543210 / 919876543210 / +91 98765 43210 — saved as the
+  // 10-digit number (see utils/normalizeMobileNumber.js).
   body("whatsappNumber")
     .trim()
     .notEmpty()
     .withMessage("WhatsApp Number is required")
-    .isMobilePhone("en-IN")
-    .withMessage("Invalid WhatsApp Number"),
+    .bail()
+    .custom(
+      mobileCustomValidator(
+        "Invalid WhatsApp Number (10 digits, with or without 91)"
+      )
+    )
+    .customSanitizer(toLocalMobileSanitizer),
 
   body("companyName")
     .trim()
@@ -78,8 +89,13 @@ const updateContactValidation = [
     .trim()
     .notEmpty()
     .withMessage("WhatsApp Number is required")
-    .isMobilePhone("en-IN")
-    .withMessage("Invalid WhatsApp Number"),
+    .bail()
+    .custom(
+      mobileCustomValidator(
+        "Invalid WhatsApp Number (10 digits, with or without 91)"
+      )
+    )
+    .customSanitizer(toLocalMobileSanitizer),
 
   body("companyName")
     .trim()

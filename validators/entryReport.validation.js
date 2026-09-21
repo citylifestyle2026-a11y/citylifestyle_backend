@@ -1,4 +1,5 @@
 const { query } = require("express-validator");
+const { toMobileFilterDigits } = require("../utils/normalizeMobileNumber");
 // get all entery report
 const getAllEntryReportValidation = [
   query("eventId")
@@ -24,11 +25,24 @@ const getAllEntryReportValidation = [
     .optional()
     .trim(),
 
+  // Digits only (max 10), OR a full number written with a 91 / +91 prefix
+  // and/or spaces/dashes. Only validated here — the 10-digit reduction is
+  // done in entryReport.service.js, because a query-string sanitizer is
+  // not reliably written back to req.query on every Express version.
   query("mobileNumber")
     .optional()
     .trim()
-    .matches(/^[0-9]{0,10}$/)
-    .withMessage("Mobile number must contain digits only (maximum 10 digits)"),
+    .custom((value) => {
+      const message =
+        "Mobile number must contain digits only (maximum 10 digits, 91 prefix allowed)";
+
+      if (value === "") return true;
+      if (!/^\+?[\d\s\-().]+$/.test(value)) throw new Error(message);
+      if (!/^[0-9]{0,10}$/.test(toMobileFilterDigits(value))) {
+        throw new Error(message);
+      }
+      return true;
+    }),
 
   query("name")
     .optional()

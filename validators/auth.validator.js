@@ -1,4 +1,5 @@
 const { body } = require("express-validator");
+const { extractLoginMobileDigits } = require("../utils/normalizeMobileNumber");
 
 const loginValidation = [
   body("login")
@@ -7,15 +8,22 @@ const loginValidation = [
     .withMessage("Email or Mobile Number is required")
     .custom((value) => {
       const isEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
-      const isMobile = /^[0-9]{10}$/.test(value);
+      const isMobile = extractLoginMobileDigits(value) !== null;
 
       if (!isEmail && !isMobile) {
         throw new Error(
-          "Please enter a valid email address or 10-digit mobile number"
+          "Please enter a valid email address or 10-digit mobile number (with or without 91)"
         );
       }
 
       return true;
+    })
+    // A mobile typed as 919876543210 / +91 98765 43210 is reduced to the
+    // 10-digit form the accounts are stored under, so the lookup in
+    // auth.controller.js (`{ mobile: login }`) matches. Emails untouched.
+    .customSanitizer((value) => {
+      const isEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+      return isEmail ? value : extractLoginMobileDigits(value) || value;
     }),
 
   body("password")

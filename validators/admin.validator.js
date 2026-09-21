@@ -1,4 +1,8 @@
 const { body, validationResult } = require("express-validator");
+const {
+  mobileCustomValidator,
+  toLocalMobileSanitizer,
+} = require("../utils/normalizeMobileNumber");
 
 // Create Admin Validation
 // Super-Admin-only endpoint (enforced in the route via
@@ -23,12 +27,19 @@ const createAdminValidation = [
     .isEmail()
     .withMessage("Invalid email address"),
 
+  // Accepts 9876543210 / 919876543210 / +91 98765 43210 — saved as the
+  // 10-digit number (see utils/normalizeMobileNumber.js).
   body("mobile")
     .trim()
     .notEmpty()
     .withMessage("Mobile number is required")
-    .isMobilePhone("en-IN")
-    .withMessage("Invalid mobile number"),
+    .bail()
+    .custom(
+      mobileCustomValidator(
+        "Invalid mobile number (10 digits, with or without 91)"
+      )
+    )
+    .customSanitizer(toLocalMobileSanitizer),
 
   body("password")
     .notEmpty()
@@ -58,8 +69,13 @@ const updateAdminValidation = [
     .trim()
     .notEmpty()
     .withMessage("Mobile number is required")
-    .isMobilePhone("en-IN")
-    .withMessage("Invalid mobile number"),
+    .bail()
+    .custom(
+      mobileCustomValidator(
+        "Invalid mobile number (10 digits, with or without 91)"
+      )
+    )
+    .customSanitizer(toLocalMobileSanitizer),
 
   body("email")
     .optional()
