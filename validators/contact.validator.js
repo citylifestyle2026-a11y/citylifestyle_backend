@@ -1,6 +1,7 @@
 const { body, validationResult } = require("express-validator");
 const {
   mobileCustomValidator,
+  toLocalMobileNumber,
   toLocalMobileSanitizer,
 } = require("../utils/normalizeMobileNumber");
 
@@ -66,6 +67,79 @@ const createContactValidation = [
     .withMessage("Company Category is required")
     .isMongoId()
     .withMessage("Invalid Company Category"),
+
+  // Email follows the same optional-but-validated-if-present style
+  // already used by validators/guest.validator.js's own `email` field
+  // (checkFalsy so an empty string is treated as "not provided", not a
+  // format error).
+  body("email")
+    .optional({ checkFalsy: true })
+    .trim()
+    .isEmail()
+    .withMessage("Invalid email address"),
+
+  // Single / Couple — required outright, independent of every
+  // conditional rule below. No gender is inferred from this value
+  // anywhere in this validator or the service.
+  body("relationship")
+    .trim()
+    .notEmpty()
+    .withMessage("Relationship is required")
+    .bail()
+    .isIn(["Single", "Couple"])
+    .withMessage('Relationship must be "Single" or "Couple"'),
+
+  // ================= CONDITIONAL: COUPLE-ONLY REQUIRED FIELDS =================
+  // spouseName / spouseMobile / profession are each only required when
+  // this same submission's `relationship` is "Couple" — when it's
+  // "Single" they're accepted blank. Read directly off `req.body`
+  // (already validated/normalized above by the time these run, since
+  // express-validator runs body() checks in the order they're declared)
+  // rather than duplicating the enum check.
+  body("spouseName")
+    .trim()
+    .custom((value, { req }) => {
+      if (req.body.relationship === "Couple" && !String(value || "").trim()) {
+        throw new Error("Spouse Name is required for Couple");
+      }
+      return true;
+    }),
+
+  // Same "required only for Couple" rule as spouseName above, plus the
+  // exact same 10-digit-with-or-without-91 format/normalization already
+  // used by `whatsappNumber` (utils/normalizeMobileNumber.js) — applied
+  // only when a value is actually present, so a blank Single submission
+  // is never rejected for "invalid format".
+  body("spouseMobile")
+    .trim()
+    .custom((value, { req }) => {
+      const trimmed = String(value || "").trim();
+      const isCouple = req.body.relationship === "Couple";
+
+      if (isCouple && !trimmed) {
+        throw new Error("Spouse Mobile Number is required for Couple");
+      }
+
+      if (trimmed && !toLocalMobileNumber(trimmed)) {
+        throw new Error(
+          "Invalid Spouse Mobile Number (10 digits, with or without 91)"
+        );
+      }
+
+      return true;
+    })
+    .customSanitizer(toLocalMobileSanitizer),
+
+  // Profession/Occupation — required only for Couple per this step's
+  // spec, same conditional pattern as spouseName/spouseMobile above.
+  body("profession")
+    .trim()
+    .custom((value, { req }) => {
+      if (req.body.relationship === "Couple" && !String(value || "").trim()) {
+        throw new Error("Profession is required for Couple");
+      }
+      return true;
+    }),
 ];
 
 // Update Contact Validation
@@ -127,6 +201,60 @@ const updateContactValidation = [
     .withMessage("Company Category is required")
     .isMongoId()
     .withMessage("Invalid Company Category"),
+
+  // Same rules as createContactValidation above — see the comments
+  // there for the reasoning behind each one.
+  body("email")
+    .optional({ checkFalsy: true })
+    .trim()
+    .isEmail()
+    .withMessage("Invalid email address"),
+
+  body("relationship")
+    .trim()
+    .notEmpty()
+    .withMessage("Relationship is required")
+    .bail()
+    .isIn(["Single", "Couple"])
+    .withMessage('Relationship must be "Single" or "Couple"'),
+
+  body("spouseName")
+    .trim()
+    .custom((value, { req }) => {
+      if (req.body.relationship === "Couple" && !String(value || "").trim()) {
+        throw new Error("Spouse Name is required for Couple");
+      }
+      return true;
+    }),
+
+  body("spouseMobile")
+    .trim()
+    .custom((value, { req }) => {
+      const trimmed = String(value || "").trim();
+      const isCouple = req.body.relationship === "Couple";
+
+      if (isCouple && !trimmed) {
+        throw new Error("Spouse Mobile Number is required for Couple");
+      }
+
+      if (trimmed && !toLocalMobileNumber(trimmed)) {
+        throw new Error(
+          "Invalid Spouse Mobile Number (10 digits, with or without 91)"
+        );
+      }
+
+      return true;
+    })
+    .customSanitizer(toLocalMobileSanitizer),
+
+  body("profession")
+    .trim()
+    .custom((value, { req }) => {
+      if (req.body.relationship === "Couple" && !String(value || "").trim()) {
+        throw new Error("Profession is required for Couple");
+      }
+      return true;
+    }),
 ];
 
 // Validation Result

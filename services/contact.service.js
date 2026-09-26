@@ -44,6 +44,11 @@ const createContact = async (data, adminId) => {
     address,
     references,
     companyCategory,
+    email,
+    relationship,
+    spouseName,
+    spouseMobile,
+    profession,
   } = data;
 
   if (companyCategory) {
@@ -66,6 +71,11 @@ const createContact = async (data, adminId) => {
       address,
       references,
       companyCategory,
+      email,
+      relationship,
+      spouseName,
+      spouseMobile,
+      profession,
     });
   }
 
@@ -83,6 +93,11 @@ const createContact = async (data, adminId) => {
     address,
     references: Array.isArray(references) ? references : [],
     companyCategory: companyCategory || null,
+    email,
+    relationship,
+    spouseName,
+    spouseMobile,
+    profession,
     createdBy: adminId,
   });
 
@@ -102,8 +117,18 @@ const createContact = async (data, adminId) => {
 //    Contact.model.js's pre-findOneAndUpdate hook, same as every other
 //    write path for this field.
 async function mergeIntoExistingContact(existingContact, incoming) {
-  const { companyName, designation, address, references, companyCategory } =
-    incoming;
+  const {
+    companyName,
+    designation,
+    address,
+    references,
+    companyCategory,
+    email,
+    relationship,
+    spouseName,
+    spouseMobile,
+    profession,
+  } = incoming;
 
   const updateFields = {};
 
@@ -125,6 +150,30 @@ async function mergeIntoExistingContact(existingContact, incoming) {
 
   if (Array.isArray(references) && references.length) {
     updateFields.references = [...existingContact.references, ...references];
+  }
+
+  // Same "only fill if currently empty, never overwrite" rule as
+  // companyName/designation/address/companyCategory above, extended to
+  // the 5 new fields — a duplicate submission enriches an existing
+  // contact's record instead of ever clobbering data it already has.
+  if (email && !existingContact.email) {
+    updateFields.email = email;
+  }
+
+  if (relationship && !existingContact.relationship) {
+    updateFields.relationship = relationship;
+  }
+
+  if (spouseName && !existingContact.spouseName) {
+    updateFields.spouseName = spouseName;
+  }
+
+  if (spouseMobile && !existingContact.spouseMobile) {
+    updateFields.spouseMobile = spouseMobile;
+  }
+
+  if (profession && !existingContact.profession) {
+    updateFields.profession = profession;
   }
 
   if (Object.keys(updateFields).length === 0) {
@@ -399,6 +448,11 @@ const updateContact = async (id, data) => {
   if (data.companyCategory !== undefined) {
     updateFields.companyCategory = data.companyCategory || null;
   }
+  if (data.email !== undefined) updateFields.email = data.email;
+  if (data.relationship !== undefined) updateFields.relationship = data.relationship;
+  if (data.spouseName !== undefined) updateFields.spouseName = data.spouseName;
+  if (data.spouseMobile !== undefined) updateFields.spouseMobile = data.spouseMobile;
+  if (data.profession !== undefined) updateFields.profession = data.profession;
 
   const updatedContact = await Contact.findOneAndUpdate(
     { _id: id, isDeleted: { $ne: true } },

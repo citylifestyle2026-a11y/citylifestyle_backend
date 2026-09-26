@@ -57,16 +57,8 @@ const userSchema = new Schema(
     role: {
       type: String,
       enum: {
-        // "coordinator" added for PARV CRM Phase 2 (Coordinator role +
-        // Nomination). Same User collection/login/JWT/protect pipeline
-        // as "checker" — see controllers/coordinator.controller.js /
-        // services/coordinator.service.js, which create/manage
-        // role:"coordinator" documents as their own separate flow. The
-        // existing Checker/User Management flow (user.controller.js /
-        // user.service.js / user.validator.js) is untouched and still
-        // only ever creates role:"checker".
-        values: ['checker', 'coordinator'],
-        message: 'Role must be "checker" or "coordinator"',
+        values: ['checker'],
+        message: 'Role must be "checker"',
       },
       default: 'checker',
       immutable: true, // prevents role from being changed after creation

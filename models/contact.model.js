@@ -59,6 +59,57 @@ const contactSchema = new mongoose.Schema(
       default: "",
     },
 
+    // Contact's email address. Optional at the schema level — no
+    // conditional/required logic lives here (Step 2 will add
+    // request-layer validation in validators/contact.validator.js, same
+    // separation of concerns already used for every other field's
+    // "required" rules in this schema/validator pair).
+    email: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      default: "",
+    },
+
+    // Single / Couple. Required at the schema level per this step's
+    // spec — every contact must record one or the other. Whether
+    // spouseName/spouseMobile are required FOR a given contact depends
+    // on this value, but that conditional cross-field rule is Step 2's
+    // job (the request-layer validator), not this schema's.
+    relationship: {
+      type: String,
+      enum: ["Single", "Couple"],
+      required: true,
+    },
+
+    // Only meaningful when relationship is "Couple" — left optional
+    // here on purpose; Step 2 adds the conditional-required check.
+    spouseName: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+
+    // Only meaningful when relationship is "Couple" — left optional
+    // here on purpose; Step 2 adds the conditional-required check.
+    spouseMobile: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+
+    // Profession / Occupation — intentionally a NEW, separate field
+    // from `designation` above. `designation` is the contact's title
+    // WITHIN companyName (e.g. "Sales Head" at a specific company);
+    // `profession` is their general profession/occupation and is
+    // independent of companyName/designation. Optional at the schema
+    // level for now (Step 2 handles any request-layer requirement).
+    profession: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+
     // Original casing is preserved for display — matching/de-dup is
     // case-insensitive (see normalizeReferences below) but nothing here
     // lowercases the stored value itself.
