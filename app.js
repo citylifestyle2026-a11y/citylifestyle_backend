@@ -17,6 +17,10 @@ const roleRoutes = require("./routes/role.routes");
 const publicRegistrationRoutes = require("./routes/publicRegistration.routes");
 const contactRoutes = require("./routes/contact.routes");
 const companyCategoryRoutes = require("./routes/companycategory.routes");
+const guestRoutes = require("./routes/guest.routes");
+const editionRoutes = require("./routes/edition.routes");
+const coordinatorRoutes = require("./routes/coordinator.routes");
+const nominationRoutes = require("./routes/nomination.routes");
 const app = express();
 
 // ---------- Core Middlewares ----------
@@ -79,6 +83,14 @@ app.use("/api/public/registration", publicRegistrationRoutes);
 app.use("/api/contacts", contactRoutes);
 // company categories (same as above — was implemented but never mounted)
 app.use("/api/company-categories", companyCategoryRoutes);
+// guests (PARV CRM Phase 1 — was implemented but never mounted)
+app.use("/api/guests", guestRoutes);
+// editions (PARV CRM Phase 1 — was implemented but never mounted)
+app.use("/api/editions", editionRoutes);
+// coordinators (PARV CRM Phase 2 — Coordinator account management)
+app.use("/api/coordinators", coordinatorRoutes);
+// nominations (PARV CRM Phase 2 — Coordinator role + Nomination)
+app.use("/api/nominations", nominationRoutes);
 // image 
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
