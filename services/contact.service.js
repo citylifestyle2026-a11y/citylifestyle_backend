@@ -19,6 +19,9 @@ const SORTABLE_FIELDS = [
   "whatsappNumber",
   "companyName",
   "designation",
+  "spouseName",
+  "spouseMobile",
+  "profession",
   "createdAt",
   "updatedAt",
 ];

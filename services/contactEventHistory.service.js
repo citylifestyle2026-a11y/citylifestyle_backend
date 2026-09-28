@@ -25,6 +25,58 @@ const createEventHistory = async (data, adminId) => {
   return populateHistory(history);
 };
 
+// ================= GET ALL EVENT HISTORY (ALL CONTACTS) =================
+// Powers the standalone Sidebar "Event History" page (not scoped to one
+// contact) — every entry, across every contact, with both contactId and
+// editionId populated. Supports optional ?contactId=&editionId=&status=
+// &page=&limit= filters.
+const getAllEventHistory = async (query = {}) => {
+  const filter = { isDeleted: { $ne: true } };
+
+  if (query.contactId) {
+    if (!mongoose.Types.ObjectId.isValid(query.contactId)) {
+      throw new AppError("Invalid Contact ID", 400);
+    }
+    filter.contactId = query.contactId;
+  }
+
+  if (query.editionId) {
+    if (!mongoose.Types.ObjectId.isValid(query.editionId)) {
+      throw new AppError("Invalid Edition ID", 400);
+    }
+    filter.editionId = query.editionId;
+  }
+
+  if (query.status) {
+    filter.status = query.status;
+  }
+
+  const page = parseInt(query.page) || 1;
+  const limit = parseInt(query.limit) || 10;
+
+  const total = await ContactEventHistory.countDocuments(filter);
+
+  const history = await ContactEventHistory.find(filter)
+    .populate("contactId", "fullName whatsappNumber")
+    .populate("editionId", "name editionNumber year status")
+    .sort({ createdAt: -1 })
+    .skip((page - 1) * limit)
+    .limit(limit);
+
+  return {
+    message: history.length
+      ? "Event history fetched successfully"
+      : "No event history found",
+    data: history,
+    pagination: {
+      total,
+      page,
+      limit,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+    },
+  };
+};
+
 // ================= GET EVENT HISTORY BY CONTACT =================
 // Supports optional ?page=&limit= — omit both to get the full,
 // unpaginated timeline (the page's default view), same "pass what you
@@ -167,6 +219,7 @@ async function populateHistory(history) {
 
 module.exports = {
   createEventHistory,
+  getAllEventHistory,
   getEventHistoryByContact,
   updateEventHistory,
   deleteEventHistory,

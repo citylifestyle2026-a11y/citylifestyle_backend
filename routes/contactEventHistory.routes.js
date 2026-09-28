@@ -24,6 +24,15 @@ router.post(
   contactEventHistoryController.createEventHistory
 );
 
+// Get All Event History (every contact) — supports
+// ?contactId=&editionId=&status=&page=&limit=. Powers the standalone
+// Sidebar "Event History" page.
+router.get(
+  "/get-all-event-history",
+  protect,
+  contactEventHistoryController.getAllEventHistory
+);
+
 // Get Event History for a Contact — supports ?page=&limit=
 router.get(
   "/contact/:contactId",

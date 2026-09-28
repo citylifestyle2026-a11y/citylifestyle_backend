@@ -18,6 +18,25 @@ const createEventHistory = async (req, res, next) => {
   }
 };
 
+// ================= GET ALL EVENT HISTORY (ALL CONTACTS) =================
+// GET /api/contact-event-history/get-all-event-history — supports
+// optional ?contactId=&editionId=&status=&page=&limit=. Powers the
+// standalone Sidebar "Event History" page.
+const getAllEventHistory = async (req, res, next) => {
+  try {
+    const result = await contactEventHistoryService.getAllEventHistory(req.query);
+
+    return res.status(200).json({
+      success: true,
+      message: result.message,
+      data: result.data,
+      pagination: result.pagination,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 // ================= GET EVENT HISTORY BY CONTACT =================
 // GET /api/contact-event-history/contact/:contactId — supports optional
 // ?page=&limit= (see contactEventHistoryService.getEventHistoryByContact).
@@ -77,6 +96,7 @@ const deleteEventHistory = async (req, res, next) => {
 
 module.exports = {
   createEventHistory,
+  getAllEventHistory,
   getEventHistoryByContact,
   updateEventHistory,
   deleteEventHistory,
