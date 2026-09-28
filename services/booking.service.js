@@ -128,6 +128,7 @@ const createBooking = async (data, createdBy) => {
       email,
       discount,
       remark,
+      allowDuplicate,
     } = data;
 
     // ================= MOBILE NUMBER (WITH / WITHOUT 91) =================
@@ -139,6 +140,30 @@ const createBooking = async (data, createdBy) => {
     const normalizedMobileNumber = normalizeMobileNumber(mobileNumber);
     if (!normalizedMobileNumber) {
       throw new AppError(MOBILE_ERROR_MESSAGE, 400);
+    }
+
+    // ================= DUPLICATE BOOKING WARNING (SAME NAME + MOBILE) =================
+    // Same name AND same mobile number already booked for this event +
+    // ticket type -> stop here (409) before any ticket is deducted or any
+    // QR / WhatsApp link is created. See findDuplicateBooking below.
+    //
+    // allowDuplicate === true ("Book Anyway" button in CreateBookingModal)
+    // skips ONLY this check. The CSV import never sets it, so CSV rows
+    // that are duplicates are always skipped.
+    const existingDuplicate =
+      allowDuplicate === true || allowDuplicate === "true"
+        ? null
+        : await findDuplicateBooking({
+            eventId,
+            ticketTypeId,
+            mobileNumber: normalizedMobileNumber,
+            name,
+          });
+    if (existingDuplicate) {
+      throw new AppError(
+        `Duplicate booking — "${existingDuplicate.name}" (${mobileNumber}) already has booking ${existingDuplicate.bookingNumber} for this event & ticket type. No new booking was created.`,
+        409
+      );
     }
 
     const bookingQuantity = Number(quantity);
@@ -600,12 +625,12 @@ const normalizeRowNumbers = async (data) => {
 };
 
 // ================= DUPLICATE BOOKING CHECK =================
-// A "duplicate" here means: the SAME MOBILE NUMBER already has a
-// non-deleted booking for the SAME event + SAME ticket type. The
-// customer's name (and quantity / amount / remark) is deliberately NOT
-// compared — "Rahul, 98765 43210" and "Rahul Patel, 98765 43210" are the
-// same person, and a differently-spelled name must never let a second
-// set of tickets/QR codes (and a second WhatsApp link) slip through.
+// A "duplicate" here means: the SAME NAME + SAME MOBILE NUMBER already
+// have a non-deleted booking for the SAME event + SAME ticket type.
+// The name is compared case-insensitively and ignoring extra spaces
+// ("rahul  patel" == "Rahul Patel"). Quantity / amount / remark are NOT
+// compared. The same mobile number under a DIFFERENT name is allowed
+// (e.g. a family member booking with a shared phone).
 //
 // The mobile number is compared in normalised form, so the SAME number
 // typed differently is still caught:
@@ -623,15 +648,23 @@ const normalizeRowNumbers = async (data) => {
 // isDeleted: false so a booking the admin has since deleted does NOT
 // block re-importing that number.
 const findDuplicateBooking = async (data) => {
-  const { eventId, ticketTypeId, mobileNumber } = data;
+  const { eventId, ticketTypeId, mobileNumber, name } = data;
 
   const mobileVariants = getMobileNumberVariants(mobileNumber);
   if (mobileVariants.length === 0) return null;
+
+  const nameTokens = String(name ?? "").trim().split(/\s+/).filter(Boolean);
+  if (nameTokens.length === 0) return null;
+  const nameRegex = new RegExp(
+    `^${nameTokens.map(escapeRegExp).join("\\s+")}$`,
+    "i"
+  );
 
   return Booking.findOne({
     eventId,
     ticketTypeId,
     mobileNumber: { $in: mobileVariants },
+    name: nameRegex,
     isDeleted: { $ne: true },
   })
     .select("bookingNumber name mobileNumber")
@@ -701,10 +734,6 @@ const bulkImportBookings = async (fileBuffer, createdBy) => {
       const existing = await findDuplicateBooking(data);
 
       if (existing) {
-        const sameName =
-          String(existing.name || "").trim().toLowerCase() ===
-          String(data.name).trim().toLowerCase();
-
         results.push({
           row: rowNumber,
           success: false,
@@ -712,9 +741,7 @@ const bulkImportBookings = async (fileBuffer, createdBy) => {
           name: rawData.name,
           mobileNumber: rawData.mobileNumber,
           existingBookingNumber: existing.bookingNumber,
-          error: `Duplicate — this mobile number already has booking ${existing.bookingNumber} for the same event & ticket type${
-            sameName ? "" : ` (under the name "${existing.name}")`
-          }. Skipped, no new booking or tickets were created.`,
+          error: `Duplicate — "${existing.name}" with this mobile number already has booking ${existing.bookingNumber} for the same event & ticket type. Skipped, no new booking or tickets were created.`,
         });
         continue;
       }
