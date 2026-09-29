@@ -251,8 +251,8 @@ const getTotalBookingDetails = async (eventId) => {
     );
 };
 // ================= DASHBOARD COUNTS (SCOPED TO ONE EVENT) =================
-// Backs the 4 standalone stat cards (Total Bookings, Registered Tickets,
-// Pending Registrations, Scanned Entries). Deliberately scoped to the
+// Backs the 5 standalone stat cards (Total Bookings, Registered Tickets,
+// Pending Registrations, Scanned Entries, Registered but Not Scanned). Deliberately scoped to the
 // SINGLE event resolved by the caller (whichever one is currently shown
 // on the dashboard) rather than summed across every event in the system —
 // mixing two different events' numbers into one total is misleading, not
@@ -270,6 +270,7 @@ const getDashboardCounts = async (eventId) => {
             registeredTickets: 0,
             pendingRegistrations: 0,
             scannedEntries: 0,
+            registeredNotScanned: 0,
         };
     }
 
@@ -294,7 +295,13 @@ const getDashboardCounts = async (eventId) => {
             : {}),
     };
 
-    const [totalBookingsAgg, registeredTickets, pendingRegistrations, scannedEntries] =
+    const [
+        totalBookingsAgg,
+        registeredTickets,
+        pendingRegistrations,
+        scannedEntries,
+        registeredNotScanned,
+    ] =
         await Promise.all([
             Booking.aggregate([
                 { $match: { eventId, isDeleted: false } },
@@ -315,6 +322,21 @@ const getDashboardCounts = async (eventId) => {
                 eventId,
                 status: "Used",
             }),
+            // Registered but Not Scanned: the attendee registered (so a
+            // QR pass exists) yet the pass was never scanned at entry —
+            // i.e. the person did not come to the event. Counted
+            // directly on the tickets rather than as
+            // (registeredTickets - scannedEntries), because Scanned
+            // Entries is intentionally not narrowed to live/registered
+            // tickets and a subtraction could therefore drift or even
+            // go negative. Same live-booking scope as Registered
+            // Tickets; a Cancelled ticket is not a no-show, so it is
+            // left out along with the already-Used ones.
+            BookingTicket.countDocuments({
+                ...liveBookingTicketScope,
+                isRegistered: true,
+                status: { $nin: ["Used", "Cancelled"] },
+            }),
         ]);
 
     return {
@@ -322,6 +344,7 @@ const getDashboardCounts = async (eventId) => {
         registeredTickets,
         pendingRegistrations,
         scannedEntries,
+        registeredNotScanned,
     };
 };
 
@@ -360,6 +383,7 @@ const getDashboardCounts = async (eventId) => {
             registeredTickets: 0,
             pendingRegistrations: 0,
             scannedEntries: 0,
+            registeredNotScanned: 0,
         };
     }
 

@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 
 const { protect } = require("../middlewares/auth.middleware");
+const authorize = require("../middlewares/authorize.middleware");
 const contactEventHistoryController = require("../controllers/contactEventHistory.controller");
 
 const {
@@ -22,6 +23,25 @@ router.post(
   createEventHistoryValidation,
   validate,
   contactEventHistoryController.createEventHistory
+);
+
+// Entry Report -> "Add to Event History" (admin only).
+// GET  /sync-summary?eventId=   counts for the confirmation popup
+// POST /sync-from-event         { eventId, ticketIds?, selectAll? } saves the
+//                               Attended (selected) + Not Attended (booked,
+//                               never scanned) rows for that event's edition.
+router.get(
+  "/sync-summary",
+  protect,
+  authorize("admin"),
+  contactEventHistoryController.getSyncSummary
+);
+
+router.post(
+  "/sync-from-event",
+  protect,
+  authorize("admin"),
+  contactEventHistoryController.syncFromEvent
 );
 
 // Get All Event History (every contact) — supports

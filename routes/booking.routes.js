@@ -32,6 +32,15 @@ router.post(
   bookingController.importBookingsCsv
 );
 
+// Check a CSV before importing it (creates nothing) — warns about rows
+// that share a mobile number.
+router.post(
+  "/import-csv/check",
+  protect,
+  csvUpload.single("file"),
+  bookingController.checkBookingsCsv
+);
+
 // Get All Bookings
 router.get(
   "/get-all-bookings",

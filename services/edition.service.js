@@ -1,6 +1,10 @@
 const mongoose = require("mongoose");
 const Edition = require("../models/edition.model");
 const AppError = require("../utils/AppError");
+const {
+  normalizeEditionName,
+  assertEditionMatchesEvent,
+} = require("../utils/editionEventMatch");
 
 const SORTABLE_FIELDS = ["editionNumber", "year", "name", "status", "createdAt"];
 
@@ -19,6 +23,19 @@ const createEdition = async (data, adminId) => {
       409
     );
   }
+
+  // Same name (ignoring capitals / spaces) as an existing edition is a duplicate.
+  const sameName = await Edition.find({ isDeleted: { $ne: true } })
+    .select("name")
+    .lean();
+
+  if (sameName.some((e) => normalizeEditionName(e.name) === normalizeEditionName(name))) {
+    throw new AppError(`An edition named "${String(name).trim()}" already exists.`, 409);
+  }
+
+  // A NEW edition must belong to an event that already exists (same name)
+  // and carry that event's date & time.
+  await assertEditionMatchesEvent({ name, eventDateTime });
 
   const edition = await Edition.create({
     name,

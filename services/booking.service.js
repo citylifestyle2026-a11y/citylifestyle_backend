@@ -142,10 +142,11 @@ const createBooking = async (data, createdBy) => {
       throw new AppError(MOBILE_ERROR_MESSAGE, 400);
     }
 
-    // ================= DUPLICATE BOOKING WARNING (SAME NAME + MOBILE) =================
-    // Same name AND same mobile number already booked for this event +
+    // ================= DUPLICATE BOOKING WARNING (SAME MOBILE NUMBER) =================
+    // The SAME mobile number already has a booking for this event +
     // ticket type -> stop here (409) before any ticket is deducted or any
-    // QR / WhatsApp link is created. See findDuplicateBooking below.
+    // QR / WhatsApp link is created. The name may repeat; only the mobile
+    // number must be different. See findDuplicateBooking below.
     //
     // allowDuplicate === true ("Book Anyway" button in CreateBookingModal)
     // skips ONLY this check. The CSV import never sets it, so CSV rows
@@ -157,11 +158,10 @@ const createBooking = async (data, createdBy) => {
             eventId,
             ticketTypeId,
             mobileNumber: normalizedMobileNumber,
-            name,
           });
     if (existingDuplicate) {
       throw new AppError(
-        `Duplicate booking — "${existingDuplicate.name}" (${mobileNumber}) already has booking ${existingDuplicate.bookingNumber} for this event & ticket type. No new booking was created.`,
+        `Duplicate booking — this mobile number (${mobileNumber}) already has booking ${existingDuplicate.bookingNumber} (under the name "${existingDuplicate.name}") for this event & ticket type. No new booking was created.`,
         409
       );
     }
@@ -625,12 +625,11 @@ const normalizeRowNumbers = async (data) => {
 };
 
 // ================= DUPLICATE BOOKING CHECK =================
-// A "duplicate" here means: the SAME NAME + SAME MOBILE NUMBER already
-// have a non-deleted booking for the SAME event + SAME ticket type.
-// The name is compared case-insensitively and ignoring extra spaces
-// ("rahul  patel" == "Rahul Patel"). Quantity / amount / remark are NOT
-// compared. The same mobile number under a DIFFERENT name is allowed
-// (e.g. a family member booking with a shared phone).
+// A "duplicate" here means: the SAME MOBILE NUMBER already has a
+// non-deleted booking for the SAME event + SAME ticket type. The
+// customer's name (and quantity / amount / remark) is deliberately NOT
+// compared: the same NAME with a DIFFERENT mobile number is allowed,
+// while the same mobile number is always flagged, whatever the name.
 //
 // The mobile number is compared in normalised form, so the SAME number
 // typed differently is still caught:
@@ -648,23 +647,15 @@ const normalizeRowNumbers = async (data) => {
 // isDeleted: false so a booking the admin has since deleted does NOT
 // block re-importing that number.
 const findDuplicateBooking = async (data) => {
-  const { eventId, ticketTypeId, mobileNumber, name } = data;
+  const { eventId, ticketTypeId, mobileNumber } = data;
 
   const mobileVariants = getMobileNumberVariants(mobileNumber);
   if (mobileVariants.length === 0) return null;
-
-  const nameTokens = String(name ?? "").trim().split(/\s+/).filter(Boolean);
-  if (nameTokens.length === 0) return null;
-  const nameRegex = new RegExp(
-    `^${nameTokens.map(escapeRegExp).join("\\s+")}$`,
-    "i"
-  );
 
   return Booking.findOne({
     eventId,
     ticketTypeId,
     mobileNumber: { $in: mobileVariants },
-    name: nameRegex,
     isDeleted: { $ne: true },
   })
     .select("bookingNumber name mobileNumber")
@@ -698,6 +689,136 @@ const validateCsvContactFields = (data) => {
   return { ...data, name, mobileNumber: normalizedMobileNumber, email };
 };
 
+// ================= CSV: PREPARE ROWS / SAME-MOBILE-IN-FILE CHECK =================
+// One CSV row -> a ready-to-book data object (name / mobile / email
+// checks, event + ticket resolution, quantity/amount/discount). Shared
+// by the real import AND the pre-import check so both judge a row the
+// same way. Never throws: a bad row comes back with `error` set.
+const prepareCsvRows = async (rows) => {
+  const prepared = [];
+
+  // Sequential, on purpose (see the comment above bulkImportBookings).
+  for (const { rowNumber, data: rawData } of rows) {
+    try {
+      // Name / mobile (with or without 91) / email checks — the CSV path
+      // skips the route-level express-validator, so it's done here.
+      const contactChecked = validateCsvContactFields(rawData);
+
+      // Resolves eventName/ticketTypeName -> eventId/ticketTypeId when the
+      // row didn't already provide the raw IDs.
+      const resolved = await resolveEventAndTicketType(contactChecked);
+
+      // Validates quantity/discount/amount and fills a blank amount from
+      // the ticket price (see normalizeRowNumbers above).
+      const data = await normalizeRowNumbers(resolved);
+
+      prepared.push({ rowNumber, rawData, data });
+    } catch (error) {
+      prepared.push({
+        rowNumber,
+        rawData,
+        error: error.message || "Failed to create booking",
+      });
+    }
+  }
+
+  return prepared;
+};
+
+// Groups the rows of ONE file that carry the SAME mobile number for the
+// SAME event + ticket type — e.g. two rows of "9876543210, qty 2". Such
+// rows must be merged into a single row (qty 4) or given different
+// numbers BEFORE anything is booked, so they are reported back instead
+// of silently booking the first row and skipping the rest.
+const findSameMobileGroups = (prepared) => {
+  const groups = new Map();
+
+  for (const item of prepared) {
+    if (!item.data) continue;
+
+    const key = `${item.data.eventId}|${item.data.ticketTypeId}|${item.data.mobileNumber}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  }
+
+  return [...groups.values()]
+    .filter((items) => items.length > 1)
+    .map((items) => ({
+      mobileNumber: items[0].data.mobileNumber,
+      rows: items.map((item) => ({
+        row: item.rowNumber,
+        name: item.data.name,
+        quantity: Number(item.data.quantity) || 0,
+      })),
+      totalQuantity: items.reduce(
+        (sum, item) => sum + (Number(item.data.quantity) || 0),
+        0
+      ),
+    }));
+};
+
+const buildSameMobileMessage = (groups) =>
+  `Same mobile number found in more than one row — ${groups
+    .map(
+      (g) =>
+        `${g.mobileNumber} in rows ${g.rows.map((r) => r.row).join(", ")} (total qty ${g.totalQuantity})`
+    )
+    .join("; ")}. Merge them into ONE row (add the quantities) or change the mobile number, then import again. No bookings were created.`;
+
+// ================= CHECK CSV BEFORE IMPORT (NOTHING IS CREATED) =================
+// Powers the warning shown as soon as a file is chosen. Read-only: it
+// creates no booking, deducts no ticket and sends no message.
+const checkBookingCsv = async (fileBuffer) => {
+  if (!fileBuffer || fileBuffer.length === 0) {
+    throw new AppError("CSV file is required", 400);
+  }
+
+  const rows = await parseBookingCsvBuffer(fileBuffer);
+
+  if (rows.length === 0) {
+    throw new AppError("CSV file has no data rows", 400);
+  }
+
+  const prepared = await prepareCsvRows(rows);
+  const sameMobileGroups = findSameMobileGroups(prepared);
+
+  const rowErrors = [];
+  const existingDuplicates = [];
+
+  for (const item of prepared) {
+    if (item.error) {
+      rowErrors.push({
+        row: item.rowNumber,
+        name: item.rawData.name,
+        mobileNumber: item.rawData.mobileNumber,
+        error: item.error,
+      });
+      continue;
+    }
+
+    const existing = await findDuplicateBooking(item.data);
+    if (existing) {
+      existingDuplicates.push({
+        row: item.rowNumber,
+        name: item.data.name,
+        mobileNumber: item.data.mobileNumber,
+        existingBookingNumber: existing.bookingNumber,
+        existingName: existing.name,
+      });
+    }
+  }
+
+  return {
+    totalRows: prepared.length,
+    // Import is only blocked by the same mobile number repeating INSIDE
+    // the file; rows that already have a booking are simply skipped.
+    canImport: sameMobileGroups.length === 0,
+    sameMobileGroups,
+    existingDuplicates,
+    rowErrors,
+  };
+};
+
 const bulkImportBookings = async (fileBuffer, createdBy) => {
   if (!fileBuffer || fileBuffer.length === 0) {
     throw new AppError("CSV file is required", 400);
@@ -709,28 +830,34 @@ const bulkImportBookings = async (fileBuffer, createdBy) => {
     throw new AppError("CSV file has no data rows", 400);
   }
 
+  const prepared = await prepareCsvRows(rows);
+
+  // Same mobile number in more than one row of this file: refuse the
+  // WHOLE import up front (nothing is created) until the admin merges
+  // those rows or changes a number. Enforced here as well as in the UI
+  // so it cannot be bypassed.
+  const sameMobileGroups = findSameMobileGroups(prepared);
+  if (sameMobileGroups.length > 0) {
+    throw new AppError(buildSameMobileMessage(sameMobileGroups), 409);
+  }
+
   const results = [];
 
   // Sequential, on purpose — see the comment above this function for why
-  // this is not parallelized with Promise.all. Being sequential is also
-  // what lets the duplicate check below catch a repeated row within the
-  // same file, not just a repeated file upload.
-  for (const { rowNumber, data: rawData } of rows) {
+  // this is not parallelized with Promise.all.
+  for (const { rowNumber, rawData, data, error: prepareError } of prepared) {
+    if (prepareError) {
+      results.push({
+        row: rowNumber,
+        success: false,
+        name: rawData.name,
+        mobileNumber: rawData.mobileNumber,
+        error: prepareError,
+      });
+      continue;
+    }
+
     try {
-      // Resolves eventName/ticketTypeName -> eventId/ticketTypeId when the
-      // row didn't already provide the raw IDs (see resolveEventAndTicketType
-      // above). Thrown AppErrors (event/ticket not found) are caught by the
-      // catch block below exactly like any other row-level failure.
-      // Name / mobile (with or without 91) / email checks — the CSV path
-      // skips the route-level express-validator, so it's done here.
-      const contactChecked = validateCsvContactFields(rawData);
-
-      const resolved = await resolveEventAndTicketType(contactChecked);
-
-      // Validates quantity/discount/amount and fills a blank amount from
-      // the ticket price (see normalizeRowNumbers above).
-      const data = await normalizeRowNumbers(resolved);
-
       const existing = await findDuplicateBooking(data);
 
       if (existing) {
@@ -741,7 +868,7 @@ const bulkImportBookings = async (fileBuffer, createdBy) => {
           name: rawData.name,
           mobileNumber: rawData.mobileNumber,
           existingBookingNumber: existing.bookingNumber,
-          error: `Duplicate — "${existing.name}" with this mobile number already has booking ${existing.bookingNumber} for the same event & ticket type. Skipped, no new booking or tickets were created.`,
+          error: `Duplicate — this row has the same mobile number as booking ${existing.bookingNumber} (name: "${existing.name}") for the same event & ticket type. Skipped, no new booking or tickets were created.`,
         });
         continue;
       }
@@ -1376,6 +1503,7 @@ const getBookingById = async (bookingId) => {
 module.exports = {
   createBooking,
   bulkImportBookings,
+  checkBookingCsv,
   getAllBookings,
   deleteBooking,
   getBookingById,

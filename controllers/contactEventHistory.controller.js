@@ -1,4 +1,5 @@
 const contactEventHistoryService = require("../services/contactEventHistory.service");
+const eventHistorySyncService = require("../services/eventHistorySync.service");
 
 // ================= CREATE EVENT HISTORY =================
 const createEventHistory = async (req, res, next) => {
@@ -94,7 +95,43 @@ const deleteEventHistory = async (req, res, next) => {
   }
 };
 
+// ================= SYNC SUMMARY (ENTRY REPORT -> ADD TO EVENT HISTORY) =================
+// GET /api/contact-event-history/sync-summary?eventId=
+// Counts shown in the confirmation popup before anything is saved.
+const getSyncSummary = async (req, res, next) => {
+  try {
+    const data = await eventHistorySyncService.getSyncSummary(req.query.eventId);
+
+    return res.status(200).json({
+      success: true,
+      message: "Sync summary fetched successfully",
+      data,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ================= SYNC FROM EVENT (ENTRY REPORT -> ADD TO EVENT HISTORY) =================
+// POST /api/contact-event-history/sync-from-event
+// Body: { eventId, ticketIds?: [...], selectAll?: boolean }
+const syncFromEvent = async (req, res, next) => {
+  try {
+    const data = await eventHistorySyncService.syncFromEvent(req.body, req.user.id);
+
+    return res.status(200).json({
+      success: true,
+      message: `Event history updated: ${data.attendedCount} attended, ${data.notAttendedCount} not attended`,
+      data,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
+  getSyncSummary,
+  syncFromEvent,
   createEventHistory,
   getAllEventHistory,
   getEventHistoryByContact,

@@ -131,6 +131,16 @@ const contactSchema = new mongoose.Schema(
       default: null,
     },
 
+    // Spouse's profession CATEGORY (Couple only), picked from the same
+    // Company Category master list. It is what makes a Couple contact
+    // also appear under the spouse's category in the Contact List's
+    // Company Category column and in its Company Category filter.
+    professionCategory: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "CompanyCategory",
+      default: null,
+    },
+
     // Mirrors Admin/User's active/inactive status convention (as
     // opposed to Event's Active/Expired, which is specifically
     // time-based expiry and doesn't apply here).
@@ -255,6 +265,7 @@ contactSchema.index(
 
 // Filter contacts by category.
 contactSchema.index({ companyCategory: 1 });
+contactSchema.index({ professionCategory: 1 });
 
 // Case-insensitive lookup of "which contacts have reference X" (the
 // Karan/Mahesh example above). Mongo indexes array fields element-by-

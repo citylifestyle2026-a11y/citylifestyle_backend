@@ -10,13 +10,26 @@ const AppError = require("../utils/AppError");
 // by contactService.createContact / editionService.createEdition.
 const createEventHistory = async (data, adminId) => {
   const { contactId, editionId, status, notes } = data;
+  const isSpouse = data.isSpouse === true || data.isSpouse === "true";
 
   await assertContactExists(contactId);
   await assertEditionExists(editionId);
 
+  // A spouse entry is only valid for a Couple contact that actually has
+  // a spouse recorded.
+  if (isSpouse) {
+    const contact = await Contact.findById(contactId).select(
+      "relationship spouseName"
+    );
+    if (contact.relationship !== "Couple" || !contact.spouseName) {
+      throw new AppError("This contact has no spouse recorded", 400);
+    }
+  }
+
   const history = await ContactEventHistory.create({
     contactId,
     editionId,
+    isSpouse,
     status: status || "Invited",
     notes: notes || "",
     createdBy: adminId,
@@ -57,7 +70,7 @@ const getAllEventHistory = async (query = {}) => {
   const total = await ContactEventHistory.countDocuments(filter);
 
   const history = await ContactEventHistory.find(filter)
-    .populate("contactId", "fullName whatsappNumber")
+    .populate("contactId", "fullName whatsappNumber spouseName spouseMobile")
     .populate("editionId", "name editionNumber year status")
     .sort({ createdAt: -1 })
     .skip((page - 1) * limit)

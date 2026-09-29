@@ -124,9 +124,38 @@ const importBookingsCsv = async (req, res, next) => {
   }
 };
 
+// ================= CHECK CSV BEFORE IMPORT =================
+// Same multer upload as importBookingsCsv, but read-only: reports rows
+// that share a mobile number (which must be merged / changed before the
+// import is allowed), rows that already have a booking, and invalid
+// rows — without creating anything.
+const checkBookingsCsv = async (req, res, next) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: "CSV file is required",
+      });
+    }
+
+    const result = await bookingService.checkBookingCsv(req.file.buffer);
+
+    return res.status(200).json({
+      success: true,
+      message: result.canImport
+        ? "CSV checked"
+        : "Same mobile number found in more than one row",
+      data: result,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   createBooking,
   importBookingsCsv,
+  checkBookingsCsv,
   getAllBookings,
   deleteBooking,
   getBookingById,

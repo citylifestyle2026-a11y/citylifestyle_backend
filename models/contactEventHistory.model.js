@@ -47,6 +47,15 @@ const contactEventHistorySchema = new mongoose.Schema(
       required: true,
     },
 
+    // true = this entry is for the contact's SPOUSE (Couple contacts
+    // only). The entry stays attached to the same Contact document
+    // (contactId) — the spouse's name/mobile are read from that
+    // contact's spouseName / spouseMobile.
+    isSpouse: {
+      type: Boolean,
+      default: false,
+    },
+
     status: {
       type: String,
       enum: STATUS_VALUES,
@@ -57,6 +66,15 @@ const contactEventHistorySchema = new mongoose.Schema(
       type: String,
       trim: true,
       default: "",
+    },
+
+    // "manual" = added through the Event History page's Add Details form;
+    // "entry-report" = added automatically by Entry Report -> Add to Event
+    // History (services/eventHistorySync.service.js).
+    source: {
+      type: String,
+      enum: ["manual", "entry-report"],
+      default: "manual",
     },
 
     // Soft-delete — same convention as every other model in this

@@ -33,6 +33,11 @@ const createEventHistoryValidation = [
     .isIn(STATUS_VALUES)
     .withMessage(`Status must be one of: ${STATUS_VALUES.join(", ")}`),
 
+  body("isSpouse")
+    .optional()
+    .isBoolean()
+    .withMessage("isSpouse must be true or false"),
+
   body("notes").optional({ values: "falsy" }).trim(),
 ];
 

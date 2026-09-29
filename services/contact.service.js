@@ -52,10 +52,14 @@ const createContact = async (data, adminId) => {
     spouseName,
     spouseMobile,
     profession,
+    professionCategory,
   } = data;
 
   if (companyCategory) {
     await assertCompanyCategoryExists(companyCategory);
+  }
+  if (professionCategory) {
+    await assertCompanyCategoryExists(professionCategory);
   }
 
   const trimmedFullName = String(fullName || "").trim();
@@ -79,6 +83,7 @@ const createContact = async (data, adminId) => {
       spouseName,
       spouseMobile,
       profession,
+      professionCategory,
     });
   }
 
@@ -101,6 +106,9 @@ const createContact = async (data, adminId) => {
     spouseName,
     spouseMobile,
     profession,
+    // Only meaningful for Couple; a Single contact never keeps one.
+    professionCategory:
+      relationship === "Couple" ? professionCategory || null : null,
     createdBy: adminId,
   });
 
@@ -131,6 +139,7 @@ async function mergeIntoExistingContact(existingContact, incoming) {
     spouseName,
     spouseMobile,
     profession,
+    professionCategory,
   } = incoming;
 
   const updateFields = {};
@@ -179,9 +188,14 @@ async function mergeIntoExistingContact(existingContact, incoming) {
     updateFields.profession = profession;
   }
 
+  if (professionCategory && !existingContact.professionCategory) {
+    updateFields.professionCategory = professionCategory;
+  }
+
   if (Object.keys(updateFields).length === 0) {
     return existingContact.populate([
       { path: "companyCategory", select: "name" },
+      { path: "professionCategory", select: "name" },
       { path: "createdBy", select: "name" },
     ]);
   }
@@ -192,6 +206,7 @@ async function mergeIntoExistingContact(existingContact, incoming) {
     { new: true, runValidators: true }
   )
     .populate("companyCategory", "name")
+    .populate("professionCategory", "name")
     .populate("createdBy", "name");
 
   return updatedContact;
@@ -228,7 +243,18 @@ function buildContactQuery(query) {
     if (!mongoose.Types.ObjectId.isValid(query.companyCategory)) {
       throw new AppError("Invalid Company Category filter", 400);
     }
-    filter.companyCategory = query.companyCategory;
+    // A contact matches if EITHER its own Company Category OR its
+    // spouse's profession Category is the selected one. $and keeps this
+    // separate from the search $or above.
+    filter.$and = [
+      ...(filter.$and || []),
+      {
+        $or: [
+          { companyCategory: query.companyCategory },
+          { professionCategory: query.companyCategory },
+        ],
+      },
+    ];
   }
 
   // ================= REFERENCE FILTER =================
@@ -274,6 +300,7 @@ const getAllContacts = async (query) => {
   const contacts = await applyCollationIfNeeded(
     Contact.find(filter)
       .populate("companyCategory", "name")
+    .populate("professionCategory", "name")
       .populate("createdBy", "name")
       .sort({ [sortField]: sortOrder })
       .skip((page - 1) * limit)
@@ -309,6 +336,7 @@ const exportContacts = async (query, res) => {
   const contacts = await applyCollationIfNeeded(
     Contact.find(filter)
       .populate("companyCategory", "name")
+    .populate("professionCategory", "name")
       .populate("createdBy", "name")
       .sort({ [sortField]: sortOrder })
   ).lean();
@@ -366,7 +394,12 @@ const exportContacts = async (query, res) => {
       whatsappNumber: contact.whatsappNumber || "-",
       companyName: contact.companyName || "-",
       designation: contact.designation || "-",
-      companyCategory: contact.companyCategory?.name || "-",
+      companyCategory:
+        [
+          ...new Set(
+            [contact.companyCategory?.name, contact.professionCategory?.name].filter(Boolean)
+          ),
+        ].join(", ") || "-",
       address: contact.address || "-",
       references: references.length ? references.join(", ") : "-",
       createdAt: contact.createdAt
@@ -399,6 +432,7 @@ const getContactById = async (id) => {
 
   const contact = await Contact.findOne({ _id: id, isDeleted: { $ne: true } })
     .populate("companyCategory", "name")
+    .populate("professionCategory", "name")
     .populate("createdBy", "name");
 
   if (!contact) {
@@ -428,6 +462,9 @@ const updateContact = async (id, data) => {
   if (data.companyCategory) {
     await assertCompanyCategoryExists(data.companyCategory);
   }
+  if (data.professionCategory) {
+    await assertCompanyCategoryExists(data.professionCategory);
+  }
 
   // Only re-check for a duplicate if the number is actually changing —
   // re-saving a contact with its own unchanged number must never be
@@ -456,6 +493,13 @@ const updateContact = async (id, data) => {
   if (data.spouseName !== undefined) updateFields.spouseName = data.spouseName;
   if (data.spouseMobile !== undefined) updateFields.spouseMobile = data.spouseMobile;
   if (data.profession !== undefined) updateFields.profession = data.profession;
+  if (data.professionCategory !== undefined || data.relationship !== undefined) {
+    // Only meaningful for Couple; switching to Single clears it.
+    const isCouple = (data.relationship ?? contact.relationship) === "Couple";
+    updateFields.professionCategory = isCouple
+      ? data.professionCategory || contact.professionCategory || null
+      : null;
+  }
 
   const updatedContact = await Contact.findOneAndUpdate(
     { _id: id, isDeleted: { $ne: true } },
@@ -463,6 +507,7 @@ const updateContact = async (id, data) => {
     { new: true, runValidators: true }
   )
     .populate("companyCategory", "name")
+    .populate("professionCategory", "name")
     .populate("createdBy", "name");
 
   return updatedContact;

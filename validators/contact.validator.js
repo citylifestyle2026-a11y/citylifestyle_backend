@@ -140,6 +140,19 @@ const createContactValidation = [
       }
       return true;
     }),
+
+  // Spouse's profession Category (from the Company Category list) —
+  // compulsory for Couple, ignored for Single.
+  body("professionCategory").custom((value, { req }) => {
+    const v = String(value ?? "").trim();
+    if (req.body.relationship === "Couple" && !v) {
+      throw new Error("Category is required for Couple");
+    }
+    if (v && !/^[0-9a-fA-F]{24}$/.test(v)) {
+      throw new Error("Invalid Category");
+    }
+    return true;
+  }),
 ];
 
 // Update Contact Validation
@@ -255,6 +268,19 @@ const updateContactValidation = [
       }
       return true;
     }),
+
+  // Spouse's profession Category (from the Company Category list) —
+  // compulsory for Couple, ignored for Single.
+  body("professionCategory").custom((value, { req }) => {
+    const v = String(value ?? "").trim();
+    if (req.body.relationship === "Couple" && !v) {
+      throw new Error("Category is required for Couple");
+    }
+    if (v && !/^[0-9a-fA-F]{24}$/.test(v)) {
+      throw new Error("Invalid Category");
+    }
+    return true;
+  }),
 ];
 
 // Validation Result
