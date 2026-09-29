@@ -67,14 +67,72 @@ const getAllEventHistory = async (query = {}) => {
   const page = parseInt(query.page) || 1;
   const limit = parseInt(query.limit) || 10;
 
-  const total = await ContactEventHistory.countDocuments(filter);
+  // One ROW per person (same contact + same isSpouse flag => same mobile
+  // number), carrying ALL of that person's editions inside `entries`.
+  // Grouping happens in the database so pagination counts people, not
+  // individual (contact, edition) entries.
+  const toObjectId = (v) => new mongoose.Types.ObjectId(v);
+  const matchStage = { ...filter };
+  if (matchStage.contactId) matchStage.contactId = toObjectId(matchStage.contactId);
+  if (matchStage.editionId) matchStage.editionId = toObjectId(matchStage.editionId);
 
-  const history = await ContactEventHistory.find(filter)
-    .populate("contactId", "fullName whatsappNumber spouseName spouseMobile")
-    .populate("editionId", "name editionNumber year status")
-    .sort({ createdAt: -1 })
-    .skip((page - 1) * limit)
-    .limit(limit);
+  const [agg] = await ContactEventHistory.aggregate([
+    { $match: matchStage },
+    {
+      $group: {
+        _id: { contactId: "$contactId", isSpouse: { $ifNull: ["$isSpouse", false] } },
+        latest: { $max: "$createdAt" },
+        entryIds: { $push: "$_id" },
+      },
+    },
+    { $sort: { latest: -1, "_id.contactId": 1 } },
+    {
+      $facet: {
+        meta: [{ $count: "total" }],
+        rows: [{ $skip: (page - 1) * limit }, { $limit: limit }],
+      },
+    },
+  ]);
+
+  const total = agg?.meta?.[0]?.total || 0;
+  const groups = agg?.rows || [];
+
+  const allIds = groups.flatMap((g) => g.entryIds);
+  const entries = allIds.length
+    ? await ContactEventHistory.find({ _id: { $in: allIds } })
+        .populate("contactId", "fullName whatsappNumber spouseName spouseMobile")
+        .populate("editionId", "name editionNumber year status")
+    : [];
+
+  const entryById = new Map(entries.map((e) => [String(e._id), e]));
+
+  const history = groups.map((g) => {
+    const groupEntries = g.entryIds
+      .map((id) => entryById.get(String(id)))
+      .filter(Boolean)
+      // oldest edition first (Parv6, Parv7, ...)
+      .sort(
+        (x, y) =>
+          (x.editionId?.editionNumber ?? 0) - (y.editionId?.editionNumber ?? 0) ||
+          new Date(x.createdAt) - new Date(y.createdAt)
+      );
+
+    const first = groupEntries[0];
+    return {
+      _id: `${g._id.contactId}:${g._id.isSpouse ? "spouse" : "main"}`,
+      contactId: first?.contactId || null,
+      isSpouse: g._id.isSpouse,
+      createdAt: g.latest,
+      entries: groupEntries.map((e) => ({
+        _id: e._id,
+        editionId: e.editionId,
+        status: e.status,
+        notes: e.notes,
+        source: e.source || "manual",
+        createdAt: e.createdAt,
+      })),
+    };
+  });
 
   return {
     message: history.length

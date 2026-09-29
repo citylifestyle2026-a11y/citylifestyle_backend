@@ -12,7 +12,8 @@
 // automatically when it doesn't exist yet). People are matched by their
 // 10-digit mobile number; a Contact is created when the number is new.
 // Running it again is safe: an existing (contact, edition) row is updated,
-// never duplicated.
+// never duplicated. A new number gets a hidden "historyOnly" Contact (the
+// history row needs a person to point at) — it is NOT listed in Contact List.
 const mongoose = require("mongoose");
 const BookingTicket = require("../models/bookingTicket.model");
 const Booking = require("../models/booking.model");
@@ -275,6 +276,8 @@ const syncFromEvent = async (data, adminId) => {
           fullName: nameOf(key).trim() || key,
           whatsappNumber: key,
           relationship: "Single",
+          // History only — must NOT show up in Contact List.
+          historyOnly: true,
           createdBy: adminId || null,
         })),
         { ordered: false }

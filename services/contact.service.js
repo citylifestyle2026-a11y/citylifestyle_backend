@@ -67,6 +67,7 @@ const createContact = async (data, adminId) => {
 
   const existingContact = await Contact.findOne({
     isDeleted: { $ne: true },
+    historyOnly: { $ne: true },
     whatsappNumber: trimmedWhatsappNumber,
     fullName: trimmedFullName,
   }).collation(CASE_INSENSITIVE_COLLATION);
@@ -85,6 +86,43 @@ const createContact = async (data, adminId) => {
       profession,
       professionCategory,
     });
+  }
+
+  // A history-only contact (made by Entry Report) with this number already
+  // exists: adding the contact manually now turns THAT record into a real,
+  // visible Contact instead of failing as a duplicate.
+  const historyOnlyContact = await Contact.findOne({
+    isDeleted: { $ne: true },
+    historyOnly: true,
+    whatsappNumber: trimmedWhatsappNumber,
+  });
+
+  if (historyOnlyContact) {
+    const promoted = await Contact.findOneAndUpdate(
+      { _id: historyOnlyContact._id },
+      {
+        fullName,
+        companyName,
+        designation,
+        address,
+        references: Array.isArray(references) ? references : [],
+        companyCategory: companyCategory || null,
+        email,
+        relationship,
+        spouseName,
+        spouseMobile,
+        profession,
+        professionCategory: professionCategory || null,
+        historyOnly: false,
+        createdBy: adminId || historyOnlyContact.createdBy,
+      },
+      { new: true, runValidators: true }
+    )
+      .populate("companyCategory", "name")
+      .populate("professionCategory", "name")
+      .populate("createdBy", "name");
+
+    return promoted;
   }
 
   await assertWhatsappNumberNotDuplicate(trimmedWhatsappNumber);
@@ -227,7 +265,9 @@ function buildContactQuery(query) {
     : "createdAt";
   const sortOrder = query.sortOrder === "asc" ? 1 : -1;
 
-  const filter = { isDeleted: { $ne: true } };
+  // historyOnly contacts (auto-created by Entry Report -> Event History) never
+  // appear in Contact List / export.
+  const filter = { isDeleted: { $ne: true }, historyOnly: { $ne: true } };
 
   if (search) {
     filter.$or = [

@@ -150,6 +150,16 @@ const contactSchema = new mongoose.Schema(
       default: "active",
     },
 
+    // true = created automatically by Entry Report -> Add to Event History
+    // (services/eventHistorySync.service.js) purely so the history row has
+    // a person to point at. Such contacts are NOT shown in Contact List;
+    // adding the same number manually later "promotes" it (see
+    // contact.service.js createContact).
+    historyOnly: {
+      type: Boolean,
+      default: false,
+    },
+
     // Soft-delete fields, same pattern already used on Event/Booking
     // (isDeleted / deletedAt / deletedBy) — deleting a contact never
     // hard-removes the document.
