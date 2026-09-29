@@ -398,6 +398,9 @@ const exportContacts = async (query, res) => {
     { header: "Designation", key: "designation", width: 22 },
     { header: "Company Category", key: "companyCategory", width: 22 },
     { header: "Address", key: "address", width: 30 },
+    { header: "Spouse Name", key: "spouseName", width: 25 },
+    { header: "Spouse Mobile Number", key: "spouseMobile", width: 22 },
+    { header: "Profession", key: "profession", width: 22 },
     { header: "Reference", key: "references", width: 30 },
     { header: "Created At", key: "createdAt", width: 22 },
   ];
@@ -422,6 +425,24 @@ const exportContacts = async (query, res) => {
   };
 
   // ================= ROWS =================
+  // When a Company Category filter is selected, a Couple contact can match
+  // in two different ways, and the export must only show the person who
+  // actually belongs to that category:
+  //   - the contact's OWN companyCategory is the selected one  -> only the
+  //     contact's details are shown (spouse columns stay "-")
+  //   - the SPOUSE's professionCategory is the selected one     -> only the
+  //     spouse's details are shown (the contact's own name / number /
+  //     company / designation stay "-")
+  //   - both are the selected category                          -> both shown
+  // With no category filter, every contact is exported in full (own
+  // details + spouse details), exactly like the Contact List table.
+  const selectedCategoryId = query.companyCategory
+    ? String(query.companyCategory)
+    : null;
+
+  const idOf = (category) =>
+    category && category._id ? String(category._id) : null;
+
   contacts.forEach((contact) => {
     const references = Array.isArray(contact.references)
       ? contact.references.filter(
@@ -429,18 +450,42 @@ const exportContacts = async (query, res) => {
         )
       : [];
 
+    let showOwn = true;
+    let showSpouse = true;
+
+    if (selectedCategoryId) {
+      const ownMatches = idOf(contact.companyCategory) === selectedCategoryId;
+      const spouseMatches =
+        idOf(contact.professionCategory) === selectedCategoryId;
+
+      showOwn = ownMatches;
+      showSpouse = spouseMatches;
+    }
+
+    let categoryNames;
+    if (selectedCategoryId) {
+      categoryNames = [
+        showOwn ? contact.companyCategory?.name : null,
+        showSpouse ? contact.professionCategory?.name : null,
+      ];
+    } else {
+      categoryNames = [
+        contact.companyCategory?.name,
+        contact.professionCategory?.name,
+      ];
+    }
+
     worksheet.addRow({
-      fullName: contact.fullName || "-",
-      whatsappNumber: contact.whatsappNumber || "-",
-      companyName: contact.companyName || "-",
-      designation: contact.designation || "-",
+      fullName: (showOwn && contact.fullName) || "-",
+      whatsappNumber: (showOwn && contact.whatsappNumber) || "-",
+      companyName: (showOwn && contact.companyName) || "-",
+      designation: (showOwn && contact.designation) || "-",
       companyCategory:
-        [
-          ...new Set(
-            [contact.companyCategory?.name, contact.professionCategory?.name].filter(Boolean)
-          ),
-        ].join(", ") || "-",
+        [...new Set(categoryNames.filter(Boolean))].join(", ") || "-",
       address: contact.address || "-",
+      spouseName: (showSpouse && contact.spouseName) || "-",
+      spouseMobile: (showSpouse && contact.spouseMobile) || "-",
+      profession: (showSpouse && contact.profession) || "-",
       references: references.length ? references.join(", ") : "-",
       createdAt: contact.createdAt
         ? new Date(contact.createdAt).toLocaleString("en-GB")

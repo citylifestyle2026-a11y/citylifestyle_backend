@@ -1,19 +1,19 @@
 const mongoose = require("mongoose");
 const ContactEventHistory = require("../models/contactEventHistory.model");
 const Contact = require("../models/contact.model");
-const Edition = require("../models/edition.model");
+const Event = require("../models/event.model");
 const AppError = require("../utils/AppError");
 
 // ================= CREATE EVENT HISTORY =================
 // `adminId` always comes from the authenticated user (req.user.id in
 // the controller), never from req.body — same convention already used
-// by contactService.createContact / editionService.createEdition.
+// by contactService.createContact.
 const createEventHistory = async (data, adminId) => {
-  const { contactId, editionId, status, notes } = data;
+  const { contactId, eventId, status, notes } = data;
   const isSpouse = data.isSpouse === true || data.isSpouse === "true";
 
   await assertContactExists(contactId);
-  await assertEditionExists(editionId);
+  await assertEventExists(eventId);
 
   // A spouse entry is only valid for a Couple contact that actually has
   // a spouse recorded.
@@ -28,7 +28,7 @@ const createEventHistory = async (data, adminId) => {
 
   const history = await ContactEventHistory.create({
     contactId,
-    editionId,
+    eventId,
     isSpouse,
     status: status || "Invited",
     notes: notes || "",
@@ -41,7 +41,7 @@ const createEventHistory = async (data, adminId) => {
 // ================= GET ALL EVENT HISTORY (ALL CONTACTS) =================
 // Powers the standalone Sidebar "Event History" page (not scoped to one
 // contact) — every entry, across every contact, with both contactId and
-// editionId populated. Supports optional ?contactId=&editionId=&status=
+// eventId populated. Supports optional ?contactId=&eventId=&status=
 // &page=&limit= filters.
 const getAllEventHistory = async (query = {}) => {
   const filter = { isDeleted: { $ne: true } };
@@ -53,11 +53,11 @@ const getAllEventHistory = async (query = {}) => {
     filter.contactId = query.contactId;
   }
 
-  if (query.editionId) {
-    if (!mongoose.Types.ObjectId.isValid(query.editionId)) {
-      throw new AppError("Invalid Edition ID", 400);
+  if (query.eventId) {
+    if (!mongoose.Types.ObjectId.isValid(query.eventId)) {
+      throw new AppError("Invalid Event ID", 400);
     }
-    filter.editionId = query.editionId;
+    filter.eventId = query.eventId;
   }
 
   if (query.status) {
@@ -68,13 +68,13 @@ const getAllEventHistory = async (query = {}) => {
   const limit = parseInt(query.limit) || 10;
 
   // One ROW per person (same contact + same isSpouse flag => same mobile
-  // number), carrying ALL of that person's editions inside `entries`.
+  // number), carrying ALL of that person's events inside `entries`.
   // Grouping happens in the database so pagination counts people, not
-  // individual (contact, edition) entries.
+  // individual (contact, event) entries.
   const toObjectId = (v) => new mongoose.Types.ObjectId(v);
   const matchStage = { ...filter };
   if (matchStage.contactId) matchStage.contactId = toObjectId(matchStage.contactId);
-  if (matchStage.editionId) matchStage.editionId = toObjectId(matchStage.editionId);
+  if (matchStage.eventId) matchStage.eventId = toObjectId(matchStage.eventId);
 
   const [agg] = await ContactEventHistory.aggregate([
     { $match: matchStage },
@@ -101,7 +101,7 @@ const getAllEventHistory = async (query = {}) => {
   const entries = allIds.length
     ? await ContactEventHistory.find({ _id: { $in: allIds } })
         .populate("contactId", "fullName whatsappNumber spouseName spouseMobile")
-        .populate("editionId", "name editionNumber year status")
+        .populate("eventId", "title startDateTime endDateTime venueName status")
     : [];
 
   const entryById = new Map(entries.map((e) => [String(e._id), e]));
@@ -110,10 +110,10 @@ const getAllEventHistory = async (query = {}) => {
     const groupEntries = g.entryIds
       .map((id) => entryById.get(String(id)))
       .filter(Boolean)
-      // oldest edition first (Parv6, Parv7, ...)
+      // oldest event first (by event date)
       .sort(
         (x, y) =>
-          (x.editionId?.editionNumber ?? 0) - (y.editionId?.editionNumber ?? 0) ||
+          new Date(x.eventId?.startDateTime || 0) - new Date(y.eventId?.startDateTime || 0) ||
           new Date(x.createdAt) - new Date(y.createdAt)
       );
 
@@ -125,7 +125,7 @@ const getAllEventHistory = async (query = {}) => {
       createdAt: g.latest,
       entries: groupEntries.map((e) => ({
         _id: e._id,
-        editionId: e.editionId,
+        eventId: e.eventId,
         status: e.status,
         notes: e.notes,
         source: e.source || "manual",
@@ -151,7 +151,7 @@ const getAllEventHistory = async (query = {}) => {
 // ================= GET EVENT HISTORY BY CONTACT =================
 // Supports optional ?page=&limit= — omit both to get the full,
 // unpaginated timeline (the page's default view), same "pass what you
-// need" shape as getAllEditions's own page/limit query params.
+// need" shape as getAllEvents's own page/limit query params.
 const getEventHistoryByContact = async (contactId, query = {}) => {
   await assertContactExists(contactId);
 
@@ -161,7 +161,7 @@ const getEventHistoryByContact = async (contactId, query = {}) => {
   const limit = parseInt(query.limit) || 0; // 0 = no pagination applied below
 
   const baseQuery = ContactEventHistory.find(filter)
-    .populate("editionId", "name editionNumber year status")
+    .populate("eventId", "title startDateTime endDateTime venueName status")
     .sort({ createdAt: -1 });
 
   const total = await ContactEventHistory.countDocuments(filter);
@@ -187,7 +187,7 @@ const getEventHistoryByContact = async (contactId, query = {}) => {
 // ================= UPDATE EVENT HISTORY =================
 // contactId is intentionally never accepted here — an entry always
 // stays attached to the contact it was created under; only
-// editionId/status/notes (the form's own fields, per this step's
+// eventId/status/notes (the form's own fields, per this step's
 // spec) are editable.
 const updateEventHistory = async (id, data) => {
   if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -203,9 +203,9 @@ const updateEventHistory = async (id, data) => {
     throw new AppError("Event history entry not found", 404);
   }
 
-  if (data.editionId) {
-    await assertEditionExists(data.editionId);
-    history.editionId = data.editionId;
+  if (data.eventId) {
+    await assertEventExists(data.eventId);
+    history.eventId = data.eventId;
   }
 
   if (data.status !== undefined) {
@@ -262,29 +262,29 @@ async function assertContactExists(contactId) {
   }
 }
 
-async function assertEditionExists(editionId) {
-  if (!mongoose.Types.ObjectId.isValid(editionId)) {
-    throw new AppError("Invalid Edition ID", 400);
+async function assertEventExists(eventId) {
+  if (!mongoose.Types.ObjectId.isValid(eventId)) {
+    throw new AppError("Invalid Event ID", 400);
   }
 
-  const edition = await Edition.findOne({
-    _id: editionId,
+  const event = await Event.findOne({
+    _id: eventId,
     isDeleted: { $ne: true },
   }).select("_id");
 
-  if (!edition) {
-    throw new AppError("Edition not found", 404);
+  if (!event) {
+    throw new AppError("Event not found", 404);
   }
 }
 
-// Re-fetches with the Edition populated the same way the list endpoint
+// Re-fetches with the Event populated the same way the list endpoint
 // returns it, so create/update responses match getEventHistoryByContact's
 // shape exactly (the frontend can drop either straight into its list
 // state without a refetch).
 async function populateHistory(history) {
   return ContactEventHistory.findById(history._id).populate(
-    "editionId",
-    "name editionNumber year status"
+    "eventId",
+    "title startDateTime endDateTime venueName status"
   );
 }
 

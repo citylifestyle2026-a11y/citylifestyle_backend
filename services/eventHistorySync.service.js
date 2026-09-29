@@ -8,26 +8,19 @@
 //   - every person who BOOKED but was never scanned
 //                                      -> status "Not Attended" (red)
 //
-// The edition used is the one carrying the event's own name (created
-// automatically when it doesn't exist yet). People are matched by their
+// Rows point straight at the Event. People are matched by their
 // 10-digit mobile number; a Contact is created when the number is new.
-// Running it again is safe: an existing (contact, edition) row is updated,
+// Running it again is safe: an existing (contact, event) row is updated,
 // never duplicated. A new number gets a hidden "historyOnly" Contact (the
 // history row needs a person to point at) — it is NOT listed in Contact List.
 const mongoose = require("mongoose");
 const BookingTicket = require("../models/bookingTicket.model");
 const Booking = require("../models/booking.model");
 const Event = require("../models/event.model");
-const Edition = require("../models/edition.model");
 const Contact = require("../models/contact.model");
 const ContactEventHistory = require("../models/contactEventHistory.model");
 const AppError = require("../utils/AppError");
 const { toLocalMobileNumber } = require("../utils/normalizeMobileNumber");
-const {
-  normalizeEditionName,
-  isSameDateTime,
-  formatIst,
-} = require("../utils/editionEventMatch");
 
 const SOURCE = "entry-report";
 
@@ -46,74 +39,6 @@ const loadEvent = async (eventId) => {
   }
 
   return event;
-};
-
-// ================= EDITION (SAME NAME AS THE EVENT) =================
-// create=false only looks (used by the confirmation summary, so a name /
-// date conflict is shown BEFORE the admin confirms). create=true also
-// creates the edition when it does not exist yet.
-const resolveEdition = async (event, adminId, { create }) => {
-  const editions = await Edition.find({ isDeleted: { $ne: true } })
-    .select("name editionNumber eventDateTime")
-    .lean();
-
-  const key = normalizeEditionName(event.title);
-  const existing = editions.find((e) => normalizeEditionName(e.name) === key);
-
-  if (existing) {
-    if (
-      existing.eventDateTime &&
-      !isSameDateTime(existing.eventDateTime, event.startDateTime)
-    ) {
-      throw new AppError(
-        `Edition "${existing.name}" has a different date & time (${formatIst(
-          existing.eventDateTime
-        )}) than the event "${event.title}" (${formatIst(
-          event.startDateTime
-        )}). Please make them the same, then try again.`,
-        409
-      );
-    }
-
-    if (create && !existing.eventDateTime) {
-      await Edition.updateOne(
-        { _id: existing._id },
-        { $set: { eventDateTime: event.startDateTime } }
-      );
-    }
-
-    return { edition: existing, isNew: false };
-  }
-
-  // Edition number: the number written in the event name ("Parv 5" -> 5),
-  // or the next free number when there is none / it is already taken.
-  const used = new Set(editions.map((e) => e.editionNumber));
-  const match =
-    String(event.title).match(/(\d+)\s*$/) || String(event.title).match(/(\d+)/);
-  let editionNumber = match ? Number(match[1]) : 0;
-
-  if (!Number.isInteger(editionNumber) || editionNumber < 1 || used.has(editionNumber)) {
-    editionNumber = Math.max(0, ...used) + 1;
-  }
-
-  if (!create) {
-    return {
-      edition: { name: event.title, editionNumber },
-      isNew: true,
-    };
-  }
-
-  const edition = await Edition.create({
-    name: String(event.title).trim(),
-    editionNumber,
-    year: new Date(event.startDateTime).getFullYear(),
-    eventDateTime: event.startDateTime,
-    venue: event.venueName || "",
-    status: "Active",
-    createdBy: adminId || null,
-  });
-
-  return { edition, isNew: true };
 };
 
 // ================= PEOPLE OF AN EVENT =================
@@ -177,12 +102,8 @@ const getSyncSummary = async (eventId) => {
   const event = await loadEvent(eventId);
   const { registered, usedKeys, skippedInvalid } = await loadEventPeople(event._id);
 
-  const { edition, isNew } = await resolveEdition(event, null, { create: false });
-
   return {
     event: { _id: event._id, title: event.title, startDateTime: event.startDateTime },
-    editionName: edition.name,
-    editionIsNew: isNew,
     registeredCount: registered.size,
     enteredCount: usedKeys.size,
     notEnteredCount: registered.size - [...registered.keys()].filter((k) => usedKeys.has(k)).length,
@@ -240,11 +161,6 @@ const syncFromEvent = async (data, adminId) => {
     if (!usedKeys.has(key)) notAttended.set(key, name);
   }
 
-  // ---- edition (same name as the event) ----
-  const { edition, isNew: editionCreated } = await resolveEdition(event, adminId, {
-    create: true,
-  });
-
   // ---- contacts (matched by mobile number, created when new) ----
   const allKeys = [...attended.keys(), ...notAttended.keys()];
 
@@ -293,7 +209,7 @@ const syncFromEvent = async (data, adminId) => {
   // ---- history rows ----
   const contactIds = [...contactByKey.values()];
   const existingRows = await ContactEventHistory.find({
-    editionId: edition._id,
+    eventId: event._id,
     contactId: { $in: contactIds },
     isSpouse: { $ne: true },
     isDeleted: { $ne: true },
@@ -320,7 +236,7 @@ const syncFromEvent = async (data, adminId) => {
     if (!row) {
       toInsert.push({
         contactId,
-        editionId: edition._id,
+        eventId: event._id,
         status: "Attended",
         notes: `Attended ${event.title} (added from Entry Report)`,
         source: SOURCE,
@@ -358,7 +274,7 @@ const syncFromEvent = async (data, adminId) => {
 
     toInsert.push({
       contactId,
-      editionId: edition._id,
+      eventId: event._id,
       status: "Not Attended",
       notes: `Booked ${event.title} but did not attend (added from Entry Report)`,
       source: SOURCE,
@@ -372,8 +288,6 @@ const syncFromEvent = async (data, adminId) => {
 
   return {
     event: { _id: event._id, title: event.title },
-    edition: { _id: edition._id, name: edition.name },
-    editionCreated,
     registeredCount: registered.size,
     attendedCount: attended.size,
     notAttendedCount: notAttended.size,

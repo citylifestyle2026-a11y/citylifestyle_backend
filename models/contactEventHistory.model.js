@@ -1,29 +1,15 @@
 const mongoose = require("mongoose");
 
 /**
- * ContactEventHistory Model — Contact List, Event History (Step 4)
+ * ContactEventHistory Model — Contact List, Event History
  *
- * One row per (Contact, Edition) interaction — "this Contact's
- * status/notes for this Edition" — surfaced on the Contact List's
- * Event History page (Contact List -> Event History -> per-contact
- * timeline). This is intentionally its own model, NOT a reuse of
- * GuestEditionHistory: that model is scoped to Guest (PARV CRM) and is
- * off-limits per this step's instructions ("Do NOT touch
- * Guest/Edition/Nomination/Coordinator backend"). Contact and Guest are
- * separate identities in this system, so their event/edition history
- * needs its own separate collection rather than overloading Guest's.
+ * One row per (Contact, Event) interaction — "this Contact's status/notes
+ * for this Event" — shown on the Event History page. It points straight at
+ * the Event (models/event.model.js); there is no separate Edition master
+ * data any more.
  *
- * Referencing "Edition" (not the older "Event" model) since Event
- * History here is being modeled on the same existing Edition master
- * data already used elsewhere (see the Nomination/GuestEditionHistory
- * models) — the requirement explicitly calls for "Edition dropdown
- * using existing Edition API".
- *
- * NOT unique per (contactId, editionId) on purpose — the page lets an
- * admin "Add Details" as a fresh history entry, so a contact can have
- * more than one dated entry against the same edition over time (e.g.
- * an initial "Invited" row and a later "Attended" row), same as how a
- * running log/timeline works elsewhere in this app (Entry Report).
+ * NOT unique per (contactId, eventId) on purpose: the admin can add an
+ * entry manually, and Entry Report -> Add to Event History adds its own.
  */
 const STATUS_VALUES = [
   "Invited",
@@ -41,9 +27,9 @@ const contactEventHistorySchema = new mongoose.Schema(
       required: true,
     },
 
-    editionId: {
+    eventId: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: "Edition",
+      ref: "Event",
       required: true,
     },
 
@@ -78,7 +64,7 @@ const contactEventHistorySchema = new mongoose.Schema(
     },
 
     // Soft-delete — same convention as every other model in this
-    // project (Contact/Edition/Nomination/GuestEditionHistory).
+    // project (Contact/Event/Booking).
     isDeleted: {
       type: Boolean,
       default: false,
@@ -96,7 +82,7 @@ const contactEventHistorySchema = new mongoose.Schema(
     },
 
     // Tracks which Admin/User created this entry, same convention as
-    // Contact.createdBy / Edition.createdBy.
+    // Contact.createdBy.
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Admin",
@@ -112,10 +98,8 @@ const contactEventHistorySchema = new mongoose.Schema(
 // "This contact's event history, newest first" — the page's main query.
 contactEventHistorySchema.index({ contactId: 1, isDeleted: 1, createdAt: -1 });
 
-// "All history rows for this edition" — kept for symmetry with
-// GuestEditionHistory's own editionId index, useful for any future
-// cross-contact-by-edition view.
-contactEventHistorySchema.index({ editionId: 1 });
+// "All history rows for this event".
+contactEventHistorySchema.index({ eventId: 1 });
 
 // Exposed so the validator (and any future service) reads the exact
 // same allowed status values instead of a second hardcoded copy

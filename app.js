@@ -17,7 +17,7 @@ const roleRoutes = require("./routes/role.routes");
 const publicRegistrationRoutes = require("./routes/publicRegistration.routes");
 const contactRoutes = require("./routes/contact.routes");
 const contactEventHistoryRoutes = require("./routes/contactEventHistory.routes");
-const editionRoutes = require("./routes/edition.routes");
+// const editionRoutes = require("./routes/edition.routes");
 const companyCategoryRoutes = require("./routes/companycategory.routes");
 
 const app = express();
@@ -85,7 +85,7 @@ app.use("/api/contact-event-history", contactEventHistoryRoutes);
 // editions — kept as shared master data for Contact Event History's
 // Edition dropdown (see models/contactEventHistory.model.js), even
 // though Guest/Nomination/Coordinator (PARV CRM) were removed.
-app.use("/api/editions", editionRoutes);
+// app.use("/api/editions", editionRoutes);
 // company categories (same as above — was implemented but never mounted)
 app.use("/api/company-categories", companyCategoryRoutes);
 
