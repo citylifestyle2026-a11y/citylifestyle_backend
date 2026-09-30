@@ -11,7 +11,10 @@
 // not scanned is NOT sent to Event History at all.
 //
 // Rows point straight at the Event. People are matched by their
-// 10-digit mobile number; a Contact is created when the number is new.
+// 10-digit mobile number AND their name: a husband and wife who registered
+// with the SAME mobile number (different names) are TWO people, so they get
+// two rows — the first name on the Contact itself, the second one as the
+// contact's spouse (isSpouse = true). A Contact is created when the number is new.
 // Running it again is safe: an existing (contact, event) row is updated,
 // never duplicated. A new number gets a hidden "historyOnly" Contact (the
 // history row needs a person to point at) — it is NOT listed in Contact List.
@@ -23,6 +26,10 @@ const Contact = require("../models/contact.model");
 const ContactEventHistory = require("../models/contactEventHistory.model");
 const AppError = require("../utils/AppError");
 const { toLocalMobileNumber } = require("../utils/normalizeMobileNumber");
+const {
+  nameSimilarityScore,
+  POSSIBLE_DUPLICATE_THRESHOLD,
+} = require("../utils/nameSimilarity");
 
 const SOURCE = "entry-report";
 
@@ -68,10 +75,31 @@ const loadEventPeople = async (eventId) => {
 
   const bookingById = new Map(bookings.map((b) => [String(b._id), b]));
 
-  const personByTicket = new Map(); // ticketId -> { key, name, used }
-  const registered = new Map(); // key -> name   (everyone who registered or was scanned)
-  const usedKeys = new Set(); // keys with at least one scanned ticket
+  const personByTicket = new Map(); // ticketId -> { key, mobile, name, used }
+  const registered = new Map(); // personKey -> name (everyone who registered or was scanned)
+  const usedKeys = new Set(); // personKeys with at least one scanned ticket
+  const personMeta = new Map(); // personKey -> { mobile, name, index }
+  const peopleByMobile = new Map(); // mobile -> [personKey, ...] in first-seen order
   let skippedInvalid = 0;
+
+  // Same mobile + similar name => same person (typo / "Mr." tolerant).
+  // Same mobile + clearly different name => a different person (wife/husband),
+  // which gets its own key "<mobile>#<n>".
+  const resolvePersonKey = (mobile, name) => {
+    const keys = peopleByMobile.get(mobile) || [];
+
+    for (const key of keys) {
+      const known = personMeta.get(key).name;
+      // A blank name can't be told apart — treat it as the first person.
+      if (!name || !known) return key;
+      if (nameSimilarityScore(name, known) >= POSSIBLE_DUPLICATE_THRESHOLD) return key;
+    }
+
+    const key = `${mobile}#${keys.length}`;
+    personMeta.set(key, { mobile, name: name || "", index: keys.length });
+    peopleByMobile.set(mobile, [...keys, key]);
+    return key;
+  };
 
   for (const ticket of tickets) {
     const booking = bookingById.get(String(ticket.bookingId));
@@ -80,19 +108,27 @@ const loadEventPeople = async (eventId) => {
     // Booking only (not registered, not scanned) -> not part of history.
     if (!ticket.isRegistered && ticket.status !== "Used") continue;
 
-    const attendeeKey = toLocalMobileNumber(ticket.attendee?.mobileNumber);
-    const key = attendeeKey || toLocalMobileNumber(booking.mobileNumber);
+    const attendeeMobile = toLocalMobileNumber(ticket.attendee?.mobileNumber);
+    const mobile = attendeeMobile || toLocalMobileNumber(booking.mobileNumber);
 
-    if (!key) {
+    if (!mobile) {
       skippedInvalid += 1;
       continue;
     }
 
-    const name =
-      (attendeeKey ? ticket.attendee?.name : booking.name) || booking.name || "";
+    const name = (
+      (attendeeMobile ? ticket.attendee?.name : booking.name) ||
+      booking.name ||
+      ""
+    ).trim();
     const used = ticket.status === "Used";
 
-    personByTicket.set(String(ticket._id), { key, name, used });
+    const key = resolvePersonKey(mobile, name);
+
+    // Fill in a blank name if a later ticket of the same person has one.
+    if (name && !personMeta.get(key).name) personMeta.get(key).name = name;
+
+    personByTicket.set(String(ticket._id), { key, mobile, name, used });
 
     if (!registered.has(key) || (!registered.get(key) && name)) {
       registered.set(key, name);
@@ -101,7 +137,7 @@ const loadEventPeople = async (eventId) => {
     if (used) usedKeys.add(key);
   }
 
-  return { personByTicket, registered, usedKeys, skippedInvalid };
+  return { personByTicket, registered, usedKeys, personMeta, skippedInvalid };
 };
 
 // ================= SUMMARY (for the confirmation popup) =================
@@ -133,7 +169,7 @@ const syncFromEvent = async (data, adminId) => {
   }
 
   const event = await loadEvent(eventId);
-  const { personByTicket, registered, usedKeys, skippedInvalid } =
+  const { personByTicket, registered, usedKeys, personMeta, skippedInvalid } =
     await loadEventPeople(event._id);
 
   // ---- who attended (the selected, scanned tickets) ----
@@ -169,40 +205,57 @@ const syncFromEvent = async (data, adminId) => {
   }
 
   // ---- contacts (matched by mobile number, created when new) ----
+  // allKeys are PERSON keys ("<mobile>#<n>"); a Contact is per MOBILE, so a
+  // wife + husband on one number share ONE contact.
   const allKeys = [...attended.keys(), ...notAttended.keys()];
+  const nameOf = (key) => attended.get(key) || notAttended.get(key) || "";
+
+  // mobile -> [personKey...] (only people being saved now, first-seen order)
+  const peopleByMobile = new Map();
+  for (const key of allKeys) {
+    const mobile = personMeta.get(key).mobile;
+    if (!peopleByMobile.has(mobile)) peopleByMobile.set(mobile, []);
+    peopleByMobile.get(mobile).push(key);
+  }
+  for (const list of peopleByMobile.values()) {
+    list.sort((x, y) => personMeta.get(x).index - personMeta.get(y).index);
+  }
+  const mobiles = [...peopleByMobile.keys()];
 
   const loadContacts = async () => {
     const found = await Contact.find({
       isDeleted: { $ne: true },
-      whatsappNumber: { $in: [...allKeys, ...allKeys.map((k) => `91${k}`)] },
+      whatsappNumber: { $in: [...mobiles, ...mobiles.map((k) => `91${k}`)] },
     })
-      .select("_id whatsappNumber")
+      .select("_id whatsappNumber fullName relationship spouseName spouseMobile")
       .lean();
 
     const map = new Map();
     for (const contact of found) {
-      const key = toLocalMobileNumber(contact.whatsappNumber) || contact.whatsappNumber;
-      if (!map.has(key)) map.set(key, contact._id);
+      const mobile = toLocalMobileNumber(contact.whatsappNumber) || contact.whatsappNumber;
+      if (!map.has(mobile)) map.set(mobile, contact);
     }
     return map;
   };
 
-  let contactByKey = await loadContacts();
+  let contactByMobile = await loadContacts();
 
-  const nameOf = (key) => attended.get(key) || notAttended.get(key) || "";
-  const missing = allKeys.filter((key) => !contactByKey.has(key));
+  const missing = mobiles.filter((mobile) => !contactByMobile.has(mobile));
 
   if (missing.length > 0) {
     try {
       await Contact.insertMany(
-        missing.map((key) => ({
-          fullName: nameOf(key).trim() || key,
-          whatsappNumber: key,
-          relationship: "Single",
-          // History only — must NOT show up in Contact List.
-          historyOnly: true,
-          createdBy: adminId || null,
-        })),
+        missing.map((mobile) => {
+          const first = peopleByMobile.get(mobile)[0];
+          return {
+            fullName: nameOf(first).trim() || mobile,
+            whatsappNumber: mobile,
+            relationship: "Single",
+            // History only — must NOT show up in Contact List.
+            historyOnly: true,
+            createdBy: adminId || null,
+          };
+        }),
         { ordered: false }
       );
     } catch (error) {
@@ -210,21 +263,78 @@ const syncFromEvent = async (data, adminId) => {
       if (error.code !== 11000 && !error.writeErrors) throw error;
     }
 
-    contactByKey = await loadContacts();
+    contactByMobile = await loadContacts();
   }
 
+  // ---- decide, per mobile, who is the contact and who is the spouse ----
+  const similar = (a, b) =>
+    !!a && !!b && nameSimilarityScore(a, b) >= POSSIBLE_DUPLICATE_THRESHOLD;
+
+  // personKey -> { contactId, isSpouse }
+  const slotByPerson = new Map();
+  const contactUpdates = [];
+  let spouseLinked = 0;
+  let unresolvedSameMobile = 0;
+
+  for (const [mobile, keys] of peopleByMobile) {
+    const contact = contactByMobile.get(mobile);
+    if (!contact) continue;
+
+    let mainKey = keys.find((k) => similar(nameOf(k), contact.fullName)) || null;
+    let spouseKey =
+      keys.find((k) => k !== mainKey && similar(nameOf(k), contact.spouseName)) || null;
+
+    // Names don't match the contact at all (e.g. the contact was typed
+    // differently): fall back to first-come = contact, next = spouse.
+    if (!mainKey) mainKey = keys.find((k) => k !== spouseKey) || null;
+
+    let newSpouse = null;
+    if (!spouseKey && !contact.spouseName) {
+      spouseKey = keys.find((k) => k !== mainKey) || null;
+      newSpouse = spouseKey;
+    }
+
+    if (mainKey) slotByPerson.set(mainKey, { contactId: contact._id, isSpouse: false });
+    if (spouseKey) slotByPerson.set(spouseKey, { contactId: contact._id, isSpouse: true });
+
+    // A 3rd different name on one number can't be stored (a contact has
+    // only one spouse slot) — counted and reported instead of merged.
+    unresolvedSameMobile += keys.filter((k) => !slotByPerson.has(k)).length;
+
+    // Remember the spouse on the contact so the row can show name + number.
+    if (newSpouse) {
+      contactUpdates.push({
+        updateOne: {
+          filter: { _id: contact._id },
+          update: {
+            $set: {
+              relationship: "Couple",
+              spouseName: nameOf(newSpouse).trim() || mobile,
+              spouseMobile: mobile,
+            },
+          },
+        },
+      });
+      spouseLinked += 1;
+    }
+  }
+
+  if (contactUpdates.length > 0) await Contact.bulkWrite(contactUpdates);
+
   // ---- history rows ----
-  const contactIds = [...contactByKey.values()];
+  const contactIds = [...new Set([...slotByPerson.values()].map((s) => s.contactId))];
   const existingRows = await ContactEventHistory.find({
     eventId: event._id,
     contactId: { $in: contactIds },
-    isSpouse: { $ne: true },
     isDeleted: { $ne: true },
   })
-    .select("contactId status notes")
+    .select("contactId isSpouse status notes")
     .lean();
 
-  const rowByContact = new Map(existingRows.map((r) => [String(r.contactId), r]));
+  const rowKeyOf = (contactId, isSpouse) => `${contactId}:${isSpouse ? 1 : 0}`;
+  const rowBySlot = new Map(
+    existingRows.map((r) => [rowKeyOf(r.contactId, r.isSpouse), r])
+  );
 
   const toInsert = [];
   const updates = [];
@@ -235,15 +345,16 @@ const syncFromEvent = async (data, adminId) => {
   let notAttendedKept = 0;
 
   for (const key of attended.keys()) {
-    const contactId = contactByKey.get(key);
-    if (!contactId) continue;
+    const slot = slotByPerson.get(key);
+    if (!slot) continue;
 
-    const row = rowByContact.get(String(contactId));
+    const row = rowBySlot.get(rowKeyOf(slot.contactId, slot.isSpouse));
 
     if (!row) {
       toInsert.push({
-        contactId,
+        contactId: slot.contactId,
         eventId: event._id,
+        isSpouse: slot.isSpouse,
         status: "Attended",
         notes: `Attended ${event.title} (added from Entry Report)`,
         source: SOURCE,
@@ -269,19 +380,20 @@ const syncFromEvent = async (data, adminId) => {
   }
 
   for (const key of notAttended.keys()) {
-    const contactId = contactByKey.get(key);
-    if (!contactId) continue;
+    const slot = slotByPerson.get(key);
+    if (!slot) continue;
 
     // An existing row (even a manually edited one) is never overwritten by
     // a "Not Attended" — only an "Attended" may replace it.
-    if (rowByContact.has(String(contactId))) {
+    if (rowBySlot.has(rowKeyOf(slot.contactId, slot.isSpouse))) {
       notAttendedKept += 1;
       continue;
     }
 
     toInsert.push({
-      contactId,
+      contactId: slot.contactId,
       eventId: event._id,
+      isSpouse: slot.isSpouse,
       status: "Not Attended",
       notes: `Registered for ${event.title} but did not attend (added from Entry Report)`,
       source: SOURCE,
@@ -299,6 +411,8 @@ const syncFromEvent = async (data, adminId) => {
     attendedCount: attended.size,
     notAttendedCount: notAttended.size,
     contactsCreated: missing.length,
+    spouseLinked,
+    unresolvedSameMobile,
     attendedAdded,
     attendedUpdated,
     attendedUnchanged,
