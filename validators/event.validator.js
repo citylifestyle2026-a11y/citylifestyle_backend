@@ -7,6 +7,11 @@ const createEventValidation = [
     .notEmpty()
     .withMessage("Title is required"),
 
+  body("edition")
+    .trim()
+    .notEmpty()
+    .withMessage("Edition is required"),
+
   body("description")
     .trim()
     .notEmpty()
@@ -102,6 +107,12 @@ const updateEventValidation = [
     .trim()
     .notEmpty()
     .withMessage("Title cannot be empty"),
+
+  body("edition")
+    .optional()
+    .trim()
+    .notEmpty()
+    .withMessage("Edition cannot be empty"),
 
   body("description")
     .optional()

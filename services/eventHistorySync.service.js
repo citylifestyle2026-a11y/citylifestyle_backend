@@ -5,8 +5,10 @@
 // For ONE event (e.g. "Parv 5") this saves, in one go, into
 // ContactEventHistory:
 //   - every SELECTED scanned person   -> status "Attended"      (green)
-//   - every person who BOOKED but was never scanned
+//   - every person who REGISTERED but was never scanned
 //                                      -> status "Not Attended" (red)
+// Someone who only has a booking (never completed registration) and was
+// not scanned is NOT sent to Event History at all.
 //
 // Rows point straight at the Event. People are matched by their
 // 10-digit mobile number; a Contact is created when the number is new.
@@ -42,14 +44,16 @@ const loadEvent = async (eventId) => {
 };
 
 // ================= PEOPLE OF AN EVENT =================
-// A ticket's person is its registered attendee when there is one,
-// otherwise the booking holder. Identified by 10-digit mobile number.
+// Only REGISTERED tickets (isRegistered) and scanned (Used) tickets count.
+// A ticket that is neither registered nor scanned is just a booking, so
+// it is skipped. A ticket's person is its registered attendee when there
+// is one, otherwise the booking holder. Identified by 10-digit mobile.
 const loadEventPeople = async (eventId) => {
   const tickets = await BookingTicket.find({
     eventId,
     status: { $ne: "Cancelled" },
   })
-    .select("bookingId status attendee.name attendee.mobileNumber")
+    .select("bookingId status isRegistered attendee.name attendee.mobileNumber")
     .lean();
 
   const bookingIds = [...new Set(tickets.map((t) => String(t.bookingId)))];
@@ -65,13 +69,16 @@ const loadEventPeople = async (eventId) => {
   const bookingById = new Map(bookings.map((b) => [String(b._id), b]));
 
   const personByTicket = new Map(); // ticketId -> { key, name, used }
-  const registered = new Map(); // key -> name   (everyone who booked)
+  const registered = new Map(); // key -> name   (everyone who registered or was scanned)
   const usedKeys = new Set(); // keys with at least one scanned ticket
   let skippedInvalid = 0;
 
   for (const ticket of tickets) {
     const booking = bookingById.get(String(ticket.bookingId));
     if (!booking) continue;
+
+    // Booking only (not registered, not scanned) -> not part of history.
+    if (!ticket.isRegistered && ticket.status !== "Used") continue;
 
     const attendeeKey = toLocalMobileNumber(ticket.attendee?.mobileNumber);
     const key = attendeeKey || toLocalMobileNumber(booking.mobileNumber);
@@ -155,7 +162,7 @@ const syncFromEvent = async (data, adminId) => {
     throw new AppError("None of the selected entries could be added", 400);
   }
 
-  // ---- who did not attend: booked, but no scanned ticket at all ----
+  // ---- who did not attend: registered, but no scanned ticket at all ----
   const notAttended = new Map();
   for (const [key, name] of registered) {
     if (!usedKeys.has(key)) notAttended.set(key, name);
@@ -276,7 +283,7 @@ const syncFromEvent = async (data, adminId) => {
       contactId,
       eventId: event._id,
       status: "Not Attended",
-      notes: `Booked ${event.title} but did not attend (added from Entry Report)`,
+      notes: `Registered for ${event.title} but did not attend (added from Entry Report)`,
       source: SOURCE,
       createdBy: adminId || null,
     });

@@ -60,6 +60,7 @@ exports.createEvent = async (data, file, adminId) => {
 
   const event = await Event.create({
     title: data.title,
+    edition: data.edition,
     description: data.description,
     startDateTime: data.startDateTime,
     endDateTime: data.endDateTime,
@@ -222,6 +223,7 @@ exports.updateEvent = async (id, data, file) => {
     id,
     {
       title: data.title,
+      edition: data.edition !== undefined ? data.edition : event.edition,
       description: data.description,
       startDateTime: data.startDateTime,
       endDateTime: data.endDateTime,

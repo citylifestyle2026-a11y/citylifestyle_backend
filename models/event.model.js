@@ -17,6 +17,15 @@ const eventSchema = new mongoose.Schema(
     // set, so it stays stable for the lifetime of the event.
     // `sparse: true` lets existing documents with no eventCode yet
     // coexist under the `unique` index until they're backfilled.
+    // Edition label of this event (e.g. "Parv 6"). Shown in Event History
+    // instead of the event title. Optional at schema level so events that
+    // existed before this field was added keep working (the UI falls back
+    // to the title when it is empty).
+    edition: {
+      type: String,
+      trim: true,
+      default: "",
+    },
     eventCode: {
       type: String,
       unique: true,

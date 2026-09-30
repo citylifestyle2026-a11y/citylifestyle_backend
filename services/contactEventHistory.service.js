@@ -101,7 +101,7 @@ const getAllEventHistory = async (query = {}) => {
   const entries = allIds.length
     ? await ContactEventHistory.find({ _id: { $in: allIds } })
         .populate("contactId", "fullName whatsappNumber spouseName spouseMobile")
-        .populate("eventId", "title startDateTime endDateTime venueName status")
+        .populate("eventId", "title edition startDateTime endDateTime venueName status")
     : [];
 
   const entryById = new Map(entries.map((e) => [String(e._id), e]));
@@ -161,7 +161,7 @@ const getEventHistoryByContact = async (contactId, query = {}) => {
   const limit = parseInt(query.limit) || 0; // 0 = no pagination applied below
 
   const baseQuery = ContactEventHistory.find(filter)
-    .populate("eventId", "title startDateTime endDateTime venueName status")
+    .populate("eventId", "title edition startDateTime endDateTime venueName status")
     .sort({ createdAt: -1 });
 
   const total = await ContactEventHistory.countDocuments(filter);
@@ -284,7 +284,7 @@ async function assertEventExists(eventId) {
 async function populateHistory(history) {
   return ContactEventHistory.findById(history._id).populate(
     "eventId",
-    "title startDateTime endDateTime venueName status"
+    "title edition startDateTime endDateTime venueName status"
   );
 }
 
