@@ -2,8 +2,7 @@ const { body, validationResult } = require("express-validator");
 
 // Must stay in sync with models/contactEventHistory.model.js's
 // STATUS_VALUES — duplicated locally here rather than imported, same
-// convention already used by validators/edition.validator.js's own
-// STATUS_VALUES for the Edition model.
+// convention used by the other validators.
 const STATUS_VALUES = [
   "Invited",
   "Confirmed",
@@ -21,12 +20,12 @@ const createEventHistoryValidation = [
     .isMongoId()
     .withMessage("Invalid Contact ID"),
 
-  body("editionId")
+  body("eventId")
     .notEmpty()
-    .withMessage("Edition is required")
+    .withMessage("Event is required")
     .bail()
     .isMongoId()
-    .withMessage("Invalid Edition ID"),
+    .withMessage("Invalid Event ID"),
 
   body("status")
     .optional()
@@ -46,10 +45,10 @@ const createEventHistoryValidation = [
 // attached to the contact it was created under (see
 // contactEventHistory.service.js's updateEventHistory).
 const updateEventHistoryValidation = [
-  body("editionId")
+  body("eventId")
     .optional()
     .isMongoId()
-    .withMessage("Invalid Edition ID"),
+    .withMessage("Invalid Event ID"),
 
   body("status")
     .optional()
