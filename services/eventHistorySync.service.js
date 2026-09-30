@@ -27,11 +27,30 @@ const ContactEventHistory = require("../models/contactEventHistory.model");
 const AppError = require("../utils/AppError");
 const { toLocalMobileNumber } = require("../utils/normalizeMobileNumber");
 const {
+  normalizeName,
   nameSimilarityScore,
   POSSIBLE_DUPLICATE_THRESHOLD,
 } = require("../utils/nameSimilarity");
 
 const SOURCE = "entry-report";
+
+// Same person? Tolerates typos ("Rahul Shah" / "Rahul Sha"), honorifics
+// ("Mr. Rahul Shah") and a shorter/longer form of the same name ("Kamlesh" /
+// "Kamlesh Patel"). "Rahul Shah" and "Priya Shah" (husband / wife) or
+// "Kamlesh" and "Mensi" are DIFFERENT people. A blank name can't be told
+// apart, so it is treated as a match.
+const isSamePerson = (nameA, nameB) => {
+  const a = normalizeName(nameA);
+  const b = normalizeName(nameB);
+  if (!a || !b) return true;
+  if (a === b) return true;
+  if (nameSimilarityScore(a, b) >= POSSIBLE_DUPLICATE_THRESHOLD) return true;
+
+  const tokensA = a.split(" ");
+  const tokensB = b.split(" ");
+  const [small, big] = tokensA.length <= tokensB.length ? [tokensA, tokensB] : [tokensB, tokensA];
+  return small.every((token) => big.includes(token));
+};
 
 // ================= EVENT =================
 const loadEvent = async (eventId) => {
@@ -90,9 +109,7 @@ const loadEventPeople = async (eventId) => {
 
     for (const key of keys) {
       const known = personMeta.get(key).name;
-      // A blank name can't be told apart — treat it as the first person.
-      if (!name || !known) return key;
-      if (nameSimilarityScore(name, known) >= POSSIBLE_DUPLICATE_THRESHOLD) return key;
+      if (isSamePerson(name, known)) return key;
     }
 
     const key = `${mobile}#${keys.length}`;
@@ -267,8 +284,10 @@ const syncFromEvent = async (data, adminId) => {
   }
 
   // ---- decide, per mobile, who is the contact and who is the spouse ----
-  const similar = (a, b) =>
-    !!a && !!b && nameSimilarityScore(a, b) >= POSSIBLE_DUPLICATE_THRESHOLD;
+  // A contact only knows two people: itself (fullName) and one spouse.
+  // "Not the same name" is never forced into the contact's own row — that
+  // is what made "Mensi" (scanned) show up as the existing contact "Kamlesh".
+  const similar = (a, b) => !!a && !!b && isSamePerson(a, b);
 
   // personKey -> { contactId, isSpouse }
   const slotByPerson = new Map();
@@ -284,10 +303,9 @@ const syncFromEvent = async (data, adminId) => {
     let spouseKey =
       keys.find((k) => k !== mainKey && similar(nameOf(k), contact.spouseName)) || null;
 
-    // Names don't match the contact at all (e.g. the contact was typed
-    // differently): fall back to first-come = contact, next = spouse.
-    if (!mainKey) mainKey = keys.find((k) => k !== spouseKey) || null;
-
+    // A name that matches neither the contact nor its spouse is another
+    // person on the same number (wife / husband). It takes the spouse slot
+    // when that slot is free; the contact's own row is never reused for it.
     let newSpouse = null;
     if (!spouseKey && !contact.spouseName) {
       spouseKey = keys.find((k) => k !== mainKey) || null;
