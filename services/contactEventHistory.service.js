@@ -3,6 +3,9 @@ const ContactEventHistory = require("../models/contactEventHistory.model");
 const Contact = require("../models/contact.model");
 const Event = require("../models/event.model");
 const AppError = require("../utils/AppError");
+const { normalizeMobileSearchTerm } = require("../utils/normalizeMobileNumber");
+
+const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 // ================= CREATE EVENT HISTORY =================
 // `adminId` always comes from the authenticated user (req.user.id in
@@ -42,7 +45,14 @@ const createEventHistory = async (data, adminId) => {
 // Powers the standalone Sidebar "Event History" page (not scoped to one
 // contact) — every entry, across every contact, with both contactId and
 // eventId populated. Supports optional ?contactId=&eventId=&status=
-// &page=&limit= filters.
+// &page=&limit=&search= filters.
+//
+// `search` (case-insensitive, partial) matches the PERSON of a row and the
+// edition:
+//   - a normal row  -> the contact's fullName / whatsappNumber
+//   - a spouse row  -> the contact's spouseName / spouseMobile
+//   - any row       -> the event's edition / title (e.g. "Parv 5")
+// A full number typed with +91 / spaces ("+91 98765 43210") still matches.
 const getAllEventHistory = async (query = {}) => {
   const filter = { isDeleted: { $ne: true } };
 
@@ -75,6 +85,53 @@ const getAllEventHistory = async (query = {}) => {
   const matchStage = { ...filter };
   if (matchStage.contactId) matchStage.contactId = toObjectId(matchStage.contactId);
   if (matchStage.eventId) matchStage.eventId = toObjectId(matchStage.eventId);
+
+  // ---- search ----
+  const searchText = String(query.search || "").trim();
+
+  if (searchText) {
+    const pattern = new RegExp(
+      escapeRegex(normalizeMobileSearchTerm(searchText)),
+      "i"
+    );
+
+    const [mainContacts, spouseContacts, matchedEvents] = await Promise.all([
+      Contact.find({
+        isDeleted: { $ne: true },
+        $or: [{ fullName: pattern }, { whatsappNumber: pattern }],
+      })
+        .select("_id")
+        .lean(),
+      Contact.find({
+        isDeleted: { $ne: true },
+        $or: [{ spouseName: pattern }, { spouseMobile: pattern }],
+      })
+        .select("_id")
+        .lean(),
+      Event.find({
+        isDeleted: { $ne: true },
+        $or: [{ edition: pattern }, { title: pattern }],
+      })
+        .select("_id")
+        .lean(),
+    ]);
+
+    matchStage.$and = [
+      {
+        $or: [
+          {
+            contactId: { $in: mainContacts.map((c) => c._id) },
+            isSpouse: { $ne: true },
+          },
+          {
+            contactId: { $in: spouseContacts.map((c) => c._id) },
+            isSpouse: true,
+          },
+          { eventId: { $in: matchedEvents.map((e) => e._id) } },
+        ],
+      },
+    ];
+  }
 
   const [agg] = await ContactEventHistory.aggregate([
     { $match: matchStage },
