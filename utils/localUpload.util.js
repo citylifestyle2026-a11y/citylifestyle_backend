@@ -136,7 +136,12 @@ const uploadToLocal = async (input, folder, resourceType = "image", extraOptions
     // what was uploaded. Applied even when the original is already
     // WEBP, since an oversized WEBP upload should still be compressed,
     // not just passed through as-is.
+    // .rotate() with no arguments auto-orients the photo from its EXIF
+    // Orientation tag BEFORE resizing. sharp drops EXIF when re-encoding
+    // to WEBP, so without this a portrait phone photo (stored sideways +
+    // an orientation flag) would be saved — and shown — rotated 90 degrees.
     buffer = await sharp(buffer)
+      .rotate()
       .resize({
         width: MAX_IMAGE_DIMENSION,
         height: MAX_IMAGE_DIMENSION,

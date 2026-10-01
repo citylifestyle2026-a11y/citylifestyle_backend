@@ -3,7 +3,10 @@ const Event = require("../models/event.model");
 const TicketType = require("../models/ticketType.model");
 const Booking = require("../models/booking.model");
 const BookingTicket = require("../models/bookingTicket.model");
+const ContactEventHistory = require("../models/contactEventHistory.model");
+const Contact = require("../models/contact.model");
 const uploadImage = require("../utils/localUpload.util");
+const deleteLocalFile = require("../utils/deleteLocalFile");
 const generateEventCode = require("../utils/generateEventCode");
 
 // ================= EVENT EXPIRY STATUS SYNC (NO CRON) =================
@@ -255,19 +258,24 @@ exports.updateEvent = async (id, data, file) => {
 // Delete Event
 // ================= MANUAL EVENT DELETE (HARD DELETE CASCADE) =================
 // This only ever runs when an Admin explicitly deletes an Event (this
-// function is only called from eventController.deleteEvent). It is the
-// one and only place Event/Booking/BookingTicket documents are ever
-// permanently removed — there is no automatic/scheduled expiry cleanup
-// anywhere in this backend. Expired events are left fully intact (see
-// syncEventExpiryStatus, which only ever sets status, never deletes)
-// until an Admin takes this explicit action.
+// function is only called from eventController.deleteEvent). Everything
+// that belongs to the event goes with it:
 //
-// Cascade order: BookingTickets first, then Bookings, then the Event
-// itself, all inside one transaction so the delete is all-or-nothing.
-// Booking's own soft-delete (Booking.isDeleted) is unrelated to this and
-// is not used here — this is a hard delete regardless of a Booking's
-// soft-deleted state, since the Event (and therefore everything under
-// it) is going away permanently.
+//   Database (one all-or-nothing transaction):
+//     - BookingTickets, Bookings, TicketTypes and the Event itself
+//       (hard delete)
+//     - the event's Event History rows (soft delete, same as the Event
+//       History page's own Delete — they could no longer show an edition)
+//   Server disk (after the transaction has committed, best-effort):
+//     - every ticket's QR image, ticket PDF and attendee/registration photo
+//     - the event's banner image
+//   Afterwards:
+//     - hidden "history only" contacts (created by Add to History) that no
+//       longer have any history are soft-deleted too.
+//
+// Files are removed only AFTER the database commit, so a failed
+// transaction can never leave tickets pointing at deleted files. A file that
+// can't be removed is logged and skipped — it never fails the delete.
 exports.deleteEvent = async (id, adminId) => {
   if (!mongoose.Types.ObjectId.isValid(id)) {
     throw new Error("Invalid Event ID");
@@ -279,13 +287,47 @@ exports.deleteEvent = async (id, adminId) => {
     throw new Error("Event not found");
   }
 
+  // ---- 1. collect every file this event owns (before the rows vanish) ----
+  const tickets = await BookingTicket.find({ eventId: id })
+    .select("qrImagePublicId ticketPdfPublicId attendee.profileImagePublicId")
+    .lean();
+
+  const filesToDelete = new Set();
+  const addFile = (publicId) => {
+    if (publicId && typeof publicId === "string") filesToDelete.add(publicId);
+  };
+
+  addFile(event.imagePublicId);
+  for (const ticket of tickets) {
+    addFile(ticket.qrImagePublicId);
+    addFile(ticket.ticketPdfPublicId);
+    addFile(ticket.attendee?.profileImagePublicId);
+  }
+
+  // Contacts that have history rows for this event (to tidy up afterwards).
+  const historyContactIds = await ContactEventHistory.distinct("contactId", {
+    eventId: id,
+    isDeleted: { $ne: true },
+  });
+
+  // ---- 2. database cascade, all-or-nothing ----
   const session = await mongoose.startSession();
+  let historyRowsRemoved = 0;
 
   try {
     session.startTransaction();
 
     await BookingTicket.deleteMany({ eventId: id }, { session });
     await Booking.deleteMany({ eventId: id }, { session });
+    await TicketType.deleteMany({ eventId: id }, { session });
+
+    const historyResult = await ContactEventHistory.updateMany(
+      { eventId: id, isDeleted: { $ne: true } },
+      { $set: { isDeleted: true, deletedAt: new Date(), deletedBy: adminId || null } },
+      { session }
+    );
+    historyRowsRemoved = historyResult.modifiedCount || 0;
+
     await Event.deleteOne({ _id: id }, { session });
 
     await session.commitTransaction();
@@ -298,9 +340,71 @@ exports.deleteEvent = async (id, adminId) => {
     await session.endSession();
   }
 
+  // ---- 3. the database is final — now remove the files from disk ----
+  let filesRemoved = 0;
+
+  try {
+    // Never delete a file another record still points to (safety net —
+    // normally every file belongs to exactly one ticket / event).
+    const ids = [...filesToDelete];
+    if (ids.length > 0) {
+      const [stillUsedByTickets, stillUsedByEvents] = await Promise.all([
+        BookingTicket.find({
+          $or: [
+            { qrImagePublicId: { $in: ids } },
+            { ticketPdfPublicId: { $in: ids } },
+            { "attendee.profileImagePublicId": { $in: ids } },
+          ],
+        })
+          .select("qrImagePublicId ticketPdfPublicId attendee.profileImagePublicId")
+          .lean(),
+        Event.find({ imagePublicId: { $in: ids } }).select("imagePublicId").lean(),
+      ]);
+
+      for (const t of stillUsedByTickets) {
+        filesToDelete.delete(t.qrImagePublicId);
+        filesToDelete.delete(t.ticketPdfPublicId);
+        filesToDelete.delete(t.attendee?.profileImagePublicId);
+      }
+      for (const e of stillUsedByEvents) filesToDelete.delete(e.imagePublicId);
+    }
+
+    const results = await Promise.allSettled(
+      [...filesToDelete].map((publicId) => deleteLocalFile(publicId))
+    );
+    filesRemoved = results.filter((r) => r.status === "fulfilled").length;
+  } catch (error) {
+    // Best-effort only: the event is already deleted.
+    console.error("Event delete: file cleanup failed:", error.message);
+  }
+
+  // ---- 4. drop hidden history-only contacts that now have no history ----
+  try {
+    if (historyContactIds.length > 0) {
+      const stillHaveHistory = await ContactEventHistory.distinct("contactId", {
+        contactId: { $in: historyContactIds },
+        isDeleted: { $ne: true },
+      });
+
+      const orphanIds = historyContactIds.filter(
+        (cid) => !stillHaveHistory.some((x) => String(x) === String(cid))
+      );
+
+      if (orphanIds.length > 0) {
+        await Contact.updateMany(
+          { _id: { $in: orphanIds }, historyOnly: true, isDeleted: { $ne: true } },
+          { $set: { isDeleted: true, deletedAt: new Date(), deletedBy: adminId || null } }
+        );
+      }
+    }
+  } catch (error) {
+    console.error("Event delete: history contact cleanup failed:", error.message);
+  }
+
   return {
     success: true,
     message: "Event deleted successfully.",
+    data: { filesRemoved, historyRowsRemoved },
   };
 };
 
@@ -331,4 +435,3 @@ exports.changeEventStatus = async (id) => {
     data: updatedEvent,
   };
 };
-
