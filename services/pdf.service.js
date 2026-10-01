@@ -228,18 +228,54 @@ const fetchImageBuffer = async (url) => {
 // client may bundle its own logo/venue/contact artwork into one
 // picture) is what prints, instead of being cropped into a small
 // fixed-size circle.
-const normalizeImageBufferForPdf = async (buffer) => {
+// SIZE: the images are drawn small on this 420 x 900 pt ticket (the event
+// image is ~392 pt wide, the attendee photo ~170 pt square), but the stored
+// uploads can be up to 1920 px. Embedding them at full size as lossless
+// PNG made every ticket PDF several MB. So each image is first scaled down
+// to what the ticket can actually show (`maxEdge`, ~200 dpi) and re-encoded:
+//   - normal photos / graphics  -> JPEG (pdfkit embeds JPEG as-is, no re-encode)
+//   - images with real transparency -> optimised PNG (JPEG would lose the
+//     transparency, which shows through over the brand-colour backdrop)
+const normalizeImageBufferForPdf = async (
+  buffer,
+  { maxEdge = 1100, quality = 82 } = {}
+) => {
   if (!buffer) {
     return null;
   }
 
   try {
-    const pngBuffer = await sharp(buffer).png().toBuffer();
-    const metadata = await sharp(pngBuffer).metadata();
+    const meta = await sharp(buffer).metadata();
+
+    // An alpha channel that is fully opaque (common for PNG screenshots)
+    // carries no transparency, so it can still become a small JPEG.
+    let keepTransparency = false;
+    if (meta.hasAlpha) {
+      const stats = await sharp(buffer).stats();
+      keepTransparency = !stats.isOpaque;
+    }
+
+    const pipeline = sharp(buffer)
+      .rotate() // honour EXIF orientation of older / external images
+      .resize({
+        width: maxEdge,
+        height: maxEdge,
+        fit: "inside",
+        withoutEnlargement: true,
+      });
+
+    const outBuffer = keepTransparency
+      ? await pipeline.png({ compressionLevel: 9, palette: true }).toBuffer()
+      : await pipeline
+          .flatten({ background: "#ffffff" })
+          .jpeg({ quality, chromaSubsampling: "4:2:0" })
+          .toBuffer();
+
+    const outMeta = await sharp(outBuffer).metadata();
     return {
-      buffer: pngBuffer,
-      width: metadata.width || null,
-      height: metadata.height || null,
+      buffer: outBuffer,
+      width: outMeta.width || null,
+      height: outMeta.height || null,
     };
   } catch (error) {
     console.error(
@@ -372,8 +408,14 @@ const buildTicketPdfBuffer = async ({ event, ticketType, booking, ticket }) => {
   // attendee.profileImage through it), so the attendee photo needs the
   // exact same pdfkit-safe re-encode as the event image, for the exact
   // same reason. See normalizeImageBufferForPdf's comment.
-  const eventImageBuffer = await normalizeImageBufferForPdf(eventImageRaw);
-  const userPhoto = await normalizeImageBufferForPdf(userPhotoRaw);
+  // Event image: shown ~392 pt wide  -> 1100 px is plenty.
+  // Attendee photo: shown ~170 pt square -> 800 px is plenty.
+  const eventImageBuffer = await normalizeImageBufferForPdf(eventImageRaw, {
+    maxEdge: 1100,
+  });
+  const userPhoto = await normalizeImageBufferForPdf(userPhotoRaw, {
+    maxEdge: 800,
+  });
   const userPhotoBuffer = userPhoto ? userPhoto.buffer : null;
 
   return new Promise((resolve, reject) => {
