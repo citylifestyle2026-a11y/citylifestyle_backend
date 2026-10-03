@@ -47,7 +47,6 @@
 
 const fs = require("fs");
 const path = require("path");
-const PDFDocument = require("pdfkit");
 const sharp = require("sharp");
 const uploadImage = require("../utils/localUpload.util");
 const deleteImage = require("../utils/deleteLocalFile");
@@ -426,6 +425,9 @@ const buildTicketPdfBuffer = async ({ event, ticketType, booking, ticket }) => {
       const PAGE_WIDTH = 420;
       const PAGE_HEIGHT = 900;
 
+      // pdfkit is only needed when a ticket PDF is built — loaded on first
+      // use instead of at server start.
+      const PDFDocument = require("pdfkit");
       const doc = new PDFDocument({ size: [PAGE_WIDTH, PAGE_HEIGHT], margin: 0 });
       const chunks = [];
 

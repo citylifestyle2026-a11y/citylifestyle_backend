@@ -2,7 +2,6 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const sharp = require("sharp");
-const heicConvert = require("heic-convert");
 const { UPLOAD_ROOT, PUBLIC_BASE_URL, FOLDER_MAP } = require("../config/uploadPaths");
 
 const MIME_TO_EXT = {
@@ -121,6 +120,9 @@ const uploadToLocal = async (input, folder, resourceType = "image", extraOptions
     // read HEIC on every build. Every other allowed format (JPG/PNG/
     // WEBP) skips straight to the sharp pipeline below unchanged.
     if (HEIC_MIME_TYPES.has(input.mimetype)) {
+      // heic-convert bundles a WebAssembly decoder — loaded only when an
+      // HEIC/HEIF photo is actually uploaded, not at server start.
+      const heicConvert = require("heic-convert");
       buffer = await heicConvert({
         buffer,
         format: "JPEG",

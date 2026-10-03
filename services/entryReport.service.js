@@ -4,7 +4,6 @@ const User = require("../models/user.model");
 const Admin = require("../models/admin.model");
 const TicketType = require("../models/ticketType.model");
 const AppError = require("../utils/AppError");
-const ExcelJS = require("exceljs");
 const {
   normalizeMobileSearchTerm,
   toMobileFilterDigits,
@@ -548,6 +547,9 @@ const exportEntryReport = async (query, res, currentUser) => {
 
   // ================= WORKBOOK =================
 
+  // exceljs is large (~280 ms to load) — only needed for exports, so it is
+  // loaded here on first use instead of at server start.
+  const ExcelJS = require("exceljs");
   const workbook = new ExcelJS.Workbook();
 
   workbook.creator = "Event Management CRM";
