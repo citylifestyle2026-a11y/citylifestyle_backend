@@ -27,6 +27,7 @@ const corsOptions = {
   origin: [
     "https://citytoppers.in",
     "https://www.citytoppers.in",
+    "https://citylifestyle-frontend-y9y3.vercel.app",
     "http://localhost:5173",
     "https://localhost",
     "capacitor://localhost",
