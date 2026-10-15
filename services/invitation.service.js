@@ -80,13 +80,16 @@ const getPublicInvitation = async (invitationId) => {
     throw new AppError("Invitation not found.", 404);
   }
 
-  // The pass page must keep working even if the server disk is wiped
-  // (e.g. Render redeploy/restart), so the QR is re-generated from the
-  // ticket's own qrToken and sent inline instead of linking to a file
-  // under /uploads. Falls back to the stored image URL if that fails.
+  // The QR on the pass encodes ONLY the short 8-digit Invitation ID (the
+  // same number printed under it as "Booking / Verification Code"), so it
+  // is a small, easy-to-scan code. qr.service.js resolves that ID back to
+  // this booking's ticket when the gate scans it.
+  // It is generated here and sent inline (not a link under /uploads) so the
+  // pass keeps working even if the server disk is wiped (e.g. Render
+  // redeploy/restart). Falls back to the stored image URL if that fails.
   let qrImage = primaryTicket.qrImage;
   try {
-    const qrBuffer = await generateQrCode(primaryTicket.qrToken);
+    const qrBuffer = await generateQrCode(booking.invitationId);
     qrImage = `data:image/png;base64,${qrBuffer.toString("base64")}`;
   } catch (error) {
     console.error("Invitation QR regeneration failed, using stored image:", error);

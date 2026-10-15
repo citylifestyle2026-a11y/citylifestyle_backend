@@ -4,6 +4,9 @@ const User = require("../models/user.model");
 const Admin = require("../models/admin.model");
 const TicketType = require("../models/ticketType.model");
 const AppError = require("../utils/AppError");
+const Booking = require("../models/booking.model");
+const QRCode = require("qrcode");
+const { buildInvitationUrl } = require("../utils/buildInvitationBodyParams");
 const {
   normalizeMobileSearchTerm,
   toMobileFilterDigits,
@@ -21,9 +24,14 @@ const {
 const escapeRegex = (value) =>
   String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+// NEW single-QR flow: a guest is NOT registered, so attendee.* is empty and
+// the person is the BOOKING (name / mobile / company / Invitation ID). Every
+// search therefore looks at the attendee fields (old flow) AND the joined
+// booking fields (new flow). These run AFTER the $lookup in the pipeline
+// built by buildEntryReportPipeline below.
 const buildSearchOr = (rawSearch) => {
   // A full number typed with 91 / +91 / spaces is reduced to its 10
-  // digits so it matches the stored attendee number.
+  // digits so it matches the stored number.
   const search = escapeRegex(normalizeMobileSearchTerm(rawSearch));
 
   return [
@@ -32,6 +40,10 @@ const buildSearchOr = (rawSearch) => {
     { qrImage: { $regex: search, $options: "i" } },
     { "attendee.name": { $regex: search, $options: "i" } },
     { "attendee.mobileNumber": { $regex: search, $options: "i" } },
+    { "booking.name": { $regex: search, $options: "i" } },
+    { "booking.mobileNumber": { $regex: search, $options: "i" } },
+    { "booking.companyName": { $regex: search, $options: "i" } },
+    { "booking.invitationId": { $regex: search, $options: "i" } },
   ];
 };
 
@@ -161,44 +173,69 @@ const getTicketPassDates = (ticket, passDatesByTicketType) => {
 // used by BOTH getAllEntryReports and exportEntryReport, so the table and
 // the exported file can never disagree about what a filter means.
 const buildEntryReportFilter = async (params, eventIds, currentUser) => {
-  const { bookingId, ticketId, mobileNumber, name, search, startDate, endDate } =
-    params;
+  const {
+    bookingId,
+    invitationId,
+    ticketId,
+    mobileNumber,
+    name,
+    search,
+    startDate,
+    endDate,
+  } = params;
 
-  const filter = {
+  // `match`     = conditions on the BookingTicket itself (run first).
+  // `postMatch` = conditions that need the joined Booking (name / mobile /
+  //               Invitation ID) — run after the $lookup, see
+  //               buildEntryReportPipeline.
+  const match = {
     eventId: { $in: eventIds },
     status: "Used",
   };
 
   // Checker-scoping — combined with the optional filters below via a
   // normal AND. Admin is unaffected (no-op for admin).
-  applyScannerScope(filter, currentUser);
-
-  if (bookingId) {
-    filter.bookingNumber = { $regex: escapeRegex(bookingId), $options: "i" };
-  }
+  applyScannerScope(match, currentUser);
 
   if (ticketId) {
-    filter.ticketNumber = { $regex: escapeRegex(ticketId), $options: "i" };
+    match.ticketNumber = { $regex: escapeRegex(ticketId), $options: "i" };
+  }
+
+  const postMatch = [];
+
+  if (bookingId) {
+    postMatch.push({
+      bookingNumber: { $regex: escapeRegex(bookingId), $options: "i" },
+    });
+  }
+
+  // "Invitation Id" box: the 8-digit code printed on the guest's pass.
+  if (invitationId) {
+    postMatch.push({
+      "booking.invitationId": { $regex: escapeRegex(invitationId) },
+    });
   }
 
   if (mobileNumber) {
-    filter["attendee.mobileNumber"] = {
-      // "+91 98765 43210" / "919876543210" -> "9876543210".
+    // "+91 98765 43210" / "919876543210" -> "9876543210".
+    const regex = {
       $regex: escapeRegex(toMobileFilterDigits(mobileNumber)),
       $options: "i",
     };
+    postMatch.push({
+      $or: [{ "attendee.mobileNumber": regex }, { "booking.mobileNumber": regex }],
+    });
   }
 
   if (name) {
-    filter["attendee.name"] = { $regex: escapeRegex(name), $options: "i" };
+    const regex = { $regex: escapeRegex(name), $options: "i" };
+    postMatch.push({
+      $or: [{ "attendee.name": regex }, { "booking.name": regex }],
+    });
   }
 
-  // Both the toolbar search and the Pass Date filter need an $or, so they
-  // are combined through $and instead of competing for filter.$or.
-  const andClauses = [];
-
   if (search) {
-    andClauses.push({ $or: buildSearchOr(search) });
+    postMatch.push({ $or: buildSearchOr(search) });
   }
 
   // ================= PASS DATE FILTER =================
@@ -225,19 +262,112 @@ const buildEntryReportFilter = async (params, eventIds, currentUser) => {
       .select("_id")
       .lean();
 
-    andClauses.push({
-      $or: [
-        { ticketTypeId: { $in: matchingTicketTypes.map((t) => t._id) } },
-        { passDate: range },
-      ],
-    });
+    match.$and = [
+      {
+        $or: [
+          { ticketTypeId: { $in: matchingTicketTypes.map((t) => t._id) } },
+          { passDate: range },
+        ],
+      },
+    ];
   }
 
-  if (andClauses.length > 0) {
-    filter.$and = andClauses;
-  }
+  return { match, postMatch };
+};
 
-  return filter;
+// ================= ENTRY REPORT PIPELINE (SHARED) =================
+// NEW single-QR flow: one booking of N guests has N BookingTickets, and
+// ONE scan marks all N as "Used" (see qr.service.js#checkInQr). Listing
+// BookingTickets directly would therefore show the same booking N times,
+// each with an empty name. This pipeline:
+//   1. matches the scanned tickets,
+//   2. joins each ticket's Booking (name, mobile, company, Invitation ID),
+//   3. collapses a single_qr booking to ONE row (its first ticket) —
+//      old per-ticket bookings are left exactly as they were (one row per
+//      ticket),
+//   4. sorts newest scan first.
+// Shared by the table and the export so they can never disagree.
+const buildEntryReportPipeline = ({ match, postMatch }) => [
+  { $match: match },
+  {
+    $lookup: {
+      from: Booking.collection.name,
+      localField: "bookingId",
+      foreignField: "_id",
+      as: "booking",
+    },
+  },
+  { $unwind: { path: "$booking", preserveNullAndEmptyArrays: true } },
+  ...(postMatch.length > 0 ? [{ $match: { $and: postMatch } }] : []),
+  { $sort: { createdAt: 1, _id: 1 } },
+  {
+    $group: {
+      _id: {
+        $cond: [
+          { $eq: ["$booking.entryMode", "single_qr"] },
+          "$bookingId",
+          "$_id",
+        ],
+      },
+      doc: { $first: "$$ROOT" },
+    },
+  },
+  { $replaceRoot: { newRoot: "$doc" } },
+  {
+    $project: {
+      bookingNumber: 1,
+      ticketNumber: 1,
+      qrImage: 1,
+      scannedAt: 1,
+      scannedBy: 1,
+      passDate: 1,
+      ticketTypeId: 1,
+      attendee: 1,
+      "booking.name": 1,
+      "booking.mobileNumber": 1,
+      "booking.companyName": 1,
+      "booking.invitationId": 1,
+      "booking.quantity": 1,
+      "booking.entryMode": 1,
+    },
+  },
+  { $sort: { scannedAt: -1, _id: 1 } },
+];
+
+// ================= ROW HELPERS (SHARED) =================
+const isSingleQrBooking = (ticket) => ticket?.booking?.entryMode === "single_qr";
+
+// Booking mobiles are stored with the 91 prefix; show the 10 digits.
+const toTenDigitMobile = (value) =>
+  String(value || "").replace(/^91(?=\d{10}$)/, "");
+
+// Public pass link for a single-QR booking. Returns "" (never throws) when
+// the frontend base URL env var is not configured.
+const safeInviteUrl = (ticket) => {
+  if (!isSingleQrBooking(ticket) || !ticket.booking.invitationId) return "";
+  try {
+    return buildInvitationUrl(ticket.booking.invitationId);
+  } catch (error) {
+    return "";
+  }
+};
+
+// The QR shown in the Entry Report for a single-QR booking is the SAME QR
+// the guest holds: the short Invitation ID. Inline data URL, so it still
+// shows after a server-disk wipe. Old tickets keep their stored qrImage.
+const buildRowQrImage = async (ticket) => {
+  if (isSingleQrBooking(ticket) && ticket.booking.invitationId) {
+    try {
+      return await QRCode.toDataURL(ticket.booking.invitationId, {
+        errorCorrectionLevel: "M",
+        margin: 1,
+        width: 160,
+      });
+    } catch (error) {
+      // fall through to the stored image
+    }
+  }
+  return ticket.qrImage || "";
 };
 
 // ================= ACTIVE EVENT FILTER (SHARED) =================
@@ -377,6 +507,7 @@ const getAllEntryReports = async (query, currentUser) => {
     page = 1,
     limit = 10,
     bookingId = "",
+    invitationId = "",
     ticketId = "",
     mobileNumber = "",
     name = "",
@@ -416,51 +547,85 @@ const getAllEntryReports = async (query, currentUser) => {
 
   // ================= FILTER =================
   const filter = await buildEntryReportFilter(
-    { bookingId, ticketId, mobileNumber, name, search, startDate, endDate },
+    {
+      bookingId,
+      invitationId,
+      ticketId,
+      mobileNumber,
+      name,
+      search,
+      startDate,
+      endDate,
+    },
     eventIds,
     currentUser
   );
 
   // ================= FETCH DATA =================
 
-  const [tickets, total, allowedPassDates] = await Promise.all([
-    BookingTicket.find(filter)
-      .sort({ scannedAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean(),
-
-    BookingTicket.countDocuments(filter),
+  const [aggregated, allowedPassDates] = await Promise.all([
+    BookingTicket.aggregate([
+      ...buildEntryReportPipeline(filter),
+      {
+        $facet: {
+          rows: [{ $skip: skip }, { $limit: limit }],
+          total: [{ $count: "count" }],
+        },
+      },
+    ]).allowDiskUse(true),
 
     // Independent of the filters on purpose: the Pass Date picker must
     // always offer every date the selected event scope allows.
     getAllowedPassDates(eventIds),
   ]);
 
+  const tickets = aggregated[0]?.rows || [];
+  const total = aggregated[0]?.total?.[0]?.count || 0;
+
   // Resolves each ticket's scannedBy id to a display name, checking both
   // the User (Checker) and Admin collections — see
   // resolveScannedByNames above for why a plain populate() isn't enough.
-  const [scannedByNameMap, passDatesByTicketType] = await Promise.all([
+  const [scannedByNameMap, passDatesByTicketType, qrImages] = await Promise.all([
     resolveScannedByNames(tickets),
     resolvePassDatesByTicketType(tickets),
+    Promise.all(tickets.map(buildRowQrImage)),
   ]);
 
   // ================= FORMAT ROWS =================
+  // One row per scanned PASS: a single-QR booking is ONE row (guests = its
+  // quantity); an old per-ticket booking is one row per ticket (guests 1).
 
-  const rows = tickets.map((ticket) => ({
+  const rows = tickets.map((ticket, index) => ({
     _id: ticket._id,
 
+    // Old flow only (registered attendee photo). The single-QR flow has no
+    // registration step, so this is empty there.
     profileImage: ticket.attendee?.profileImage || "",
 
     bookingId: ticket.bookingNumber,
 
+    // 8-digit code printed on the guest's pass ("-" for old bookings).
+    invitationId: ticket.booking?.invitationId || "",
+
     ticketId: ticket.ticketNumber,
 
-    qrImage: ticket.qrImage || "",
+    qrImage: qrImages[index],
 
-    name: ticket.attendee?.name || "-",
+    // Link of the guest's digital pass page ("" for old bookings).
+    passUrl: safeInviteUrl(ticket),
 
-    mobileNumber: ticket.attendee?.mobileNumber || "-",
+    // Registered attendee (old flow) first, otherwise the booking's guest.
+    name: ticket.attendee?.name || ticket.booking?.name || "-",
+
+    companyName: ticket.booking?.companyName || "",
+
+    mobileNumber:
+      ticket.attendee?.mobileNumber ||
+      toTenDigitMobile(ticket.booking?.mobileNumber) ||
+      "-",
+
+    // How many people this one scan admitted.
+    guests: isSingleQrBooking(ticket) ? ticket.booking.quantity || 1 : 1,
 
     // Kept for backward compatibility (the ticket's own stored date).
     passDate: ticket.passDate || null,
@@ -497,6 +662,7 @@ const getAllEntryReports = async (query, currentUser) => {
 const exportEntryReport = async (query, res, currentUser) => {
   let {
     bookingId = "",
+    invitationId = "",
     ticketId = "",
     name = "",
     mobileNumber = "",
@@ -523,25 +689,25 @@ const exportEntryReport = async (query, res, currentUser) => {
   // Same shared builder as the table (incl. Checker-scoping) — export
   // must never be a way to bypass the restriction the table enforces.
   const filter = await buildEntryReportFilter(
-    { bookingId, ticketId, mobileNumber, name, search, startDate, endDate },
+    {
+      bookingId,
+      invitationId,
+      ticketId,
+      mobileNumber,
+      name,
+      search,
+      startDate,
+      endDate,
+    },
     eventIds,
     currentUser
   );
 
   // ================= DATA =================
 
-  const rows = await BookingTicket.find(filter)
-    .select(`
-      bookingNumber
-      ticketNumber
-      qrImage
-      scannedAt
-      passDate
-      ticketTypeId
-      attendee
-    `)
-    .sort({ scannedAt: -1 })
-    .lean();
+  const rows = await BookingTicket.aggregate(
+    buildEntryReportPipeline(filter)
+  ).allowDiskUse(true);
 
   const passDatesByTicketType = await resolvePassDatesByTicketType(rows);
 
@@ -564,9 +730,9 @@ const exportEntryReport = async (query, res, currentUser) => {
       width: 22,
     },
     {
-      header: "Ticket Id",
-      key: "ticketId",
-      width: 22,
+      header: "Invitation ID",
+      key: "invitationId",
+      width: 16,
     },
     {
       header: "Name",
@@ -574,9 +740,19 @@ const exportEntryReport = async (query, res, currentUser) => {
       width: 25,
     },
     {
+      header: "Company/ Brand",
+      key: "companyName",
+      width: 25,
+    },
+    {
       header: "Mobile Number",
       key: "mobile",
       width: 18,
+    },
+    {
+      header: "Guests",
+      key: "guests",
+      width: 10,
     },
     {
       header: "Pass Date",
@@ -589,7 +765,7 @@ const exportEntryReport = async (query, res, currentUser) => {
       width: 24,
     },
     {
-      header: "QR Image",
+      header: "QR / Pass Link",
       key: "qrImage",
       width: 45,
     },
@@ -635,11 +811,18 @@ const exportEntryReport = async (query, res, currentUser) => {
     worksheet.addRow({
       bookingId: item.bookingNumber,
 
-      ticketId: item.ticketNumber,
+      invitationId: item.booking?.invitationId || "-",
 
-      name: item.attendee?.name || "-",
+      name: item.attendee?.name || item.booking?.name || "-",
 
-      mobile: item.attendee?.mobileNumber || "-",
+      companyName: item.booking?.companyName || "-",
+
+      mobile:
+        item.attendee?.mobileNumber ||
+        toTenDigitMobile(item.booking?.mobileNumber) ||
+        "-",
+
+      guests: isSingleQrBooking(item) ? item.booking.quantity || 1 : 1,
 
       passDate: passDates || "-",
 
@@ -647,7 +830,8 @@ const exportEntryReport = async (query, res, currentUser) => {
         ? new Date(item.scannedAt).toLocaleString("en-GB")
         : "-",
 
-      qrImage: item.qrImage || "-",
+      // Single-QR booking: the guest's pass link. Old ticket: its QR file.
+      qrImage: safeInviteUrl(item) || item.qrImage || "-",
 
       profileImage: item.attendee?.profileImage || "-",
     });

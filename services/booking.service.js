@@ -152,6 +152,15 @@ const createBooking = async (data, createdBy) => {
       throw new AppError(MOBILE_ERROR_MESSAGE, 400);
     }
 
+    // ================= COMPANY / BRAND (COMPULSORY) =================
+    // Same reasoning as the mobile number above: the create route's
+    // validator already enforces this, but the CSV import calls
+    // createBooking directly, so a row without a company is rejected here
+    // too (it shows up as that row's error in the import result).
+    if (!String(companyName || "").trim()) {
+      throw new AppError("Company / Brand is required", 400);
+    }
+
     // ================= DUPLICATE BOOKING WARNING (SAME MOBILE NUMBER) =================
     // The SAME mobile number already has a booking for this event +
     // ticket type -> stop here (409) before any ticket is deducted or any
@@ -414,7 +423,13 @@ const createBooking = async (data, createdBy) => {
 // A row that fails (bad data, sold out, wrong amount, name not found,
 // etc.) is recorded with its error and processing continues with the
 // next row — one bad row must never abort the rows before or after it.
-const REQUIRED_CSV_COLUMNS = ["quantity", "amount", "name", "mobileNumber"];
+const REQUIRED_CSV_COLUMNS = [
+  "quantity",
+  "amount",
+  "name",
+  "mobileNumber",
+  "companyName",
+];
 // At least one column from each pair below must be present in the header.
 const REQUIRED_COLUMN_ALTERNATIVES = [
   { columns: ["eventId", "eventName"], label: "eventId or eventName" },

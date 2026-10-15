@@ -1,19 +1,56 @@
 const jwt = require("jsonwebtoken");
 
 const BookingTicket = require("../models/bookingTicket.model");
+const Booking = require("../models/booking.model");
 const AppError = require("../utils/AppError");
- // verfiy qr
-const verifyQr = async ({ qrToken }) => {
-  // ==========================
-  // 1. Verify QR Token
-  // ==========================
-  let payload;
+
+// ================= WHAT A SCANNED QR CAN CONTAIN =================
+// NEW single-QR pass (public /ticket?qr=<id> page): the QR encodes ONLY the
+// short 8-digit Invitation ID. That keeps the QR a small, low-density
+// (21x21) code that scans instantly from any phone screen, instead of the
+// long signed token, which produced a dense, hard-to-scan QR.
+// OLD tickets (and the per-ticket flow): the QR encodes the signed JWT.
+//
+// Both resolve to a ticketNumber. For an Invitation ID that is the
+// booking's primary (first) ticket - the same ticket the pass page
+// represents. Everything after this (status checks, group check-in of all
+// guests, the response DTO) is unchanged, and the DTO still returns that
+// ticket's qrToken, so the scanner's automatic check-in call keeps working.
+const INVITATION_ID_REGEX = /^\d{8}$/;
+
+const resolveTicketNumber = async (qrValue) => {
+  const value = String(qrValue || "").trim();
+
+  if (INVITATION_ID_REGEX.test(value)) {
+    const booking = await Booking.findOne({ invitationId: value }).select("_id");
+
+    if (!booking) {
+      throw new AppError("Invalid or expired QR code.", 401);
+    }
+
+    const primaryTicket = await BookingTicket.findOne({ bookingId: booking._id })
+      .sort({ createdAt: 1, _id: 1 })
+      .select("ticketNumber");
+
+    if (!primaryTicket) {
+      throw new AppError("QR ticket not found.", 404);
+    }
+
+    return primaryTicket.ticketNumber;
+  }
 
   try {
-    payload = jwt.verify(qrToken, process.env.JWT_SECRET);
+    return jwt.verify(value, process.env.JWT_SECRET).ticketNumber;
   } catch (error) {
     throw new AppError("Invalid or expired QR code.", 401);
   }
+};
+ // verfiy qr
+const verifyQr = async ({ qrToken }) => {
+  // ==========================
+  // 1. Verify QR (Invitation ID or signed token)
+  // ==========================
+  const payload = { ticketNumber: await resolveTicketNumber(qrToken) };
 
   // ==========================
   // 2. Find Ticket
@@ -121,14 +158,8 @@ const verifyQr = async ({ qrToken }) => {
 };
 // ================= CHECK-IN QR =================
 const checkInQr = async ({ qrToken, scannedBy }) => {
-  // 1. Verify JWT
-  let payload;
-
-  try {
-    payload = jwt.verify(qrToken, process.env.JWT_SECRET);
-  } catch (error) {
-    throw new AppError("Invalid or expired QR code.", 401);
-  }
+  // 1. Verify QR (Invitation ID or signed token)
+  const payload = { ticketNumber: await resolveTicketNumber(qrToken) };
 
   // 2. Find Ticket
   // The frontend now calls check-in automatically right after verify (no

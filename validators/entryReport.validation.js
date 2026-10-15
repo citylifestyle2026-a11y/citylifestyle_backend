@@ -25,6 +25,13 @@ const getAllEntryReportValidation = [
     .optional()
     .trim(),
 
+  // 8-digit Invitation ID printed on the guest's pass (partial allowed).
+  query("invitationId")
+    .optional()
+    .trim()
+    .matches(/^\d{0,8}$/)
+    .withMessage("Invitation Id must contain digits only (maximum 8 digits)"),
+
   // Digits only (max 10), OR a full number written with a 91 / +91 prefix
   // and/or spaces/dashes. Only validated here — the 10-digit reduction is
   // done in entryReport.service.js, because a query-string sanitizer is

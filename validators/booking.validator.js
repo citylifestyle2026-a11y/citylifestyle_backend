@@ -47,6 +47,12 @@ exports.createBookingValidation = [
     })
     .customSanitizer((value) => normalizeMobileNumber(value) || value),
 
+  // Company / Brand is COMPULSORY (shown on the guest's digital pass).
+  body("companyName")
+    .trim()
+    .notEmpty()
+    .withMessage("Company / Brand is required"),
+
   body("email")
     .optional({ checkFalsy: true })
     .isEmail()
@@ -83,6 +89,13 @@ exports.validate = (req, res, next) => {
 // Edit booking: every field optional, but when sent it must be valid.
 exports.updateBookingValidation = [
   body("name").optional().trim().notEmpty().withMessage("Name is required"),
+
+  // Edit booking: when sent, Company / Brand can never be blanked out.
+  body("companyName")
+    .optional()
+    .trim()
+    .notEmpty()
+    .withMessage("Company / Brand is required"),
 
   body("mobileNumber")
     .optional()
