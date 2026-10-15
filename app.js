@@ -16,6 +16,7 @@ const dashboardRoutes = require("./routes/dashboard.routes");
 const roleRoutes = require("./routes/role.routes");
 const publicRegistrationRoutes = require("./routes/publicRegistration.routes");
 const publicInvitationRoutes = require("./routes/publicInvitation.routes");
+const publicContactRoutes = require("./routes/publicContact.routes");
 const contactRoutes = require("./routes/contact.routes");
 const contactEventHistoryRoutes = require("./routes/contactEventHistory.routes");
 // const editionRoutes = require("./routes/edition.routes");
@@ -79,6 +80,8 @@ app.use("/api/bookings", bookingRoutes);
 app.use("/api/public/registration", publicRegistrationRoutes);
 // NEW single-QR invitation page data (/ticket?qr=<invitationId>), no login
 app.use("/api/public/invitation", publicInvitationRoutes);
+// Public contact form (/city-lifestyle) - no login, rate-limited
+app.use("/api/public/contact", publicContactRoutes);
 // contacts (was previously missing here — routes/contact.routes.js
 // already implements Reference Summary plus create/list/get/update/
 // delete, it just was never mounted, hence every /api/contacts/...

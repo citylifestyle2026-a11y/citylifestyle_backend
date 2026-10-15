@@ -1,8 +1,5 @@
 const { body, validationResult } = require("express-validator");
-const {
-  normalizeInstagramId,
-  isValidInstagramId,
-} = require("../utils/normalizeInstagramId");
+const { parseInstagramLink } = require("../utils/normalizeInstagramId");
 const {
   mobileCustomValidator,
   toLocalMobileNumber,
@@ -34,28 +31,29 @@ const parseContactFormData = (req, res, next) => {
 // "name" and a pasted instagram.com link all become "name"), then checked.
 // The Profile Photo / Spouse Profile Photo are files, so their
 // "required" rule is enforced in services/contact.service.js.
+// Instagram is OPTIONAL and must be a profile LINK (a plain name is rejected).
+// It is stored as the bare username parsed out of that link.
 const instagramRule = (field, label, { coupleOnly = false } = {}) =>
   body(field)
-    .customSanitizer(normalizeInstagramId)
     .custom((value, { req }) => {
       if (coupleOnly && req.body.relationship !== "Couple") return true;
 
-      if (!value) {
-        throw new Error(`${label} is required`);
-      }
+      const raw = String(value ?? "").trim();
+      if (!raw) return true; // optional
 
-      if (!isValidInstagramId(value)) {
+      if (!parseInstagramLink(raw)) {
         throw new Error(
-          `Invalid ${label} (letters, numbers, dots and underscores only, max 30)`
+          `${label}: please enter the Instagram profile link (e.g. https://instagram.com/username), not a name`
         );
       }
       return true;
-    });
+    })
+    .customSanitizer((value) => parseInstagramLink(value) || "");
 
 const contactExtraFieldValidation = [
   body("area").trim().notEmpty().withMessage("Area is required"),
-  instagramRule("instagramId", "Instagram ID"),
-  instagramRule("spouseInstagramId", "Spouse Instagram ID", {
+  instagramRule("instagramId", "Instagram Link"),
+  instagramRule("spouseInstagramId", "Spouse Instagram Link", {
     coupleOnly: true,
   }),
 ];
@@ -187,14 +185,10 @@ const createContactValidation = [
 
   // Profession/Occupation — required only for Couple per this step's
   // spec, same conditional pattern as spouseName/spouseMobile above.
-  body("profession")
-    .trim()
-    .custom((value, { req }) => {
-      if (req.body.relationship === "Couple" && !String(value || "").trim()) {
-        throw new Error("Profession is required for Couple");
-      }
-      return true;
-    }),
+  // Profession text is no longer asked for: the spouse only picks a Category
+  // (professionCategory below). The frontend still fills `profession` with the
+  // category name so lists/exports keep showing it.
+  body("profession").optional({ values: "falsy" }).trim(),
 
   // Spouse's profession Category (from the Company Category list) —
   // compulsory for Couple, ignored for Single.
@@ -317,14 +311,10 @@ const updateContactValidation = [
     })
     .customSanitizer(toLocalMobileSanitizer),
 
-  body("profession")
-    .trim()
-    .custom((value, { req }) => {
-      if (req.body.relationship === "Couple" && !String(value || "").trim()) {
-        throw new Error("Profession is required for Couple");
-      }
-      return true;
-    }),
+  // Profession text is no longer asked for: the spouse only picks a Category
+  // (professionCategory below). The frontend still fills `profession` with the
+  // category name so lists/exports keep showing it.
+  body("profession").optional({ values: "falsy" }).trim(),
 
   // Spouse's profession Category (from the Company Category list) —
   // compulsory for Couple, ignored for Single.

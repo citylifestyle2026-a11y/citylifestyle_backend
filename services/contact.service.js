@@ -26,14 +26,13 @@ const uploadOne = async (file) => {
 // Profile Photo is compulsory (and Spouse Profile Photo for Couple).
 // `hasProfile` / `hasSpouse` say whether a photo will exist after this
 // save (a new upload, or an already-saved one that isn't being removed).
-const assertPhotosPresent = ({ hasProfile, hasSpouse, isCouple }) => {
-  if (!hasProfile) {
-    throw new AppError("Profile Photo is required", 400);
-  }
-  if (isCouple && !hasSpouse) {
-    throw new AppError("Spouse Profile Photo is required for Couple", 400);
-  }
-};
+// NOTE: photos are now OPTIONAL (profile + spouse). The function is kept so
+// the call sites below do not change; it no longer throws. To make photos
+// compulsory again, restore the two checks:
+//   if (!hasProfile) throw new AppError("Profile Photo is required", 400);
+//   if (isCouple && !hasSpouse) throw new AppError("Spouse Profile Photo is required for Couple", 400);
+// eslint-disable-next-line no-unused-vars
+const assertPhotosPresent = ({ hasProfile, hasSpouse, isCouple }) => {};
 
 // Uploads whichever of the two photos were sent. The spouse photo is
 // only ever stored for Couple. `skip*` lets the duplicate-merge path
@@ -96,6 +95,8 @@ const CASE_INSENSITIVE_COLLATION = { locale: "en", strength: 2 };
 // allow-list so an unrecognized/typo'd `sortBy` query value can never
 // silently turn into an unindexed or unexpected sort; it just falls
 // back to the default instead.
+const APPROVAL_STATUSES = ["pending", "approved", "rejected"];
+
 const SORTABLE_FIELDS = [
   "fullName",
   "whatsappNumber",
@@ -121,7 +122,7 @@ const SORTABLE_FIELDS = [
 // that contact — never a new document, and never rejected with
 // "WhatsApp Number already exists". See mergeIntoExistingContact below
 // for exactly what gets updated.
-const createContact = async (data, adminId, files = {}) => {
+const createContact = async (data, adminId, files = {}, options = {}) => {
   const {
     fullName,
     whatsappNumber,
@@ -222,6 +223,9 @@ const createContact = async (data, adminId, files = {}) => {
           profession,
           professionCategory: professionCategory || null,
           historyOnly: false,
+          ...(options.approvalStatus
+            ? { approvalStatus: options.approvalStatus }
+            : {}),
           createdBy: adminId || historyOnlyContact.createdBy,
           ...imageFields(promoteImages),
         },
@@ -269,6 +273,12 @@ const createContact = async (data, adminId, files = {}) => {
       // Only meaningful for Couple; a Single contact never keeps one.
       professionCategory:
         relationship === "Couple" ? professionCategory || null : null,
+      // Public form submissions pass { approvalStatus: "pending" };
+      // admin-created contacts leave it out and use the schema default
+      // ("approved").
+      ...(options.approvalStatus
+        ? { approvalStatus: options.approvalStatus }
+        : {}),
       createdBy: adminId,
       ...imageFields(images),
     });
@@ -440,6 +450,18 @@ function buildContactQuery(query) {
     ];
   }
 
+  // ================= APPROVAL STATUS FILTER =================
+  // pending | approved | rejected. "approved" also matches contacts that
+  // have no approvalStatus at all (created before this field existed).
+  if (APPROVAL_STATUSES.includes(query.approvalStatus)) {
+    filter.$and = [
+      ...(filter.$and || []),
+      query.approvalStatus === "approved"
+        ? { approvalStatus: { $in: ["approved", null] } }
+        : { approvalStatus: query.approvalStatus },
+    ];
+  }
+
   if (query.companyCategory) {
     if (!mongoose.Types.ObjectId.isValid(query.companyCategory)) {
       throw new AppError("Invalid Company Category filter", 400);
@@ -483,6 +505,193 @@ function buildContactQuery(query) {
   return { filter, sortField, sortOrder, applyCollationIfNeeded };
 }
 
+
+// ================= APPROVAL STATUS COUNTS =================
+// Numbers shown on the Pending / Approved / Rejected filter tabs. Counted
+// over every visible contact (same base filter as the list), independent of
+// the search / category / reference filters.
+const getApprovalStatusCounts = async () => {
+  const rows = await Contact.aggregate([
+    { $match: { isDeleted: { $ne: true }, historyOnly: { $ne: true } } },
+    {
+      $group: {
+        _id: { $ifNull: ["$approvalStatus", "approved"] },
+        count: { $sum: 1 },
+      },
+    },
+  ]);
+
+  const counts = { pending: 0, approved: 0, rejected: 0 };
+  rows.forEach((row) => {
+    if (counts[row._id] !== undefined) counts[row._id] = row.count;
+  });
+  counts.all = counts.pending + counts.approved + counts.rejected;
+
+  return counts;
+};
+
+const validateIdList = (ids) => {
+  if (!Array.isArray(ids) || ids.length === 0) {
+    throw new AppError("Please select at least one contact.", 400);
+  }
+
+  const unique = [...new Set(ids.map((id) => String(id)))];
+
+  if (unique.some((id) => !mongoose.Types.ObjectId.isValid(id))) {
+    throw new AppError("Invalid contact selection.", 400);
+  }
+
+  return unique;
+};
+
+// ================= BULK UPDATE APPROVAL STATUS =================
+// PUT /api/contacts/bulk-status { ids: [...], status: "pending" |
+// "approved" | "rejected" }. One contact (row action) or many (checkbox
+// selection) go through this same function.
+const bulkUpdateApprovalStatus = async ({ ids, status }, adminId) => {
+  if (!APPROVAL_STATUSES.includes(status)) {
+    throw new AppError("Status must be pending, approved or rejected.", 400);
+  }
+
+  const contactIds = validateIdList(ids);
+
+  const result = await Contact.updateMany(
+    {
+      _id: { $in: contactIds },
+      isDeleted: { $ne: true },
+      historyOnly: { $ne: true },
+    },
+    {
+      $set: {
+        approvalStatus: status,
+        approvalUpdatedAt: new Date(),
+        approvalUpdatedBy: adminId || null,
+      },
+    }
+  );
+
+  const updated = result.modifiedCount ?? result.nModified ?? 0;
+  const matched = result.matchedCount ?? result.n ?? contactIds.length;
+
+  return {
+    success: true,
+    message: `${matched} contact${matched === 1 ? "" : "s"} marked as ${status}.`,
+    data: { matched, updated, status },
+  };
+};
+
+// ================= SEND PASS (WHATSAPP INVITATION) =================
+// POST /api/contacts/send-pass { ids, eventId, ticketTypeId }
+//
+// For every selected APPROVED contact: creates a booking for the chosen
+// event + ticket type (1 guest for Single, 2 for Couple) through the same
+// bookingService.createBooking the Booking page uses, which also sends the
+// WhatsApp invitation pass. Contacts are processed one at a time so two
+// contacts can never race for the same ticket stock, and one failure
+// never stops the rest. Returns a per-contact result for the UI.
+const sendPassToContacts = async ({ ids, eventId, ticketTypeId }, adminId) => {
+  // Required lazily: booking.service is heavy and only needed here.
+  const bookingService = require("./booking.service");
+  const Event = require("../models/event.model");
+  const TicketType = require("../models/ticketType.model");
+
+  const contactIds = validateIdList(ids);
+
+  if (!mongoose.Types.ObjectId.isValid(eventId)) {
+    throw new AppError("Please select an event.", 400);
+  }
+  if (!mongoose.Types.ObjectId.isValid(ticketTypeId)) {
+    throw new AppError("Please select a ticket.", 400);
+  }
+
+  const [event, ticketType] = await Promise.all([
+    Event.findById(eventId),
+    TicketType.findOne({ _id: ticketTypeId, eventId, isDeleted: false }),
+  ]);
+
+  if (!event) throw new AppError("Event not found.", 404);
+  if (!ticketType) throw new AppError("Ticket not found for this event.", 404);
+
+  const contacts = await Contact.find({
+    _id: { $in: contactIds },
+    isDeleted: { $ne: true },
+    historyOnly: { $ne: true },
+  });
+
+  const byId = new Map(contacts.map((c) => [String(c._id), c]));
+  const results = [];
+
+  for (const id of contactIds) {
+    const contact = byId.get(id);
+
+    if (!contact) {
+      results.push({ id, name: "-", status: "failed", message: "Contact not found." });
+      continue;
+    }
+
+    const base = { id, name: contact.fullName };
+    const currentStatus = contact.approvalStatus || "approved";
+
+    if (currentStatus !== "approved") {
+      results.push({
+        ...base,
+        status: "failed",
+        message: "Only approved contacts can receive a pass.",
+      });
+      continue;
+    }
+
+    const quantity = contact.relationship === "Couple" ? 2 : 1;
+
+    try {
+      const { booking } = await bookingService.createBooking(
+        {
+          eventId,
+          ticketTypeId,
+          quantity,
+          amount: ticketType.amount * quantity,
+          discount: 0,
+          name: contact.fullName,
+          mobileNumber: contact.whatsappNumber,
+          email: contact.email || "",
+          companyName: contact.companyName || "N/A",
+          remark: "Pass sent from Contact List",
+        },
+        adminId
+      );
+
+      await Contact.updateOne(
+        { _id: contact._id },
+        { $set: { passSentAt: new Date(), passEventId: event._id } }
+      );
+
+      results.push({
+        ...base,
+        status: "sent",
+        message: `Pass sent (${quantity} guest${quantity === 1 ? "" : "s"}) - ${booking.bookingNumber}`,
+      });
+    } catch (error) {
+      results.push({
+        ...base,
+        status: "failed",
+        message: error.message || "Failed to send pass.",
+      });
+    }
+  }
+
+  const sent = results.filter((r) => r.status === "sent").length;
+  const failed = results.length - sent;
+
+  return {
+    success: true,
+    message:
+      failed === 0
+        ? `Pass sent to ${sent} contact${sent === 1 ? "" : "s"}.`
+        : `Pass sent to ${sent}, failed for ${failed}.`,
+    data: { sent, failed, results },
+  };
+};
+
 // ================= GET ALL CONTACTS =================
 // Supports: search, sorting, pagination, companyCategory filter,
 // reference filter (case-insensitive — see the reference-filter note
@@ -508,10 +717,13 @@ const getAllContacts = async (query) => {
       .limit(limit)
   );
 
+  const statusCounts = await getApprovalStatusCounts();
+
   return {
     success: true,
     message: "Contacts fetched successfully",
     data: contacts,
+    statusCounts,
     pagination: {
       total,
       page,
@@ -555,17 +767,22 @@ const exportContacts = async (query, res) => {
   worksheet.columns = [
     { header: "Full Name", key: "fullName", width: 25 },
     { header: "WhatsApp Number", key: "whatsappNumber", width: 20 },
+    { header: "Email", key: "email", width: 28 },
     { header: "Company Name", key: "companyName", width: 25 },
     { header: "Designation", key: "designation", width: 22 },
     { header: "Company Category", key: "companyCategory", width: 22 },
     { header: "Address", key: "address", width: 30 },
     { header: "Area", key: "area", width: 20 },
     { header: "Instagram ID", key: "instagramId", width: 22 },
+    { header: "Relationship", key: "relationship", width: 14 },
     { header: "Spouse Name", key: "spouseName", width: 25 },
     { header: "Spouse Mobile Number", key: "spouseMobile", width: 22 },
     { header: "Spouse Instagram ID", key: "spouseInstagramId", width: 22 },
+    { header: "Spouse Category", key: "spouseCategory", width: 22 },
     { header: "Profession", key: "profession", width: 22 },
     { header: "Reference", key: "references", width: 30 },
+    { header: "Status", key: "approvalStatus", width: 14 },
+    { header: "Pass Sent", key: "passSent", width: 22 },
     { header: "Created At", key: "createdAt", width: 22 },
   ];
 
@@ -642,6 +859,7 @@ const exportContacts = async (query, res) => {
     worksheet.addRow({
       fullName: (showOwn && contact.fullName) || "-",
       whatsappNumber: (showOwn && contact.whatsappNumber) || "-",
+      email: (showOwn && contact.email) || "-",
       companyName: (showOwn && contact.companyName) || "-",
       designation: (showOwn && contact.designation) || "-",
       companyCategory:
@@ -649,11 +867,21 @@ const exportContacts = async (query, res) => {
       address: contact.address || "-",
       area: contact.area || "-",
       instagramId: (showOwn && contact.instagramId) || "-",
+      relationship: contact.relationship || "-",
       spouseName: (showSpouse && contact.spouseName) || "-",
       spouseMobile: (showSpouse && contact.spouseMobile) || "-",
       spouseInstagramId: (showSpouse && contact.spouseInstagramId) || "-",
+      spouseCategory:
+        (showSpouse && contact.professionCategory?.name) || "-",
       profession: (showSpouse && contact.profession) || "-",
       references: references.length ? references.join(", ") : "-",
+      approvalStatus: (() => {
+        const status = contact.approvalStatus || "approved";
+        return status.charAt(0).toUpperCase() + status.slice(1);
+      })(),
+      passSent: contact.passSentAt
+        ? `Yes - ${new Date(contact.passSentAt).toLocaleString("en-GB")}`
+        : "No",
       createdAt: contact.createdAt
         ? new Date(contact.createdAt).toLocaleString("en-GB")
         : "-",
@@ -1003,6 +1231,8 @@ async function assertCompanyCategoryExists(companyCategoryId) {
 }
 
 module.exports = {
+  bulkUpdateApprovalStatus,
+  sendPassToContacts,
   createContact,
   getAllContacts,
   exportContacts,

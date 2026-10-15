@@ -76,6 +76,30 @@ router.get(
   contactController.exportContacts
 );
 
+// Import contacts from a CSV file. Add ?dryRun=true to only check the file.
+router.post(
+  "/import-csv",
+  protect,
+  upload.csvUpload.single("file"),
+  contactController.importContactsCsv
+);
+
+// Approve / Reject / set Pending for one or many contacts (checkbox
+// selection). Body: { ids: [...], status }.
+router.put(
+  "/bulk-status",
+  protect,
+  contactController.bulkUpdateStatus
+);
+
+// Send the WhatsApp invitation pass to one or many APPROVED contacts.
+// Body: { ids: [...], eventId, ticketTypeId }.
+router.post(
+  "/send-pass",
+  protect,
+  contactController.sendPass
+);
+
 // Get Contact By Id
 router.get(
   "/:id",

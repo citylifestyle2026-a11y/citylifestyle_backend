@@ -212,6 +212,42 @@ const contactSchema = new mongoose.Schema(
       default: false,
     },
 
+    // ================= APPROVAL (PUBLIC FORM SUBMISSIONS) =================
+    // Public form submissions are saved as "pending" and an admin then
+    // approves / rejects them from Contact List. Contacts added by an admin
+    // (and every contact that existed before this field was added) are
+    // "approved" — missing field is also treated as approved by the list
+    // filter (see buildContactQuery in services/contact.service.js).
+    approvalStatus: {
+      type: String,
+      enum: ["pending", "approved", "rejected"],
+      default: "approved",
+    },
+
+    approvalUpdatedAt: {
+      type: Date,
+      default: null,
+    },
+
+    approvalUpdatedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Admin",
+      default: null,
+    },
+
+    // Last time an invitation pass was sent to this contact over WhatsApp
+    // (see sendPassToContacts in services/contact.service.js).
+    passSentAt: {
+      type: Date,
+      default: null,
+    },
+
+    passEventId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Event",
+      default: null,
+    },
+
     // Soft-delete fields, same pattern already used on Event/Booking
     // (isDeleted / deletedAt / deletedBy) — deleting a contact never
     // hard-removes the document.
@@ -312,6 +348,7 @@ contactSchema.pre("findOneAndUpdate", function (next) {
 // ================= INDEXES =================
 // Common "list active, non-deleted contacts" query.
 contactSchema.index({ isDeleted: 1, status: 1 });
+contactSchema.index({ approvalStatus: 1 });
 
 // Lookup/search by name.
 contactSchema.index({ fullName: 1 });

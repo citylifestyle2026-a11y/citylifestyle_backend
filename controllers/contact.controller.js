@@ -1,4 +1,5 @@
 const contactService = require("../services/contact.service");
+const contactImportService = require("../services/contactImport.service");
 
 // ================= CREATE CONTACT =================
 // Follows the same pattern as companyCategoryController.createCompanyCategory /
@@ -36,6 +37,7 @@ const getAllContacts = async (req, res, next) => {
       success: true,
       message: result.message,
       data: result.data,
+      statusCounts: result.statusCounts,
       pagination: result.pagination,
     });
   } catch (error) {
@@ -144,7 +146,76 @@ const deleteContact = async (req, res, next) => {
   }
 };
 
+// ================= BULK APPROVAL STATUS =================
+const bulkUpdateStatus = async (req, res, next) => {
+  try {
+    const result = await contactService.bulkUpdateApprovalStatus(
+      req.body,
+      req.user.id
+    );
+
+    return res.status(200).json(result);
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ================= SEND PASS OVER WHATSAPP =================
+const sendPass = async (req, res, next) => {
+  try {
+    const result = await contactService.sendPassToContacts(
+      req.body,
+      req.user.id
+    );
+
+    return res.status(200).json(result);
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ================= IMPORT CONTACTS FROM CSV =================
+// POST /api/contacts/import-csv            -> creates the contacts
+// POST /api/contacts/import-csv?dryRun=true -> only checks the file
+// multipart field "file" = the .csv, optional text field
+// "approvalStatus" = approved (default) | pending.
+const importContactsCsv = async (req, res, next) => {
+  try {
+    if (!req.file) {
+      return res
+        .status(400)
+        .json({ success: false, message: "CSV file is required" });
+    }
+
+    const dryRun = String(req.query.dryRun || "") === "true";
+
+    const result = await contactImportService.importContactsCsv(
+      req.file.buffer,
+      req.user.id,
+      {
+        approvalStatus: req.body?.approvalStatus || "approved",
+        dryRun,
+      }
+    );
+
+    const summary = `Processed ${result.totalRows} row(s): ${result.successCount} ${
+      dryRun ? "ready to import" : "contact(s) created"
+    }, ${result.duplicateCount} duplicate(s) skipped, ${result.failureCount} failed`;
+
+    return res.status(200).json({
+      success: dryRun || result.successCount > 0,
+      message: summary,
+      data: result,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
+  importContactsCsv,
+  bulkUpdateStatus,
+  sendPass,
   createContact,
   getAllContacts,
   exportContacts,
