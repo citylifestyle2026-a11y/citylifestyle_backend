@@ -61,6 +61,19 @@ const eventSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
+    // Shown in the WhatsApp invitation ({{8}} Dress Code) and on /ticket.
+    dressCode: {
+      type: String,
+      trim: true,
+      default: "Traditional",
+    },
+    // Optional short Google Maps link for {{11}} Venue Location. When empty,
+    // a Google Maps link is built from latitude/longitude instead.
+    mapLink: {
+      type: String,
+      trim: true,
+      default: "",
+    },
     image: {
       type: String,
       default: "",

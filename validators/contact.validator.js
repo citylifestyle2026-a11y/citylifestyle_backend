@@ -1,9 +1,64 @@
 const { body, validationResult } = require("express-validator");
 const {
+  normalizeInstagramId,
+  isValidInstagramId,
+} = require("../utils/normalizeInstagramId");
+const {
   mobileCustomValidator,
   toLocalMobileNumber,
   toLocalMobileSanitizer,
 } = require("../utils/normalizeMobileNumber");
+
+// ================= MULTIPART BODY PARSER =================
+// The Create/Edit Contact form now submits multipart/form-data (profile
+// photo + spouse photo are files), and a multipart body can only carry
+// strings — so the frontend sends `references` as a JSON string. This
+// turns it back into a real array BEFORE the validators below run.
+// Plain JSON requests (references already an array) pass straight
+// through, so existing API clients keep working.
+const parseContactFormData = (req, res, next) => {
+  if (req.body && typeof req.body.references === "string") {
+    try {
+      const parsed = JSON.parse(req.body.references);
+      req.body.references = Array.isArray(parsed) ? parsed : [];
+    } catch (error) {
+      req.body.references = [];
+    }
+  }
+  next();
+};
+
+// Area / Instagram ID rules shared by create AND update. Both are
+// COMPULSORY; the Spouse Instagram ID is compulsory only for Couple
+// (ignored for Single). Instagram IDs are normalized first ("@name",
+// "name" and a pasted instagram.com link all become "name"), then checked.
+// The Profile Photo / Spouse Profile Photo are files, so their
+// "required" rule is enforced in services/contact.service.js.
+const instagramRule = (field, label, { coupleOnly = false } = {}) =>
+  body(field)
+    .customSanitizer(normalizeInstagramId)
+    .custom((value, { req }) => {
+      if (coupleOnly && req.body.relationship !== "Couple") return true;
+
+      if (!value) {
+        throw new Error(`${label} is required`);
+      }
+
+      if (!isValidInstagramId(value)) {
+        throw new Error(
+          `Invalid ${label} (letters, numbers, dots and underscores only, max 30)`
+        );
+      }
+      return true;
+    });
+
+const contactExtraFieldValidation = [
+  body("area").trim().notEmpty().withMessage("Area is required"),
+  instagramRule("instagramId", "Instagram ID"),
+  instagramRule("spouseInstagramId", "Spouse Instagram ID", {
+    coupleOnly: true,
+  }),
+];
 
 // Create Contact Validation
 // This only checks shape/type/presence — trimming and case-insensitive
@@ -153,6 +208,8 @@ const createContactValidation = [
     }
     return true;
   }),
+
+  ...contactExtraFieldValidation,
 ];
 
 // Update Contact Validation
@@ -281,6 +338,8 @@ const updateContactValidation = [
     }
     return true;
   }),
+
+  ...contactExtraFieldValidation,
 ];
 
 // Validation Result
@@ -305,6 +364,7 @@ const validate = (req, res, next) => {
 };
 
 module.exports = {
+  parseContactFormData,
   createContactValidation,
   updateContactValidation,
   validate,

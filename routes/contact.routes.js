@@ -3,12 +3,24 @@ const router = express.Router();
 
 const { protect } = require("../middlewares/auth.middleware");
 const contactController = require("../controllers/contact.controller");
+const upload = require("../middlewares/upload.middleware");
 
 const {
+  parseContactFormData,
   createContactValidation,
   updateContactValidation,
   validate,
 } = require("../validators/contact.validator");
+
+// Contact profile photo + spouse profile photo. Same 100 MB image
+// middleware as the User/Admin profile photo routes — every image is
+// re-encoded to compressed WEBP by uploadToLocal before it's saved.
+// `parseContactFormData` then restores `references` (sent as a JSON
+// string inside multipart/form-data) to an array for the validators.
+const contactUpload = upload.largeImageUpload.fields([
+  { name: "profileImage", maxCount: 1 },
+  { name: "spouseProfileImage", maxCount: 1 },
+]);
 
 // `protect` runs before validation, same convention as
 // event.routes.js/ticketType.routes.js — an unauthenticated caller
@@ -18,6 +30,8 @@ const {
 router.post(
   "/create",
   protect,
+  contactUpload,
+  parseContactFormData,
   createContactValidation,
   validate,
   contactController.createContact
@@ -73,6 +87,8 @@ router.get(
 router.put(
   "/:id/update",
   protect,
+  contactUpload,
+  parseContactFormData,
   updateContactValidation,
   validate,
   contactController.updateContact

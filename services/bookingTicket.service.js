@@ -8,6 +8,9 @@ const whatsappService = require("./whatsapp.service");
 const pdfService = require("./pdf.service");
 const buildTicketDownloadBodyParams = require("../utils/buildTicketDownloadBodyParams");
 const ticketDeliveryService = require("./ticketDelivery.service");
+// NEW single-QR invitation flow
+const invitationService = require("./invitation.service");
+const Event = require("../models/event.model");
 
 // ================= GET REGISTER USER (FOR EDIT PRE-FILL) =================
 // Backend counterpart of the frontend's getRegisterUserApi
@@ -132,6 +135,23 @@ const resendTicket = async (ticketId) => {
       "This ticket is missing its booking/event/ticket type details and cannot be resent.",
       500
     );
+  }
+
+  // ================= NEW: SINGLE QR INVITATION RESEND =================
+  // For bookings made with the new flow (entryMode "single_qr") there is
+  // no registration / ticket PDF -- resend means "send the same invitation
+  // message again" (same invitationId, same single QR link) to the
+  // booking's mobile number. Throws on failure so the caller sees it.
+  // Bookings made with the OLD flow continue below, unchanged.
+  if (booking.entryMode === "single_qr") {
+    const fullEvent = await Event.findById(event._id);
+
+    await invitationService.sendInvitationMessage({
+      booking,
+      event: fullEvent || event,
+    });
+
+    return ticket;
   }
 
   if (!ticket.isRegistered) {

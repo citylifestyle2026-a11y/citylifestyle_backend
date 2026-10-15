@@ -24,7 +24,7 @@ const verifyQr = async ({ qrToken }) => {
     .populate({
       path: "bookingId",
       select:
-        "bookingNumber name mobileNumber email quantity amount discount isDeleted",
+        "bookingNumber name mobileNumber email quantity amount discount isDeleted entryMode invitationId",
     })
     .populate({
       path: "eventId",
@@ -90,7 +90,14 @@ const verifyQr = async ({ qrToken }) => {
      qrToken: ticket.qrToken, 
     attendee: ticket.attendee,
 
+    // NEW single-QR flow: this one QR admits the WHOLE booking.
+    isGroupEntry: ticket.bookingId.entryMode === "single_qr",
+    guests: ticket.bookingId.quantity,
+
     booking: {
+      name: ticket.bookingId.name,
+      mobileNumber: ticket.bookingId.mobileNumber,
+      invitationId: ticket.bookingId.invitationId || null,
       quantity: ticket.bookingId.quantity,
       amount: ticket.bookingId.amount,
       discount: ticket.bookingId.discount,
@@ -136,7 +143,7 @@ const checkInQr = async ({ qrToken, scannedBy }) => {
     .populate({
       path: "bookingId",
       select:
-        "bookingNumber name mobileNumber email quantity amount discount isDeleted",
+        "bookingNumber name mobileNumber email quantity amount discount isDeleted entryMode invitationId",
     })
     .populate({
       path: "eventId",
@@ -161,12 +168,37 @@ const checkInQr = async ({ qrToken, scannedBy }) => {
     throw new AppError("This ticket has been cancelled.", 400);
   }
 
-  // 4. Update Ticket (unchanged)
-  ticket.status = "Used";
-  ticket.scannedAt = new Date();
-  ticket.scannedBy = scannedBy;
+  // 4. Update Ticket(s)
+  const isGroupEntry = ticket.bookingId?.entryMode === "single_qr";
+  let guestsCheckedIn = 1;
 
-  await ticket.save();
+  if (isGroupEntry) {
+    // NEW single-QR flow: ONE scan = every guest of this booking is
+    // marked as entered (quantity 2 -> 2 guests, 5 -> 5 guests, ...).
+    // The filter on status "Active" makes this safe against a double scan:
+    // a second scan updates 0 tickets and is rejected below.
+    const scannedAt = new Date();
+    const result = await BookingTicket.updateMany(
+      { bookingId: ticket.bookingId._id, status: "Active" },
+      { $set: { status: "Used", scannedAt, scannedBy } }
+    );
+
+    if (result.modifiedCount === 0) {
+      throw new AppError("This ticket has already been checked in.", 400);
+    }
+
+    guestsCheckedIn = result.modifiedCount;
+    ticket.status = "Used";
+    ticket.scannedAt = scannedAt;
+    ticket.scannedBy = scannedBy;
+  } else {
+    // OLD flow (one ticket = one QR = one scan) -- unchanged.
+    ticket.status = "Used";
+    ticket.scannedAt = new Date();
+    ticket.scannedBy = scannedBy;
+
+    await ticket.save();
+  }
 
   // 5. Return Response DTO
   // Mirrors verifyQr's DTO shape below so the frontend gets the same
@@ -182,9 +214,14 @@ const checkInQr = async ({ qrToken, scannedBy }) => {
     isRegistered: ticket.isRegistered,
     scannedAt: ticket.scannedAt,
     attendee: ticket.attendee,
+    isGroupEntry,
+    guests: isGroupEntry ? guestsCheckedIn : 1,
 
     booking: ticket.bookingId
       ? {
+          name: ticket.bookingId.name,
+          mobileNumber: ticket.bookingId.mobileNumber,
+          invitationId: ticket.bookingId.invitationId || null,
           quantity: ticket.bookingId.quantity,
           amount: ticket.bookingId.amount,
           discount: ticket.bookingId.discount,

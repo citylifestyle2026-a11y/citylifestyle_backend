@@ -5,6 +5,7 @@ const bookingController = require("../controllers/booking.controller");
 
 const {
   createBookingValidation,
+  updateBookingValidation,
   validate,
 } = require("../validators/booking.validator");
 
@@ -18,6 +19,15 @@ router.post(
   createBookingValidation,
   validate,
   bookingController.createBooking
+);
+
+// Edit Booking (all editable fields; see bookingService.updateBooking)
+router.put(
+  "/update/:id",
+  protect,
+  updateBookingValidation,
+  validate,
+  bookingController.updateBooking
 );
 
 // Bulk Import Bookings via CSV

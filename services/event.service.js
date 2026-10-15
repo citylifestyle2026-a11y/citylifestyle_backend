@@ -72,6 +72,8 @@ exports.createEvent = async (data, file, adminId) => {
     longitude: data.longitude,
     address: data.address,
     termsConditions: data.termsConditions,
+    dressCode: (data.dressCode || "").trim() || "Traditional",
+    mapLink: (data.mapLink || "").trim(),
     videoLinks: data.videoLinks ? JSON.parse(data.videoLinks) : [],
     image: imageUrl,
     imagePublicId: imagePublicId,
@@ -235,6 +237,11 @@ exports.updateEvent = async (id, data, file) => {
       longitude: data.longitude,
       address: data.address,
       termsConditions: data.termsConditions,
+      dressCode:
+        data.dressCode !== undefined
+          ? (data.dressCode || "").trim() || "Traditional"
+          : event.dressCode,
+      mapLink: data.mapLink !== undefined ? (data.mapLink || "").trim() : event.mapLink,
       videoLinks: data.videoLinks
         ? JSON.parse(data.videoLinks)
         : event.videoLinks,

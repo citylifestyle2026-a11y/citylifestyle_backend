@@ -3,6 +3,88 @@ const Contact = require("../models/contact.model")
 const CompanyCategory = require("../models/companycategory.model");
 const AppError = require("../utils/AppError");
 const { normalizeMobileSearchTerm } = require("../utils/normalizeMobileNumber");
+const uploadImage = require("../utils/localUpload.util");
+const deleteImage = require("../utils/deleteLocalFile");
+
+// ================= CONTACT IMAGE HELPERS =================
+// Profile photo + spouse profile photo arrive as multer files
+// (req.files.profileImage[0] / req.files.spouseProfileImage[0]).
+// uploadToLocal re-encodes them to compressed WEBP under uploads/contacts.
+const CONTACT_IMAGE_FOLDER = "event-management/contacts";
+
+const isTrue = (value) => value === true || value === "true";
+
+const firstFile = (files, field) =>
+  files && files[field] && files[field][0] ? files[field][0] : null;
+
+const uploadOne = async (file) => {
+  if (!file) return null;
+  const result = await uploadImage(file, CONTACT_IMAGE_FOLDER, "image");
+  return { url: result.url, publicId: result.public_id };
+};
+
+// Profile Photo is compulsory (and Spouse Profile Photo for Couple).
+// `hasProfile` / `hasSpouse` say whether a photo will exist after this
+// save (a new upload, or an already-saved one that isn't being removed).
+const assertPhotosPresent = ({ hasProfile, hasSpouse, isCouple }) => {
+  if (!hasProfile) {
+    throw new AppError("Profile Photo is required", 400);
+  }
+  if (isCouple && !hasSpouse) {
+    throw new AppError("Spouse Profile Photo is required for Couple", 400);
+  }
+};
+
+// Uploads whichever of the two photos were sent. The spouse photo is
+// only ever stored for Couple. `skip*` lets the duplicate-merge path
+// avoid uploading a photo it will not use (existing photo is kept).
+const uploadContactImages = async (
+  files,
+  isCouple,
+  { skipProfile = false, skipSpouse = false } = {}
+) => {
+  const images = { profile: null, spouse: null };
+
+  if (!skipProfile) {
+    images.profile = await uploadOne(firstFile(files, "profileImage"));
+  }
+
+  if (isCouple && !skipSpouse) {
+    try {
+      images.spouse = await uploadOne(firstFile(files, "spouseProfileImage"));
+    } catch (error) {
+      await discardUploadedImages(images);
+      throw error;
+    }
+  }
+
+  return images;
+};
+
+// Turns freshly uploaded images into the Mongo fields to set.
+const imageFields = (images) => {
+  const fields = {};
+
+  if (images.profile) {
+    fields.profileImage = images.profile.url;
+    fields.profileImagePublicId = images.profile.publicId;
+  }
+
+  if (images.spouse) {
+    fields.spouseProfileImage = images.spouse.url;
+    fields.spouseProfileImagePublicId = images.spouse.publicId;
+  }
+
+  return fields;
+};
+
+// Best-effort removal of files that were uploaded for a save that then
+// failed — so a rejected save never leaves orphan files on disk.
+const discardUploadedImages = async (images) => {
+  if (!images) return;
+  if (images.profile) await deleteImage(images.profile.publicId);
+  if (images.spouse) await deleteImage(images.spouse.publicId);
+};
 
 // Case-insensitive collation used for the reference filter below — same
 // settings as the collation-based indexes already defined on
@@ -19,6 +101,7 @@ const SORTABLE_FIELDS = [
   "whatsappNumber",
   "companyName",
   "designation",
+  "area",
   "spouseName",
   "spouseMobile",
   "profession",
@@ -38,13 +121,16 @@ const SORTABLE_FIELDS = [
 // that contact — never a new document, and never rejected with
 // "WhatsApp Number already exists". See mergeIntoExistingContact below
 // for exactly what gets updated.
-const createContact = async (data, adminId) => {
+const createContact = async (data, adminId, files = {}) => {
   const {
     fullName,
     whatsappNumber,
     companyName,
     designation,
     address,
+    area,
+    instagramId,
+    spouseInstagramId,
     references,
     companyCategory,
     email,
@@ -54,6 +140,12 @@ const createContact = async (data, adminId) => {
     profession,
     professionCategory,
   } = data;
+
+  assertPhotosPresent({
+    hasProfile: !!firstFile(files, "profileImage"),
+    hasSpouse: !!firstFile(files, "spouseProfileImage"),
+    isCouple: relationship === "Couple",
+  });
 
   if (companyCategory) {
     await assertCompanyCategoryExists(companyCategory);
@@ -73,10 +165,15 @@ const createContact = async (data, adminId) => {
   }).collation(CASE_INSENSITIVE_COLLATION);
 
   if (existingContact) {
-    return mergeIntoExistingContact(existingContact, {
+    return mergeIntoExistingContact(
+      existingContact,
+      {
       companyName,
       designation,
       address,
+      area,
+      instagramId,
+      spouseInstagramId,
       references,
       companyCategory,
       email,
@@ -85,7 +182,9 @@ const createContact = async (data, adminId) => {
       spouseMobile,
       profession,
       professionCategory,
-    });
+      },
+      files
+    );
   }
 
   // A history-only contact (made by Entry Report) with this number already
@@ -98,31 +197,45 @@ const createContact = async (data, adminId) => {
   });
 
   if (historyOnlyContact) {
-    const promoted = await Contact.findOneAndUpdate(
-      { _id: historyOnlyContact._id },
-      {
-        fullName,
-        companyName,
-        designation,
-        address,
-        references: Array.isArray(references) ? references : [],
-        companyCategory: companyCategory || null,
-        email,
-        relationship,
-        spouseName,
-        spouseMobile,
-        profession,
-        professionCategory: professionCategory || null,
-        historyOnly: false,
-        createdBy: adminId || historyOnlyContact.createdBy,
-      },
-      { new: true, runValidators: true }
-    )
-      .populate("companyCategory", "name")
-      .populate("professionCategory", "name")
-      .populate("createdBy", "name");
+    const promoteImages = await uploadContactImages(
+      files,
+      relationship === "Couple"
+    );
 
-    return promoted;
+    try {
+      const promoted = await Contact.findOneAndUpdate(
+        { _id: historyOnlyContact._id },
+        {
+          fullName,
+          companyName,
+          designation,
+          address,
+          area,
+          instagramId,
+          spouseInstagramId: relationship === "Couple" ? spouseInstagramId : "",
+          references: Array.isArray(references) ? references : [],
+          companyCategory: companyCategory || null,
+          email,
+          relationship,
+          spouseName,
+          spouseMobile,
+          profession,
+          professionCategory: professionCategory || null,
+          historyOnly: false,
+          createdBy: adminId || historyOnlyContact.createdBy,
+          ...imageFields(promoteImages),
+        },
+        { new: true, runValidators: true }
+      )
+        .populate("companyCategory", "name")
+        .populate("professionCategory", "name")
+        .populate("createdBy", "name");
+
+      return promoted;
+    } catch (error) {
+      await discardUploadedImages(promoteImages);
+      throw error;
+    }
   }
 
   await assertWhatsappNumberNotDuplicate(trimmedWhatsappNumber);
@@ -131,26 +244,40 @@ const createContact = async (data, adminId) => {
   // case-insensitive de-duplication happen in Contact.model.js's own
   // pre-save hook, not here, so every write path (this create, or a
   // future bulk-import) gets the same guarantee for free.
-  const contact = await Contact.create({
-    fullName,
-    whatsappNumber,
-    companyName,
-    designation,
-    address,
-    references: Array.isArray(references) ? references : [],
-    companyCategory: companyCategory || null,
-    email,
-    relationship,
-    spouseName,
-    spouseMobile,
-    profession,
-    // Only meaningful for Couple; a Single contact never keeps one.
-    professionCategory:
-      relationship === "Couple" ? professionCategory || null : null,
-    createdBy: adminId,
-  });
+  // Photos are uploaded only AFTER every duplicate/category check above
+  // has passed, and are removed again if the save itself fails.
+  const images = await uploadContactImages(files, relationship === "Couple");
 
-  return contact;
+  try {
+    const contact = await Contact.create({
+      fullName,
+      whatsappNumber,
+      companyName,
+      designation,
+      address,
+      area,
+      instagramId,
+      // Spouse details only mean something for Couple.
+      spouseInstagramId: relationship === "Couple" ? spouseInstagramId : "",
+      references: Array.isArray(references) ? references : [],
+      companyCategory: companyCategory || null,
+      email,
+      relationship,
+      spouseName,
+      spouseMobile,
+      profession,
+      // Only meaningful for Couple; a Single contact never keeps one.
+      professionCategory:
+        relationship === "Couple" ? professionCategory || null : null,
+      createdBy: adminId,
+      ...imageFields(images),
+    });
+
+    return contact;
+  } catch (error) {
+    await discardUploadedImages(images);
+    throw error;
+  }
 };
 
 // ================= MERGE INTO EXISTING CONTACT (DUPLICATE SUBMIT) =================
@@ -165,11 +292,14 @@ const createContact = async (data, adminId) => {
 //    de-duplication (e.g. existing "A", new "a") is handled by
 //    Contact.model.js's pre-findOneAndUpdate hook, same as every other
 //    write path for this field.
-async function mergeIntoExistingContact(existingContact, incoming) {
+async function mergeIntoExistingContact(existingContact, incoming, files = {}) {
   const {
     companyName,
     designation,
     address,
+    area,
+    instagramId,
+    spouseInstagramId,
     references,
     companyCategory,
     email,
@@ -192,6 +322,14 @@ async function mergeIntoExistingContact(existingContact, incoming) {
 
   if (address && !existingContact.address) {
     updateFields.address = address;
+  }
+
+  if (area && !existingContact.area) {
+    updateFields.area = area;
+  }
+
+  if (instagramId && !existingContact.instagramId) {
+    updateFields.instagramId = instagramId;
   }
 
   if (companyCategory && !existingContact.companyCategory) {
@@ -230,6 +368,21 @@ async function mergeIntoExistingContact(existingContact, incoming) {
     updateFields.professionCategory = professionCategory;
   }
 
+  const mergedIsCouple =
+    (existingContact.relationship || relationship) === "Couple";
+
+  if (mergedIsCouple && spouseInstagramId && !existingContact.spouseInstagramId) {
+    updateFields.spouseInstagramId = spouseInstagramId;
+  }
+
+  // Photos follow the same "only fill if empty" rule: an existing photo
+  // is never replaced by a duplicate submission.
+  const mergeImages = await uploadContactImages(files, mergedIsCouple, {
+    skipProfile: !!existingContact.profileImage,
+    skipSpouse: !!existingContact.spouseProfileImage,
+  });
+  Object.assign(updateFields, imageFields(mergeImages));
+
   if (Object.keys(updateFields).length === 0) {
     return existingContact.populate([
       { path: "companyCategory", select: "name" },
@@ -238,16 +391,21 @@ async function mergeIntoExistingContact(existingContact, incoming) {
     ]);
   }
 
-  const updatedContact = await Contact.findOneAndUpdate(
-    { _id: existingContact._id },
-    updateFields,
-    { new: true, runValidators: true }
-  )
-    .populate("companyCategory", "name")
-    .populate("professionCategory", "name")
-    .populate("createdBy", "name");
+  try {
+    const updatedContact = await Contact.findOneAndUpdate(
+      { _id: existingContact._id },
+      updateFields,
+      { new: true, runValidators: true }
+    )
+      .populate("companyCategory", "name")
+      .populate("professionCategory", "name")
+      .populate("createdBy", "name");
 
-  return updatedContact;
+    return updatedContact;
+  } catch (error) {
+    await discardUploadedImages(mergeImages);
+    throw error;
+  }
 }
 
 // ================= SHARED FILTER/SORT BUILDER =================
@@ -276,6 +434,9 @@ function buildContactQuery(query) {
       { companyName: { $regex: search, $options: "i" } },
       { designation: { $regex: search, $options: "i" } },
       { address: { $regex: search, $options: "i" } },
+      { area: { $regex: search, $options: "i" } },
+      { instagramId: { $regex: search, $options: "i" } },
+      { spouseInstagramId: { $regex: search, $options: "i" } },
     ];
   }
 
@@ -398,8 +559,11 @@ const exportContacts = async (query, res) => {
     { header: "Designation", key: "designation", width: 22 },
     { header: "Company Category", key: "companyCategory", width: 22 },
     { header: "Address", key: "address", width: 30 },
+    { header: "Area", key: "area", width: 20 },
+    { header: "Instagram ID", key: "instagramId", width: 22 },
     { header: "Spouse Name", key: "spouseName", width: 25 },
     { header: "Spouse Mobile Number", key: "spouseMobile", width: 22 },
+    { header: "Spouse Instagram ID", key: "spouseInstagramId", width: 22 },
     { header: "Profession", key: "profession", width: 22 },
     { header: "Reference", key: "references", width: 30 },
     { header: "Created At", key: "createdAt", width: 22 },
@@ -483,8 +647,11 @@ const exportContacts = async (query, res) => {
       companyCategory:
         [...new Set(categoryNames.filter(Boolean))].join(", ") || "-",
       address: contact.address || "-",
+      area: contact.area || "-",
+      instagramId: (showOwn && contact.instagramId) || "-",
       spouseName: (showSpouse && contact.spouseName) || "-",
       spouseMobile: (showSpouse && contact.spouseMobile) || "-",
+      spouseInstagramId: (showSpouse && contact.spouseInstagramId) || "-",
       profession: (showSpouse && contact.profession) || "-",
       references: references.length ? references.join(", ") : "-",
       createdAt: contact.createdAt
@@ -533,7 +700,7 @@ const getContactById = async (id) => {
 // leaving untouched fields alone). References normalization (trim +
 // case-insensitive de-dup within this contact) happens in
 // Contact.model.js's pre-findOneAndUpdate hook.
-const updateContact = async (id, data) => {
+const updateContact = async (id, data, files = {}) => {
   if (!mongoose.Types.ObjectId.isValid(id)) {
     throw new AppError("Invalid Contact ID", 400);
   }
@@ -569,6 +736,8 @@ const updateContact = async (id, data) => {
   if (data.companyName !== undefined) updateFields.companyName = data.companyName;
   if (data.designation !== undefined) updateFields.designation = data.designation;
   if (data.address !== undefined) updateFields.address = data.address;
+  if (data.area !== undefined) updateFields.area = data.area;
+  if (data.instagramId !== undefined) updateFields.instagramId = data.instagramId;
   if (data.references !== undefined) updateFields.references = data.references;
   if (data.companyCategory !== undefined) {
     updateFields.companyCategory = data.companyCategory || null;
@@ -586,14 +755,74 @@ const updateContact = async (id, data) => {
       : null;
   }
 
-  const updatedContact = await Contact.findOneAndUpdate(
-    { _id: id, isDeleted: { $ne: true } },
-    updateFields,
-    { new: true, runValidators: true }
-  )
-    .populate("companyCategory", "name")
-    .populate("professionCategory", "name")
-    .populate("createdBy", "name");
+  // ---------- Photos + spouse Instagram ----------
+  // Spouse details only exist for Couple: switching to Single wipes the
+  // spouse Instagram ID and removes the spouse photo from disk.
+  const isCoupleNow = (data.relationship ?? contact.relationship) === "Couple";
+  const staleImageIds = []; // old files deleted only AFTER the DB update succeeds
+
+  // Photos are compulsory: a new upload, or the saved one kept (not removed).
+  assertPhotosPresent({
+    hasProfile:
+      !!firstFile(files, "profileImage") ||
+      (!!contact.profileImage && !isTrue(data.removeProfileImage)),
+    hasSpouse:
+      !!firstFile(files, "spouseProfileImage") ||
+      (!!contact.spouseProfileImage && !isTrue(data.removeSpouseProfileImage)),
+    isCouple: isCoupleNow,
+  });
+
+  const images = await uploadContactImages(files, isCoupleNow);
+
+  if (images.profile) {
+    staleImageIds.push(contact.profileImagePublicId);
+  } else if (isTrue(data.removeProfileImage) && contact.profileImage) {
+    staleImageIds.push(contact.profileImagePublicId);
+    updateFields.profileImage = "";
+    updateFields.profileImagePublicId = "";
+  }
+
+  if (!isCoupleNow) {
+    updateFields.spouseInstagramId = "";
+    if (contact.spouseProfileImage) {
+      staleImageIds.push(contact.spouseProfileImagePublicId);
+      updateFields.spouseProfileImage = "";
+      updateFields.spouseProfileImagePublicId = "";
+    }
+  } else {
+    if (data.spouseInstagramId !== undefined) {
+      updateFields.spouseInstagramId = data.spouseInstagramId;
+    }
+
+    if (images.spouse) {
+      staleImageIds.push(contact.spouseProfileImagePublicId);
+    } else if (isTrue(data.removeSpouseProfileImage) && contact.spouseProfileImage) {
+      staleImageIds.push(contact.spouseProfileImagePublicId);
+      updateFields.spouseProfileImage = "";
+      updateFields.spouseProfileImagePublicId = "";
+    }
+  }
+
+  Object.assign(updateFields, imageFields(images));
+
+  let updatedContact;
+  try {
+    updatedContact = await Contact.findOneAndUpdate(
+      { _id: id, isDeleted: { $ne: true } },
+      updateFields,
+      { new: true, runValidators: true }
+    )
+      .populate("companyCategory", "name")
+      .populate("professionCategory", "name")
+      .populate("createdBy", "name");
+  } catch (error) {
+    await discardUploadedImages(images);
+    throw error;
+  }
+
+  for (const publicId of staleImageIds) {
+    if (publicId) await deleteImage(publicId);
+  }
 
   return updatedContact;
 };

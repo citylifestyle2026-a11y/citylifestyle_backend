@@ -12,6 +12,9 @@ const eventService = require("./event.service");
 const whatsappService = require("./whatsapp.service");
 const buildRegistrationBodyParams = require("../utils/buildRegistrationBodyParams");
 const generateRegistrationToken = require("../utils/generateRegistrationToken");
+// NEW single-QR invitation flow (see services/invitation.service.js).
+const invitationService = require("./invitation.service");
+const generateInvitationId = require("../utils/generateInvitationId");
 const {
   normalizeMobileNumber,
   getMobileNumberVariants,
@@ -47,6 +50,12 @@ const generateBookingNumber = async (eventId, eventCode, session) => {
   return `${eventCode}-BK${String(counter.sequence).padStart(3, "0")}`;
 };
 
+// ================= OLD FLOW (KEPT, SWITCHABLE) =================
+// The function below is the OLD "send registration link over WhatsApp"
+// step. It is NOT removed. It runs when
+//   BOOKING_NOTIFICATION_MODE=registration_link
+// The default mode (qr_invite) sends ONE invitation with ONE QR instead
+// -- see services/invitation.service.js and createBooking below.
 // ================= SEND REGISTRATION LINK VIA WHATSAPP (BEST-EFFORT) =================
 // QR codes continue to be generated exactly as before (see the
 // createBooking loop below — untouched), but are intentionally NOT sent
@@ -128,6 +137,7 @@ const createBooking = async (data, createdBy) => {
       email,
       discount,
       remark,
+      companyName,
       allowDuplicate,
     } = data;
 
@@ -248,10 +258,18 @@ const createBooking = async (data, createdBy) => {
         ? ticketType.allowDates[0]
         : null;
 
+    // ================= NEW: SINGLE QR INVITATION =================
+    // qr_invite mode: this booking gets ONE 8-digit invitationId and
+    // entryMode "single_qr" (one QR for all `quantity` guests).
+    // registration_link mode (OLD flow): both stay unset/"per_ticket".
+    const useQrInvite = invitationService.isQrInviteMode();
+    const invitationId = useQrInvite ? await generateInvitationId(session) : undefined;
+
     const booking = await Booking.create(
       [
         {
           bookingNumber,
+          ...(useQrInvite ? { invitationId, entryMode: "single_qr" } : {}),
           eventId,
           ticketTypeId,
           quantity: bookingQuantity,
@@ -261,6 +279,7 @@ const createBooking = async (data, createdBy) => {
           email,
           discount: discountAmount,
           remark,
+          companyName: (companyName || "").trim(),
           createdBy
         }
       ],
@@ -333,11 +352,18 @@ const createBooking = async (data, createdBy) => {
     // booking.mobileNumber, after the transaction has already committed —
     // so a WhatsApp failure can never roll back or fail an
     // already-successful booking. The response shape below is unchanged.
-    await sendRegistrationWhatsAppNotification(
-      booking[0],
-      event,
-      insertedTickets
-    );
+    if (useQrInvite) {
+      // NEW: ONE WhatsApp invitation (with the single QR link) per booking,
+      // whether quantity is 1, 2, 3, 4, 5 ... Best-effort, never throws.
+      await invitationService.sendInvitationBestEffort(booking[0], event);
+    } else {
+      // OLD flow (BOOKING_NOTIFICATION_MODE=registration_link): unchanged.
+      await sendRegistrationWhatsAppNotification(
+        booking[0],
+        event,
+        insertedTickets
+      );
+    }
 
     return {
       booking: booking[0],
@@ -478,6 +504,7 @@ const parseBookingCsvBuffer = async (buffer) => {
         email: getValue("email") || "",
         discount: getValue("discount") || 0,
         remark: getValue("remark") || "",
+        companyName: getValue("companyName") || "",
       },
     });
   });
@@ -1500,8 +1527,302 @@ const getBookingById = async (bookingId) => {
     tickets,
   };
 };
+
+// ================= EDIT BOOKING (ALL FIELDS) =================
+// PUT /api/bookings/update/:id
+//
+// Editable: name, mobile, email, company/brand, remark, discount, and
+// (for single-QR bookings) quantity + ticket type.
+// NOT editable: event, bookingNumber, invitationId (the pass link never
+// changes, so a link already sent on WhatsApp keeps working and the pass
+// page simply shows the new details).
+//
+// Rules
+//  - A booking that has already been scanned (any ticket "Used") is locked.
+//  - Quantity / ticket type can be changed only for single_qr bookings
+//    (new flow). Old per-ticket bookings have per-guest registrations, so
+//    only their contact fields are editable.
+//  - Stock (TicketType.availableCount) and amount are recalculated here.
+//  - Quantity up   -> extra tickets are created (same QR/ticket generation
+//                     as createBooking). Quantity down -> newest tickets
+//                     are cancelled. The first ticket (the one whose QR was
+//                     sent) is never removed.
+//  - `resendInvitation: true` re-sends the WhatsApp invitation (same link)
+//    after the edit is saved; a failed send never undoes the edit.
+const updateBooking = async (bookingId, data = {}) => {
+  const session = await mongoose.startSession();
+  let committed = false;
+
+  try {
+    session.startTransaction();
+
+    const booking = await Booking.findOne({
+      _id: bookingId,
+      isDeleted: { $ne: true },
+    }).session(session);
+
+    if (!booking) {
+      throw new AppError("Booking not found", 404);
+    }
+
+    const event = await Event.findById(booking.eventId).session(session);
+    if (!event) {
+      throw new AppError("Event not found", 404);
+    }
+    if (new Date(event.endDateTime) < new Date()) {
+      throw new AppError("This event has already ended, so the booking cannot be edited.", 400);
+    }
+
+    const tickets = await BookingTicket.find({ bookingId: booking._id })
+      .sort({ createdAt: 1, _id: 1 })
+      .session(session);
+
+    if (tickets.some((t) => t.status === "Used")) {
+      throw new AppError(
+        "This booking has already been checked in at the gate, so it can no longer be edited.",
+        400
+      );
+    }
+
+    const isSingleQr = booking.entryMode === "single_qr";
+
+    // ----- contact fields -----
+    const name = data.name !== undefined ? String(data.name).trim() : booking.name;
+    if (!name) {
+      throw new AppError("Name is required", 400);
+    }
+
+    const mobileNumber =
+      data.mobileNumber !== undefined
+        ? normalizeMobileNumber(data.mobileNumber)
+        : booking.mobileNumber;
+    if (!mobileNumber) {
+      throw new AppError(MOBILE_ERROR_MESSAGE, 400);
+    }
+
+    const email = data.email !== undefined ? String(data.email || "").trim() : booking.email;
+    const companyName =
+      data.companyName !== undefined ? String(data.companyName || "").trim() : booking.companyName;
+    const remark = data.remark !== undefined ? String(data.remark || "").trim() : booking.remark;
+    const discount = data.discount !== undefined ? Number(data.discount || 0) : booking.discount;
+
+    if (Number.isNaN(discount) || discount < 0) {
+      throw new AppError("Invalid discount", 400);
+    }
+
+    // ----- quantity / ticket type -----
+    const newQuantity =
+      data.quantity !== undefined && data.quantity !== ""
+        ? Number(data.quantity)
+        : booking.quantity;
+    const newTicketTypeId = data.ticketTypeId || String(booking.ticketTypeId);
+
+    if (!Number.isInteger(newQuantity) || newQuantity < 1) {
+      throw new AppError("Invalid booking quantity", 400);
+    }
+
+    const typeChanged = String(newTicketTypeId) !== String(booking.ticketTypeId);
+    const quantityChanged = newQuantity !== booking.quantity;
+
+    if ((typeChanged || quantityChanged) && !isSingleQr) {
+      throw new AppError(
+        "Quantity and ticket type can only be changed for bookings created with the single QR invitation. Other details can still be edited.",
+        400
+      );
+    }
+
+    // ----- duplicate mobile check (same rule as create) -----
+    const mobileChanged = mobileNumber !== booking.mobileNumber;
+    const allowDuplicate = data.allowDuplicate === true || data.allowDuplicate === "true";
+
+    if ((mobileChanged || typeChanged) && !allowDuplicate) {
+      const variants = getMobileNumberVariants(mobileNumber);
+      const duplicate = variants.length
+        ? await Booking.findOne({
+            _id: { $ne: booking._id },
+            eventId: booking.eventId,
+            ticketTypeId: newTicketTypeId,
+            mobileNumber: { $in: variants },
+            isDeleted: { $ne: true },
+          })
+            .select("bookingNumber name mobileNumber")
+            .lean()
+            .session(session)
+        : null;
+
+      if (duplicate) {
+        throw new AppError(
+          `Duplicate booking — this mobile number (${data.mobileNumber ?? mobileNumber}) already has booking ${duplicate.bookingNumber} (under the name "${duplicate.name}") for this event & ticket type. No changes were saved.`,
+          409
+        );
+      }
+    }
+
+    // ----- stock (availableCount) -----
+    let ticketType;
+
+    if (!typeChanged) {
+      const delta = newQuantity - booking.quantity;
+
+      if (delta > 0) {
+        ticketType = await TicketType.findOneAndUpdate(
+          { _id: booking.ticketTypeId, availableCount: { $gte: delta } },
+          { $inc: { availableCount: -delta } },
+          { new: true, session }
+        );
+        if (!ticketType) {
+          throw new AppError("Ticket not available for the requested quantity", 400);
+        }
+      } else if (delta < 0) {
+        ticketType = await TicketType.findOneAndUpdate(
+          { _id: booking.ticketTypeId },
+          { $inc: { availableCount: -delta } },
+          { new: true, session }
+        );
+      } else {
+        ticketType = await TicketType.findById(booking.ticketTypeId).session(session);
+      }
+    } else {
+      // give the old ticket type its seats back, take them from the new one
+      await TicketType.updateOne(
+        { _id: booking.ticketTypeId },
+        { $inc: { availableCount: booking.quantity } },
+        { session }
+      );
+
+      ticketType = await TicketType.findOneAndUpdate(
+        {
+          _id: newTicketTypeId,
+          eventId: booking.eventId,
+          isDeleted: false,
+          availableCount: { $gte: newQuantity },
+        },
+        { $inc: { availableCount: -newQuantity } },
+        { new: true, session }
+      );
+      if (!ticketType) {
+        throw new AppError("Ticket not available", 400);
+      }
+    }
+
+    if (!ticketType) {
+      throw new AppError("Ticket type not found", 404);
+    }
+
+    // ----- amount = rate x quantity - discount (always recalculated here) -----
+    const gross = ticketType.amount * newQuantity;
+    if (discount > gross) {
+      throw new AppError("Discount cannot exceed the amount", 400);
+    }
+    const amount = gross - discount;
+
+    // ----- tickets (single QR bookings only) -----
+    if (isSingleQr && (typeChanged || quantityChanged)) {
+      const passDate =
+        Array.isArray(ticketType.allowDates) && ticketType.allowDates.length > 0
+          ? ticketType.allowDates[0]
+          : null;
+
+      const live = tickets.filter((t) => t.status !== "Cancelled");
+
+      if (newQuantity > live.length) {
+        const eventCode = await eventService.getOrCreateEventCode(event, session);
+        const extra = [];
+
+        for (let i = 0; i < newQuantity - live.length; i++) {
+          const ticketNumber = await generateTicketNumber(event._id, eventCode, session);
+          const qrToken = generateQrToken({ ticketNumber });
+          const qrBuffer = await generateQrCode(qrToken);
+          const qrUpload = await uploadImage(qrBuffer, "event-management/qr-codes", "image", {
+            format: "png",
+          });
+          const ticketId = new mongoose.Types.ObjectId();
+
+          extra.push({
+            _id: ticketId,
+            bookingId: booking._id,
+            eventId: booking.eventId,
+            ticketTypeId: newTicketTypeId,
+            bookingNumber: booking.bookingNumber,
+            ticketNumber,
+            qrToken,
+            qrImage: qrUpload.url,
+            qrImagePublicId: qrUpload.public_id,
+            status: "Active",
+            passDate,
+            registrationToken: generateRegistrationToken(ticketId),
+          });
+        }
+
+        await BookingTicket.insertMany(extra, { session });
+      } else if (newQuantity < live.length) {
+        // never touch the first ticket: its QR is the one on the WhatsApp pass
+        const toCancel = live.slice(newQuantity).map((t) => t._id);
+        await BookingTicket.updateMany(
+          { _id: { $in: toCancel } },
+          { $set: { status: "Cancelled" } },
+          { session }
+        );
+      }
+
+      if (typeChanged) {
+        await BookingTicket.updateMany(
+          { bookingId: booking._id },
+          { $set: { ticketTypeId: newTicketTypeId, passDate } },
+          { session }
+        );
+      }
+    }
+
+    // ----- save booking -----
+    booking.name = name;
+    booking.mobileNumber = mobileNumber;
+    booking.email = email;
+    booking.companyName = companyName;
+    booking.remark = remark;
+    booking.discount = discount;
+    booking.quantity = newQuantity;
+    booking.ticketTypeId = newTicketTypeId;
+    booking.amount = amount;
+    await booking.save({ session });
+
+    await session.commitTransaction();
+    committed = true;
+
+    // ----- optional WhatsApp resend (never undoes the edit) -----
+    let whatsappSent = false;
+    let whatsappError = null;
+    const wantsResend = data.resendInvitation === true || data.resendInvitation === "true";
+
+    if (wantsResend && isSingleQr) {
+      try {
+        await invitationService.sendInvitationMessage({ booking, event });
+        whatsappSent = true;
+      } catch (error) {
+        whatsappError = error.message || "WhatsApp send failed";
+        console.error(`WhatsApp resend after edit failed for ${booking.bookingNumber}:`, error);
+      }
+    }
+
+    const liveTickets = await BookingTicket.countDocuments({
+      bookingId: booking._id,
+      status: { $ne: "Cancelled" },
+    });
+
+    return { booking, totalTickets: liveTickets, whatsappSent, whatsappError };
+  } catch (error) {
+    if (!committed && session.inTransaction()) {
+      await session.abortTransaction();
+    }
+    throw error;
+  } finally {
+    await session.endSession();
+  }
+};
+
 module.exports = {
   createBooking,
+  updateBooking,
   bulkImportBookings,
   checkBookingCsv,
   getAllBookings,

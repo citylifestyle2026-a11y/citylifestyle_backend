@@ -7,7 +7,11 @@ const contactService = require("../services/contact.service");
 // from (or spread into) req.body.
 const createContact = async (req, res, next) => {
   try {
-    const contact = await contactService.createContact(req.body, req.user.id);
+    const contact = await contactService.createContact(
+      req.body,
+      req.user.id,
+      req.files
+    );
 
     return res.status(201).json({
       success: true,
@@ -108,7 +112,8 @@ const updateContact = async (req, res, next) => {
   try {
     const contact = await contactService.updateContact(
       req.params.id,
-      req.body
+      req.body,
+      req.files
     );
 
     return res.status(200).json({

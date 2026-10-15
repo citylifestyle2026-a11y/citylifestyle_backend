@@ -34,6 +34,7 @@ const FOLDER_MAP = {
   "event-management/events": "events",
   "event-management/users": "users",
   "event-management/admins": "admins",
+  "event-management/contacts": "contacts",
   "event-management/register-user": "register-user",
   "event-management/qr-codes": "qr-codes",
   "event-management/ticket-pdfs": "ticket-pdfs",

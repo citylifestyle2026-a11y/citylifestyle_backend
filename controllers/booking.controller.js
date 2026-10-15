@@ -152,8 +152,24 @@ const checkBookingsCsv = async (req, res, next) => {
   }
 };
 
+// ================= EDIT BOOKING =================
+const updateBooking = async (req, res, next) => {
+  try {
+    const result = await bookingService.updateBooking(req.params.id, req.body);
+
+    return res.status(200).json({
+      success: true,
+      message: "Booking updated successfully",
+      data: result,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   createBooking,
+  updateBooking,
   importBookingsCsv,
   checkBookingsCsv,
   getAllBookings,

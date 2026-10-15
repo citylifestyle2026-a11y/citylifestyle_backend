@@ -59,6 +59,38 @@ const contactSchema = new mongoose.Schema(
       default: "",
     },
 
+    // Area / locality (e.g. "Adajan", "Vesu") — shown next to Address.
+    // Optional, same as address.
+    area: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+
+    // Instagram username WITHOUT the "@" (normalized by
+    // utils/normalizeInstagramId.js). Optional.
+    instagramId: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+
+    // Contact's profile photo. `profileImage` is the public URL,
+    // `profileImagePublicId` is the relative path under uploads/ that
+    // utils/deleteLocalFile.js needs to remove the file later — same
+    // pair of fields User.model.js already uses.
+    profileImage: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+
+    profileImagePublicId: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+
     // Contact's email address. Optional at the schema level — no
     // conditional/required logic lives here (Step 2 will add
     // request-layer validation in validators/contact.validator.js, same
@@ -93,6 +125,26 @@ const contactSchema = new mongoose.Schema(
     // Only meaningful when relationship is "Couple" — left optional
     // here on purpose; Step 2 adds the conditional-required check.
     spouseMobile: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+
+    // Spouse's Instagram username (Couple only, no "@") and profile
+    // photo — same shape as instagramId / profileImage above.
+    spouseInstagramId: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+
+    spouseProfileImage: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+
+    spouseProfileImagePublicId: {
       type: String,
       trim: true,
       default: "",

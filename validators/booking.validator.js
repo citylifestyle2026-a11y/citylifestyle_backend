@@ -79,3 +79,31 @@ exports.validate = (req, res, next) => {
 
   next();
 };
+
+// Edit booking: every field optional, but when sent it must be valid.
+exports.updateBookingValidation = [
+  body("name").optional().trim().notEmpty().withMessage("Name is required"),
+
+  body("mobileNumber")
+    .optional()
+    .trim()
+    .custom((value) => {
+      if (!normalizeMobileNumber(value)) {
+        throw new Error(MOBILE_ERROR_MESSAGE);
+      }
+      return true;
+    })
+    .customSanitizer((value) => normalizeMobileNumber(value) || value),
+
+  body("email")
+    .optional({ checkFalsy: true })
+    .isEmail()
+    .withMessage("Invalid Email"),
+
+  body("quantity")
+    .optional({ checkFalsy: true })
+    .isInt({ min: 1 })
+    .withMessage("Quantity must be at least 1"),
+
+  body("discount").optional().isNumeric().withMessage("Discount must be numeric"),
+];

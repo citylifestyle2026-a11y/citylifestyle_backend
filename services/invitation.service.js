@@ -1,0 +1,129 @@
+// services/invitation.service.js
+//
+// NEW "single QR invitation" flow (BOOKING_NOTIFICATION_MODE=qr_invite).
+//
+//  - ONE invitation message per booking, whatever the quantity
+//    (1, 2, 3, 4, 5 ... guests all get the SAME single QR / link).
+//  - The QR belongs to the booking's first ticket. When it is scanned
+//    at the gate, every guest of that booking is checked in at once
+//    (see services/qr.service.js).
+//
+// The OLD flow (registration link + one QR per ticket) is NOT removed:
+// it is still in booking.service.js / publicRegistration.service.js and
+// is switched back on with BOOKING_NOTIFICATION_MODE=registration_link.
+const BookingTicket = require("../models/bookingTicket.model");
+const Booking = require("../models/booking.model");
+const Event = require("../models/event.model");
+const TicketType = require("../models/ticketType.model");
+const AppError = require("../utils/AppError");
+const whatsappService = require("./whatsapp.service");
+const buildInvitationBodyParams = require("../utils/buildInvitationBodyParams");
+const generateQrCode = require("../utils/generateQrCode");
+
+// ================= MODE SWITCH =================
+// "qr_invite"         (default) -> NEW: one WhatsApp invitation with one QR link
+// "registration_link"           -> OLD: registration link, one QR per guest
+const getNotificationMode = () =>
+  String(process.env.BOOKING_NOTIFICATION_MODE || "qr_invite").trim().toLowerCase() ===
+  "registration_link"
+    ? "registration_link"
+    : "qr_invite";
+
+const isQrInviteMode = () => getNotificationMode() === "qr_invite";
+
+// ================= SEND THE INVITATION TEMPLATE =================
+// Throws on failure; callers decide whether that is best-effort
+// (booking creation) or must surface (manual resend).
+const sendInvitationMessage = async ({ booking, event }) => {
+  const templateName =
+    process.env.CHATBOX_INVITE_TEMPLATE_NAME || "parv_invitation_confirmed";
+  const languageCode = process.env.CHATBOX_INVITE_TEMPLATE_LANGUAGE || "en";
+
+  return whatsappService.sendTemplateMessage({
+    phone: booking.mobileNumber,
+    templateName,
+    languageCode,
+    bodyParams: buildInvitationBodyParams({ booking, event }),
+  });
+};
+
+// Best-effort wrapper used right after the booking transaction commits:
+// a WhatsApp outage must never fail an already-saved booking.
+const sendInvitationBestEffort = async (booking, event) => {
+  try {
+    await sendInvitationMessage({ booking, event });
+  } catch (error) {
+    console.error(
+      `WhatsApp invitation failed for booking ${booking.bookingNumber}:`,
+      error
+    );
+  }
+};
+
+// ================= PUBLIC INVITATION (for /ticket?qr=<invitationId>) =================
+// The one QR is the first ticket (by creation order) of the booking.
+const getPublicInvitation = async (invitationId) => {
+  const booking = await Booking.findOne({ invitationId, isDeleted: false });
+
+  if (!booking) {
+    throw new AppError("Invitation not found.", 404);
+  }
+
+  const [event, ticketType, primaryTicket, usedCount] = await Promise.all([
+    Event.findById(booking.eventId),
+    TicketType.findById(booking.ticketTypeId),
+    BookingTicket.findOne({ bookingId: booking._id }).sort({ createdAt: 1, _id: 1 }),
+    BookingTicket.countDocuments({ bookingId: booking._id, status: "Used" }),
+  ]);
+
+  if (!event || !primaryTicket) {
+    throw new AppError("Invitation not found.", 404);
+  }
+
+  // The pass page must keep working even if the server disk is wiped
+  // (e.g. Render redeploy/restart), so the QR is re-generated from the
+  // ticket's own qrToken and sent inline instead of linking to a file
+  // under /uploads. Falls back to the stored image URL if that fails.
+  let qrImage = primaryTicket.qrImage;
+  try {
+    const qrBuffer = await generateQrCode(primaryTicket.qrToken);
+    qrImage = `data:image/png;base64,${qrBuffer.toString("base64")}`;
+  } catch (error) {
+    console.error("Invitation QR regeneration failed, using stored image:", error);
+  }
+
+  return {
+    invitationId: booking.invitationId,
+    guestName: booking.name,
+    companyName: booking.companyName || "",
+    mobileNumber: String(booking.mobileNumber || "").replace(/^91(?=\d{10}$)/, ""),
+    // Contact shown under "Venue & Event Help" (set in .env)
+    contact: {
+      name: process.env.EVENT_CONTACT_NAME || "Aniket Patel",
+      number: process.env.EVENT_CONTACT_NUMBER || "7016851932",
+    },
+    numberOfGuests: booking.quantity,
+    qrImage,
+    isUsed: primaryTicket.status === "Used" || usedCount > 0,
+    isCancelled: primaryTicket.status === "Cancelled",
+    ticketName: ticketType?.ticketName || "",
+    event: {
+      title: event.title,
+      image: event.image,
+      date: buildInvitationBodyParams.formatEventDate(event.startDateTime),
+      time: buildInvitationBodyParams.formatEventTime(event.startDateTime),
+      venueName: event.venueName,
+      address: event.address,
+      dressCode: event.dressCode || "Traditional",
+      locationUrl: buildInvitationBodyParams.buildVenueLocationUrl(event),
+    },
+  };
+};
+
+module.exports = {
+  getNotificationMode,
+  isQrInviteMode,
+  sendInvitationMessage,
+  sendInvitationBestEffort,
+  getPublicInvitation,
+};
