@@ -692,6 +692,10 @@ const bulkUpdateApprovalStatus = async ({ ids, status }, adminId) => {
 
   let rejectionSent = 0;
   let rejectionFailed = 0;
+  let rejectionError = "";
+  const rejectionUsedTemplate = Boolean(
+    String(process.env.CHATBOX_REJECTION_TEMPLATE_NAME || "").trim()
+  );
 
   if (status === "rejected") {
     const { sendRejectionMessage } = require("./contactNotification.service");
@@ -708,6 +712,9 @@ const bulkUpdateApprovalStatus = async ({ ids, status }, adminId) => {
         rejectionSent += 1;
       } catch (error) {
         rejectionFailed += 1;
+        if (!rejectionError) {
+          rejectionError = String(error?.message || "Unknown WhatsApp error");
+        }
         console.error(
           `Rejection WhatsApp failed for contact ${contact._id}:`,
           error.message || error
@@ -727,7 +734,10 @@ const bulkUpdateApprovalStatus = async ({ ids, status }, adminId) => {
     notes.push(`WhatsApp message sent to ${rejectionSent}`);
   }
   if (rejectionFailed) {
-    notes.push(`WhatsApp message failed for ${rejectionFailed}`);
+    notes.push(
+      `WhatsApp message failed for ${rejectionFailed}` +
+        (rejectionError ? ` (${rejectionError})` : "")
+    );
   }
 
   return {
@@ -743,6 +753,8 @@ const bulkUpdateApprovalStatus = async ({ ids, status }, adminId) => {
       passesUsed,
       rejectionSent,
       rejectionFailed,
+      rejectionError,
+      rejectionUsedTemplate,
     },
   };
 };
