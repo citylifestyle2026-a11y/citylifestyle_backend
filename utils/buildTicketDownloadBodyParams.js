@@ -5,7 +5,7 @@ const buildTicketDownloadBodyParams = ({ booking, event, ticket }) => [
 // ================= BUTTON PARAMETER (DYNAMIC URL) =================
 
 const PUBLIC_API_URL = (
-  process.env.PUBLIC_API_URL || "https://api.citytoppers.in"
+  process.env.PUBLIC_API_URL || "https://api.citylifestyleindia.com"
 )
   .trim()
   .replace(/\/+$/, "");
@@ -16,7 +16,7 @@ const LOCAL_UPLOADS_BASE = `${PUBLIC_API_URL}/uploads/`;
  * Builds the Dynamic URL button suffix.
  *
  * WhatsApp template fixed base URL must be:
- * https://api.citytoppers.in/uploads/
+ * https://api.citylifestyleindia.com/uploads/
  *
  * Therefore this function must return only:
  * ticket-pdfs/<filename>.pdf

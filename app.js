@@ -28,6 +28,8 @@ const app = express();
 // ---------- Core Middlewares ----------
 const corsOptions = {
   origin: [
+    "https://citylifestyleindia.com",
+    "https://www.citylifestyleindia.com",
     "https://citytoppers.in",
     "https://www.citytoppers.in",
     "https://citylifestyle-frontend-y9y3.vercel.app",

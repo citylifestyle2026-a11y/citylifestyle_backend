@@ -21,7 +21,7 @@ const path = require("path");
 
 const UPLOAD_ROOT = path.join(__dirname, "..", "uploads");
 
-const PUBLIC_BASE_URL = (process.env.PUBLIC_API_URL || "https://api.citytoppers.in")
+const PUBLIC_BASE_URL = (process.env.PUBLIC_API_URL || "https://api.citylifestyleindia.com")
   .trim()
   .replace(/\/+$/, "");
 
