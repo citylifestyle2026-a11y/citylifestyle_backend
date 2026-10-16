@@ -126,7 +126,25 @@ const csvUpload = multer({
   fileFilter: csvFileFilter,
 });
 
+// .csv or .xlsx spreadsheet kept in memory — Member List import.
+const spreadsheetFileFilter = (req, file, cb) => {
+  const ext = path.extname(file.originalname).toLowerCase();
+
+  if (ext === ".csv" || ext === ".xlsx") {
+    return cb(null, true);
+  }
+
+  return cb(new AppError("Only .csv or .xlsx files are allowed.", 400), false);
+};
+
+const spreadsheetUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: spreadsheetFileFilter,
+});
+
 module.exports = upload;
+module.exports.spreadsheetUpload = spreadsheetUpload;
 module.exports.largeImageUpload = largeImageUpload;
 // Alias kept so existing imports of `upload.registrationPhotoUpload`
 // (bookingTicket.routes.js, publicRegistration.routes.js) keep working

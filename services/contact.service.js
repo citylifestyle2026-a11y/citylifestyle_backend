@@ -453,6 +453,14 @@ function buildContactQuery(query) {
   // ================= APPROVAL STATUS FILTER =================
   // pending | approved | rejected. "approved" also matches contacts that
   // have no approvalStatus at all (created before this field existed).
+  // Edition (event) the contact was moved into from Member List.
+  if (query.editionEventId) {
+    if (!mongoose.Types.ObjectId.isValid(query.editionEventId)) {
+      throw new AppError("Invalid edition", 400);
+    }
+    filter.editionEventId = query.editionEventId;
+  }
+
   if (APPROVAL_STATUSES.includes(query.approvalStatus)) {
     filter.$and = [
       ...(filter.$and || []),
@@ -1298,6 +1306,7 @@ const exportContacts = async (query, res) => {
     { header: "Spouse Category", key: "spouseCategory", width: 22 },
     { header: "Profession", key: "profession", width: 22 },
     { header: "Reference", key: "references", width: 30 },
+    { header: "Edition", key: "editionName", width: 18 },
     { header: "Status", key: "approvalStatus", width: 14 },
     { header: "Pass Sent", key: "passSent", width: 22 },
     { header: "Created At", key: "createdAt", width: 22 },
@@ -1392,6 +1401,7 @@ const exportContacts = async (query, res) => {
         (showSpouse && contact.professionCategory?.name) || "-",
       profession: (showSpouse && contact.profession) || "-",
       references: references.length ? references.join(", ") : "-",
+      editionName: contact.editionName || "-",
       approvalStatus: (() => {
         const status = contact.approvalStatus || "approved";
         return status.charAt(0).toUpperCase() + status.slice(1);
@@ -1580,17 +1590,13 @@ const deleteContact = async (id, adminId) => {
     throw new AppError("Invalid Contact ID", 400);
   }
 
-  const contact = await Contact.findOne({ _id: id, isDeleted: { $ne: true } });
+  const contact = await Contact.findById(id);
 
   if (!contact) {
     throw new AppError("Contact not found", 404);
   }
 
-  contact.isDeleted = true;
-  contact.deletedAt = new Date();
-  contact.deletedBy = adminId;
-
-  await contact.save();
+  await hardDeleteContacts([contact]);
 
   return contact;
 };
@@ -1747,7 +1753,62 @@ async function assertCompanyCategoryExists(companyCategoryId) {
   }
 }
 
+// ================= HARD DELETE =================
+// Permanently removes the contacts from the database (no soft-delete flag):
+//  - the contact documents themselves,
+//  - their Event History rows (they would otherwise point to a contact that
+//    no longer exists),
+//  - their profile / spouse photo files on disk.
+// Bookings and passes are NOT touched - use "Delete Booking" for that.
+const hardDeleteContacts = async (contacts) => {
+  if (!contacts.length) return 0;
+
+  const ids = contacts.map((contact) => contact._id);
+
+  const ContactEventHistory = require("../models/contactEventHistory.model");
+  await ContactEventHistory.deleteMany({ contactId: { $in: ids } });
+
+  const result = await Contact.deleteMany({ _id: { $in: ids } });
+
+  // Photos last and best-effort: a missing file must never fail the delete.
+  for (const contact of contacts) {
+    for (const publicId of [
+      contact.profileImagePublicId,
+      contact.spouseProfileImagePublicId,
+    ]) {
+      if (!publicId) continue;
+      try {
+        await deleteImage(publicId);
+      } catch (error) {
+        console.error("Could not delete contact photo:", error.message);
+      }
+    }
+  }
+
+  return result.deletedCount ?? contacts.length;
+};
+
+// ================= BULK DELETE CONTACTS =================
+// POST /api/contacts/bulk-delete { ids: [...] }
+// Hard-deletes the selected contacts (see hardDeleteContacts above).
+const bulkDeleteContacts = async ({ ids }, adminId) => {
+  const contactIds = validateIdList(ids);
+
+  const contacts = await Contact.find({ _id: { $in: contactIds } });
+  const deleted = await hardDeleteContacts(contacts);
+
+  return {
+    success: deleted > 0,
+    message:
+      deleted > 0
+        ? `${deleted} contact${deleted === 1 ? "" : "s"} deleted.`
+        : "No contacts were deleted (already removed).",
+    data: { deleted },
+  };
+};
+
 module.exports = {
+  bulkDeleteContacts,
   bulkUpdateApprovalStatus,
   resendPassToContacts,
   deleteBookingsOfContacts,

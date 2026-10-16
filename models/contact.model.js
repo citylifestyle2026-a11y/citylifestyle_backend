@@ -212,6 +212,27 @@ const contactSchema = new mongoose.Schema(
       default: false,
     },
 
+    // ================= EDITION (MOVED FROM MEMBER LIST) =================
+    // Set when the contact is moved from Member List to Guest List for an
+    // edition (event). Guest List can be filtered by it.
+    editionEventId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Event",
+      default: null,
+    },
+
+    editionName: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+
+    memberId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Member",
+      default: null,
+    },
+
     // ================= APPROVAL (PUBLIC FORM SUBMISSIONS) =================
     // Public form submissions are saved as "pending" and an admin then
     // approves / rejects them from Contact List. Contacts added by an admin
@@ -366,6 +387,7 @@ contactSchema.pre("findOneAndUpdate", function (next) {
 // Common "list active, non-deleted contacts" query.
 contactSchema.index({ isDeleted: 1, status: 1 });
 contactSchema.index({ approvalStatus: 1 });
+contactSchema.index({ editionEventId: 1 });
 
 // Lookup/search by name.
 contactSchema.index({ fullName: 1 });

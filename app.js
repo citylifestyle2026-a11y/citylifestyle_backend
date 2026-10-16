@@ -18,6 +18,7 @@ const publicRegistrationRoutes = require("./routes/publicRegistration.routes");
 const publicInvitationRoutes = require("./routes/publicInvitation.routes");
 const publicContactRoutes = require("./routes/publicContact.routes");
 const contactRoutes = require("./routes/contact.routes");
+const memberRoutes = require("./routes/member.routes");
 const contactEventHistoryRoutes = require("./routes/contactEventHistory.routes");
 // const editionRoutes = require("./routes/edition.routes");
 const companyCategoryRoutes = require("./routes/companycategory.routes");
@@ -95,6 +96,9 @@ app.use("/api/contact-event-history", contactEventHistoryRoutes);
 // app.use("/api/editions", editionRoutes);
 // company categories (same as above — was implemented but never mounted)
 app.use("/api/company-categories", companyCategoryRoutes);
+
+// members (Member List -> import from Excel/CSV, move to Guest List)
+app.use("/api/members", memberRoutes);
 
 // image 
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
