@@ -827,6 +827,154 @@ const updateContactPass = async (contactId, { quantity, resendInvitation }) => {
   };
 };
 
+// ================= DELETE BOOKING (PASS) OF CONTACTS =================
+// POST /api/contacts/delete-booking { ids }
+// Removes the booking(s) made by Send Pass for the selected contacts - also
+// ones whose pass was already cancelled (Pending / Rejected) and are still
+// sitting in Manual Booking as "Cancelled". After this: the QR is dead, the
+// seats are back in the ticket stock, the booking is gone from Manual
+// Booking, and the contact is "Approved, no pass yet" (Send Pass works
+// again). The contact itself and its status are NOT touched. Contacts with
+// no booking are simply skipped. A pass whose guests already entered
+// (scanned) cannot be deleted.
+const findPassBookingsIncludingCancelled = async (contact) => {
+  const Booking = require("../models/booking.model");
+
+  const or = [];
+
+  if (contact.passBookingId) or.push({ _id: contact.passBookingId });
+
+  const digits = last10Digits(contact.whatsappNumber);
+  if (digits.length === 10) {
+    or.push({
+      mobileNumber: new RegExp(`${digits}$`),
+      remark: /^Pass sent from Contact List/,
+    });
+  }
+
+  if (!or.length) return [];
+
+  return Booking.find({ isDeleted: { $ne: true }, $or: or });
+};
+
+const deleteBookingsOfContacts = async ({ ids }, adminId) => {
+  const Booking = require("../models/booking.model");
+  const BookingTicket = require("../models/bookingTicket.model");
+  const TicketType = require("../models/ticketType.model");
+
+  const contactIds = validateIdList(ids);
+
+  const contacts = await Contact.find({
+    _id: { $in: contactIds },
+    isDeleted: { $ne: true },
+    historyOnly: { $ne: true },
+  });
+
+  const results = [];
+
+  for (const contact of contacts) {
+    const base = { id: String(contact._id), name: contact.fullName };
+
+    try {
+      const bookings = await findPassBookingsIncludingCancelled(contact);
+
+      if (!bookings.length) {
+        results.push({ ...base, status: "skipped", message: "No booking found." });
+        continue;
+      }
+
+      let deletedHere = 0;
+      let blocked = false;
+
+      for (const booking of bookings) {
+        const usedCount = await BookingTicket.countDocuments({
+          bookingId: booking._id,
+          status: "Used",
+        });
+
+        if (usedCount > 0) {
+          blocked = true;
+          continue;
+        }
+
+        // Still live -> kill the QR and give the seats back first.
+        if (booking.bookingStatus !== "Cancelled") {
+          await BookingTicket.updateMany(
+            { bookingId: booking._id, status: "Active" },
+            { $set: { status: "Cancelled" } }
+          );
+
+          await TicketType.updateOne(
+            { _id: booking.ticketTypeId },
+            { $inc: { availableCount: booking.quantity } }
+          );
+        }
+
+        await Booking.updateOne(
+          { _id: booking._id },
+          {
+            $set: {
+              bookingStatus: "Cancelled",
+              isDeleted: true,
+              deleteRemark: "Deleted from Guest List",
+              deletedAt: new Date(),
+              deletedBy: adminId || null,
+            },
+          }
+        );
+
+        deletedHere += 1;
+      }
+
+      if (deletedHere > 0 && !blocked) {
+        await Contact.updateOne(
+          { _id: contact._id },
+          { $set: { passSentAt: null, passEventId: null, passBookingId: null } }
+        );
+      }
+
+      results.push(
+        deletedHere > 0
+          ? { ...base, status: "deleted", message: "Booking deleted." }
+          : {
+              ...base,
+              status: "failed",
+              message: "Guests already entered with this pass, so it cannot be deleted.",
+            }
+      );
+    } catch (error) {
+      results.push({
+        ...base,
+        status: "failed",
+        message: error.message || "Failed to delete booking.",
+      });
+    }
+  }
+
+  const deleted = results.filter((r) => r.status === "deleted").length;
+  const skipped = results.filter((r) => r.status === "skipped").length;
+  const failed = results.filter((r) => r.status === "failed").length;
+
+  const parts = [`${deleted} booking${deleted === 1 ? "" : "s"} deleted`];
+  if (skipped) parts.push(`${skipped} had no booking`);
+  if (failed) parts.push(`${failed} could not be deleted`);
+
+  return {
+    success: deleted > 0 || failed === 0,
+    message:
+      deleted === 0 && failed === 0
+        ? "No booking found for the selected contacts."
+        : `${parts.join(", ")}.`,
+    data: {
+      deleted,
+      skipped,
+      failed,
+      failedReason: results.find((r) => r.status === "failed")?.message || "",
+      results,
+    },
+  };
+};
+
 // ================= RESEND PASS (WHATSAPP) =================
 // POST /api/contacts/resend-pass { ids }
 // Sends the SAME invitation (same QR link) again to approved contacts that
@@ -1602,6 +1750,7 @@ async function assertCompanyCategoryExists(companyCategoryId) {
 module.exports = {
   bulkUpdateApprovalStatus,
   resendPassToContacts,
+  deleteBookingsOfContacts,
   getContactPass,
   updateContactPass,
   sendPassToContacts,

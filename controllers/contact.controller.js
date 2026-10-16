@@ -185,6 +185,20 @@ const resendPass = async (req, res, next) => {
   }
 };
 
+// ================= DELETE BOOKING (PASS) =================
+const deleteBooking = async (req, res, next) => {
+  try {
+    const result = await contactService.deleteBookingsOfContacts(
+      req.body,
+      req.user.id
+    );
+
+    return res.status(result.success ? 200 : 400).json(result);
+  } catch (error) {
+    next(error);
+  }
+};
+
 // ================= PASS GUEST COUNT (EDIT) =================
 const getContactPass = async (req, res, next) => {
   try {
@@ -247,6 +261,7 @@ module.exports = {
   bulkUpdateStatus,
   sendPass,
   resendPass,
+  deleteBooking,
   getContactPass,
   updateContactPass,
   createContact,

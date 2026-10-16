@@ -108,6 +108,9 @@ router.post(
   contactController.resendPass
 );
 
+// Delete the booking (pass) made by Send Pass. Body: { ids: [...] }.
+router.post("/delete-booking", protect, contactController.deleteBooking);
+
 // Guest count of a contact's already-sent pass (shown in Edit Contact).
 router.get("/:id/pass", protect, contactController.getContactPass);
 router.put("/:id/pass", protect, contactController.updateContactPass);
