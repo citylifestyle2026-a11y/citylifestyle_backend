@@ -100,6 +100,18 @@ router.post(
   contactController.sendPass
 );
 
+// Send the SAME pass again (WhatsApp) to approved contacts that already
+// have an active pass. Body: { ids: [...] }.
+router.post(
+  "/resend-pass",
+  protect,
+  contactController.resendPass
+);
+
+// Guest count of a contact's already-sent pass (shown in Edit Contact).
+router.get("/:id/pass", protect, contactController.getContactPass);
+router.put("/:id/pass", protect, contactController.updateContactPass);
+
 // Get Contact By Id
 router.get(
   "/:id",

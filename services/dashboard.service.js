@@ -295,6 +295,17 @@ const getDashboardCounts = async (eventId) => {
             : {}),
     };
 
+    // Tickets of a single-QR PASS (WhatsApp invitation sent from Contact List
+    // / Booking) are never "registered" one by one, so on their own they
+    // would never show up as "not scanned". A pass that was sent and not
+    // cancelled counts the same as a registration here.
+    const passBookingIds = await Booking.distinct("_id", {
+        eventId,
+        isDeleted: { $ne: true },
+        entryMode: "single_qr",
+        bookingStatus: { $ne: "Cancelled" },
+    });
+
     const [
         totalBookingsAgg,
         registeredTickets,
@@ -334,7 +345,10 @@ const getDashboardCounts = async (eventId) => {
             // left out along with the already-Used ones.
             BookingTicket.countDocuments({
                 ...liveBookingTicketScope,
-                isRegistered: true,
+                $or: [
+                    { isRegistered: true },
+                    { bookingId: { $in: passBookingIds } },
+                ],
                 status: { $nin: ["Used", "Cancelled"] },
             }),
         ]);

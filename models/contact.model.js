@@ -248,6 +248,23 @@ const contactSchema = new mongoose.Schema(
       default: null,
     },
 
+    // The booking created by "Send Pass". Lets Resend Pass / pass
+    // cancellation (Pending / Rejected after a pass was sent) find the
+    // exact booking. Older contacts without it fall back to a lookup by
+    // WhatsApp number + event (see findActivePassBookings).
+    passBookingId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Booking",
+      default: null,
+    },
+
+    // Last time the polite "next Parv" WhatsApp message was sent because
+    // this contact was marked Rejected.
+    rejectionMessageSentAt: {
+      type: Date,
+      default: null,
+    },
+
     // Soft-delete fields, same pattern already used on Event/Booking
     // (isDeleted / deletedAt / deletedBy) — deleting a contact never
     // hard-removes the document.

@@ -544,10 +544,108 @@ const validateIdList = (ids) => {
   return unique;
 };
 
+// ================= PASS HELPERS =================
+// A "pass" is the Booking created by Send Pass. Its single QR is the
+// booking's first ticket, so cancelling the pass = cancelling those tickets
+// (the scanner then answers "This ticket has been cancelled." and the
+// /ticket page shows "Cancelled Pass").
+const last10Digits = (value) => String(value || "").replace(/\D/g, "").slice(-10);
+
+// Active (not cancelled / deleted) pass bookings of a contact.
+const findActivePassBookings = async (contact) => {
+  const Booking = require("../models/booking.model");
+
+  const base = {
+    isDeleted: { $ne: true },
+    bookingStatus: { $ne: "Cancelled" },
+  };
+
+  if (contact.passBookingId) {
+    const direct = await Booking.find({ _id: contact.passBookingId, ...base });
+    if (direct.length) return direct;
+  }
+
+  if (!contact.passSentAt || !contact.passEventId) return [];
+
+  const digits = last10Digits(contact.whatsappNumber);
+  if (digits.length < 10) return [];
+
+  // Contacts whose pass was sent before passBookingId existed.
+  return Booking.find({
+    ...base,
+    eventId: contact.passEventId,
+    remark: "Pass sent from Contact List",
+    mobileNumber: new RegExp(`${digits}$`),
+  });
+};
+
+// Invalidates the contact's pass(es) so the QR can no longer be used, gives
+// the seats back to the ticket stock and clears the "Pass sent" mark.
+// A pass whose guests already entered (a ticket is "Used") is left alone.
+const cancelPassForContact = async (contact, adminId) => {
+  const Booking = require("../models/booking.model");
+  const BookingTicket = require("../models/bookingTicket.model");
+  const TicketType = require("../models/ticketType.model");
+
+  const bookings = await findActivePassBookings(contact);
+  let cancelled = 0;
+  let alreadyUsed = 0;
+
+  for (const booking of bookings) {
+    const usedCount = await BookingTicket.countDocuments({
+      bookingId: booking._id,
+      status: "Used",
+    });
+
+    if (usedCount > 0) {
+      alreadyUsed += 1;
+      continue;
+    }
+
+    await BookingTicket.updateMany(
+      { bookingId: booking._id, status: "Active" },
+      { $set: { status: "Cancelled" } }
+    );
+
+    await Booking.updateOne(
+      { _id: booking._id },
+      {
+        $set: {
+          bookingStatus: "Cancelled",
+          remark: `${booking.remark || "Pass"} | Pass cancelled (contact status changed)`,
+        },
+      }
+    );
+
+    await TicketType.updateOne(
+      { _id: booking.ticketTypeId },
+      { $inc: { availableCount: booking.quantity } }
+    );
+
+    cancelled += 1;
+  }
+
+  if (alreadyUsed === 0) {
+    await Contact.updateOne(
+      { _id: contact._id },
+      { $set: { passSentAt: null, passEventId: null, passBookingId: null } }
+    );
+  }
+
+  return { cancelled, alreadyUsed };
+};
+
 // ================= BULK UPDATE APPROVAL STATUS =================
 // PUT /api/contacts/bulk-status { ids: [...], status: "pending" |
 // "approved" | "rejected" }. One contact (row action) or many (checkbox
 // selection) go through this same function.
+//
+// Extra rules:
+//  - Moving a contact that already got a pass to Pending or Rejected
+//    cancels that pass (QR stops working).
+//  - Moving a contact to Rejected sends the polite "we will invite you to
+//    the next Parv" WhatsApp message (once per rejection; a failed message
+//    never blocks the status change).
 const bulkUpdateApprovalStatus = async ({ ids, status }, adminId) => {
   if (!APPROVAL_STATUSES.includes(status)) {
     throw new AppError("Status must be pending, approved or rejected.", 400);
@@ -555,28 +653,256 @@ const bulkUpdateApprovalStatus = async ({ ids, status }, adminId) => {
 
   const contactIds = validateIdList(ids);
 
-  const result = await Contact.updateMany(
-    {
-      _id: { $in: contactIds },
-      isDeleted: { $ne: true },
-      historyOnly: { $ne: true },
-    },
-    {
-      $set: {
-        approvalStatus: status,
-        approvalUpdatedAt: new Date(),
-        approvalUpdatedBy: adminId || null,
-      },
+  const baseFilter = {
+    _id: { $in: contactIds },
+    isDeleted: { $ne: true },
+    historyOnly: { $ne: true },
+  };
+
+  // Snapshot BEFORE the update, to know who actually changes status.
+  const before = await Contact.find(baseFilter);
+
+  let passesCancelled = 0;
+  let passesUsed = 0;
+
+  if (status !== "approved") {
+    for (const contact of before) {
+      if (!contact.passSentAt) continue;
+
+      try {
+        const result = await cancelPassForContact(contact, adminId);
+        passesCancelled += result.cancelled;
+        passesUsed += result.alreadyUsed;
+      } catch (error) {
+        console.error(`Pass cancel failed for contact ${contact._id}:`, error);
+      }
     }
-  );
+  }
+
+  const result = await Contact.updateMany(baseFilter, {
+    $set: {
+      approvalStatus: status,
+      approvalUpdatedAt: new Date(),
+      approvalUpdatedBy: adminId || null,
+    },
+  });
 
   const updated = result.modifiedCount ?? result.nModified ?? 0;
   const matched = result.matchedCount ?? result.n ?? contactIds.length;
 
+  let rejectionSent = 0;
+  let rejectionFailed = 0;
+
+  if (status === "rejected") {
+    const { sendRejectionMessage } = require("./contactNotification.service");
+
+    for (const contact of before) {
+      if ((contact.approvalStatus || "approved") === "rejected") continue;
+
+      try {
+        await sendRejectionMessage(contact);
+        await Contact.updateOne(
+          { _id: contact._id },
+          { $set: { rejectionMessageSentAt: new Date() } }
+        );
+        rejectionSent += 1;
+      } catch (error) {
+        rejectionFailed += 1;
+        console.error(
+          `Rejection WhatsApp failed for contact ${contact._id}:`,
+          error.message || error
+        );
+      }
+    }
+  }
+
+  const notes = [];
+  if (passesCancelled) {
+    notes.push(`${passesCancelled} pass${passesCancelled === 1 ? "" : "es"} cancelled`);
+  }
+  if (passesUsed) {
+    notes.push(`${passesUsed} pass${passesUsed === 1 ? "" : "es"} already used (not cancelled)`);
+  }
+  if (rejectionSent) {
+    notes.push(`WhatsApp message sent to ${rejectionSent}`);
+  }
+  if (rejectionFailed) {
+    notes.push(`WhatsApp message failed for ${rejectionFailed}`);
+  }
+
   return {
     success: true,
-    message: `${matched} contact${matched === 1 ? "" : "s"} marked as ${status}.`,
-    data: { matched, updated, status },
+    message:
+      `${matched} contact${matched === 1 ? "" : "s"} marked as ${status}.` +
+      (notes.length ? ` ${notes.join(", ")}.` : ""),
+    data: {
+      matched,
+      updated,
+      status,
+      passesCancelled,
+      passesUsed,
+      rejectionSent,
+      rejectionFailed,
+    },
+  };
+};
+
+// ================= EDIT A CONTACT'S PASS (GUEST COUNT) =================
+// GET /api/contacts/:id/pass -> { hasPass, quantity, bookingNumber, ... }
+// PUT /api/contacts/:id/pass { quantity, resendInvitation } -> changes how
+// many guests the already-sent pass admits (stock + amount + extra tickets
+// are handled by bookingService.updateBooking; works for single-QR passes).
+const getActivePassOfContact = async (contactId) => {
+  if (!mongoose.Types.ObjectId.isValid(contactId)) {
+    throw new AppError("Invalid contact id", 400);
+  }
+
+  const contact = await Contact.findOne({
+    _id: contactId,
+    isDeleted: { $ne: true },
+    historyOnly: { $ne: true },
+  });
+
+  if (!contact) throw new AppError("Contact not found", 404);
+
+  const bookings = contact.passSentAt ? await findActivePassBookings(contact) : [];
+
+  return { contact, booking: bookings[0] || null };
+};
+
+const getContactPass = async (contactId) => {
+  const { booking } = await getActivePassOfContact(contactId);
+
+  return {
+    success: true,
+    data: booking
+      ? {
+          hasPass: true,
+          quantity: booking.quantity,
+          bookingNumber: booking.bookingNumber,
+          editable: booking.entryMode === "single_qr",
+          maxGuests: MAX_PASS_GUESTS,
+        }
+      : { hasPass: false },
+  };
+};
+
+const updateContactPass = async (contactId, { quantity, resendInvitation }) => {
+  const bookingService = require("./booking.service");
+  const { booking } = await getActivePassOfContact(contactId);
+
+  if (!booking) {
+    throw new AppError("This contact has no active pass.", 400);
+  }
+
+  const guests = Number(quantity);
+  if (!Number.isInteger(guests) || guests < 1 || guests > MAX_PASS_GUESTS) {
+    throw new AppError(`Guests must be between 1 and ${MAX_PASS_GUESTS}.`, 400);
+  }
+
+  const result = await bookingService.updateBooking(booking._id, {
+    quantity: guests,
+    resendInvitation: resendInvitation === true || resendInvitation === "true",
+  });
+
+  return {
+    success: true,
+    message:
+      `Pass updated to ${guests} guest${guests === 1 ? "" : "s"}.` +
+      (result.whatsappSent ? " Pass sent again on WhatsApp." : "") +
+      (result.whatsappError ? ` WhatsApp failed: ${result.whatsappError}` : ""),
+    data: { quantity: result.booking.quantity, whatsappSent: result.whatsappSent },
+  };
+};
+
+// ================= RESEND PASS (WHATSAPP) =================
+// POST /api/contacts/resend-pass { ids }
+// Sends the SAME invitation (same QR link) again to approved contacts that
+// already have an active pass — e.g. when they say they never got it.
+const resendPassToContacts = async ({ ids }) => {
+  const BookingTicket = require("../models/bookingTicket.model");
+  const bookingTicketService = require("./bookingTicket.service");
+
+  const contactIds = validateIdList(ids);
+
+  const contacts = await Contact.find({
+    _id: { $in: contactIds },
+    isDeleted: { $ne: true },
+    historyOnly: { $ne: true },
+  });
+
+  const byId = new Map(contacts.map((c) => [String(c._id), c]));
+  const results = [];
+
+  for (const id of contactIds) {
+    const contact = byId.get(id);
+
+    if (!contact) {
+      results.push({ id, name: "-", status: "failed", message: "Contact not found." });
+      continue;
+    }
+
+    const base = { id, name: contact.fullName };
+
+    if ((contact.approvalStatus || "approved") !== "approved") {
+      results.push({
+        ...base,
+        status: "failed",
+        message: "Only approved contacts can receive a pass.",
+      });
+      continue;
+    }
+
+    try {
+      const bookings = await findActivePassBookings(contact);
+
+      if (!bookings.length) {
+        results.push({
+          ...base,
+          status: "failed",
+          message: "No active pass found. Use Send Pass instead.",
+        });
+        continue;
+      }
+
+      const primaryTicket = await BookingTicket.findOne({
+        bookingId: bookings[0]._id,
+        status: { $ne: "Cancelled" },
+      }).sort({ createdAt: 1, _id: 1 });
+
+      if (!primaryTicket) {
+        results.push({
+          ...base,
+          status: "failed",
+          message: "No active ticket found for this pass.",
+        });
+        continue;
+      }
+
+      await bookingTicketService.resendTicket(primaryTicket._id);
+
+      results.push({ ...base, status: "sent", message: "Pass sent again." });
+    } catch (error) {
+      results.push({
+        ...base,
+        status: "failed",
+        message: error.message || "Failed to resend pass.",
+      });
+    }
+  }
+
+  const sent = results.filter((r) => r.status === "sent").length;
+  const failed = results.length - sent;
+
+  return {
+    success: failed === 0,
+    message:
+      failed === 0
+        ? `Pass sent again to ${sent} contact${sent === 1 ? "" : "s"}.`
+        : sent === 0
+          ? results[0]?.message || "Failed to resend pass."
+          : `Pass sent again to ${sent}, failed for ${failed}.`,
+    data: { sent, failed, results },
   };
 };
 
@@ -589,7 +915,22 @@ const bulkUpdateApprovalStatus = async ({ ids, status }, adminId) => {
 // WhatsApp invitation pass. Contacts are processed one at a time so two
 // contacts can never race for the same ticket stock, and one failure
 // never stops the rest. Returns a per-contact result for the UI.
-const sendPassToContacts = async ({ ids, eventId, ticketTypeId }, adminId) => {
+// Most guests one pass can admit (guards against typos like 100).
+const MAX_PASS_GUESTS = 10;
+
+// Admin-chosen guest count for a pass; falls back to the old rule
+// (Single = 1, Couple = 2) when nothing valid was sent.
+const resolvePassQuantity = (contact, quantities) => {
+  const requested = Number(quantities?.[String(contact._id)]);
+
+  if (Number.isInteger(requested) && requested >= 1) {
+    return Math.min(requested, MAX_PASS_GUESTS);
+  }
+
+  return contact.relationship === "Couple" ? 2 : 1;
+};
+
+const sendPassToContacts = async ({ ids, eventId, ticketTypeId, quantities }, adminId) => {
   // Required lazily: booking.service is heavy and only needed here.
   const bookingService = require("./booking.service");
   const Event = require("../models/event.model");
@@ -641,7 +982,17 @@ const sendPassToContacts = async ({ ids, eventId, ticketTypeId }, adminId) => {
       continue;
     }
 
-    const quantity = contact.relationship === "Couple" ? 2 : 1;
+    // Already has a live pass -> don't create a second booking.
+    if (contact.passSentAt && (await findActivePassBookings(contact)).length) {
+      results.push({
+        ...base,
+        status: "failed",
+        message: "Pass already sent. Use Resend Pass instead.",
+      });
+      continue;
+    }
+
+    const quantity = resolvePassQuantity(contact, quantities);
 
     try {
       const { booking } = await bookingService.createBooking(
@@ -662,7 +1013,13 @@ const sendPassToContacts = async ({ ids, eventId, ticketTypeId }, adminId) => {
 
       await Contact.updateOne(
         { _id: contact._id },
-        { $set: { passSentAt: new Date(), passEventId: event._id } }
+        {
+          $set: {
+            passSentAt: new Date(),
+            passEventId: event._id,
+            passBookingId: booking._id,
+          },
+        }
       );
 
       results.push({
@@ -1232,6 +1589,9 @@ async function assertCompanyCategoryExists(companyCategoryId) {
 
 module.exports = {
   bulkUpdateApprovalStatus,
+  resendPassToContacts,
+  getContactPass,
+  updateContactPass,
   sendPassToContacts,
   createContact,
   getAllContacts,

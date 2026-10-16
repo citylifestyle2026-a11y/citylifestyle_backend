@@ -174,6 +174,36 @@ const sendPass = async (req, res, next) => {
   }
 };
 
+// ================= RESEND PASS OVER WHATSAPP =================
+const resendPass = async (req, res, next) => {
+  try {
+    const result = await contactService.resendPassToContacts(req.body);
+
+    return res.status(result.success ? 200 : 400).json(result);
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ================= PASS GUEST COUNT (EDIT) =================
+const getContactPass = async (req, res, next) => {
+  try {
+    return res.status(200).json(await contactService.getContactPass(req.params.id));
+  } catch (error) {
+    next(error);
+  }
+};
+
+const updateContactPass = async (req, res, next) => {
+  try {
+    return res
+      .status(200)
+      .json(await contactService.updateContactPass(req.params.id, req.body || {}));
+  } catch (error) {
+    next(error);
+  }
+};
+
 // ================= IMPORT CONTACTS FROM CSV =================
 // POST /api/contacts/import-csv            -> creates the contacts
 // POST /api/contacts/import-csv?dryRun=true -> only checks the file
@@ -216,6 +246,9 @@ module.exports = {
   importContactsCsv,
   bulkUpdateStatus,
   sendPass,
+  resendPass,
+  getContactPass,
+  updateContactPass,
   createContact,
   getAllContacts,
   exportContacts,

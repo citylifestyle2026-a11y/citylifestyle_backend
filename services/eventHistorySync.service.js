@@ -5,10 +5,11 @@
 // For ONE event (e.g. "Parv 5") this saves, in one go, into
 // ContactEventHistory:
 //   - every SELECTED scanned person   -> status "Attended"      (green)
-//   - every person who REGISTERED but was never scanned
+//   - every person who REGISTERED or was SENT A PASS (invitation sent from
+//     Contact List / Booking) but was never scanned
 //                                      -> status "Not Attended" (red)
-// Someone who only has a booking (never completed registration) and was
-// not scanned is NOT sent to Event History at all.
+// Someone who only has an old-style booking (never completed registration,
+// no pass) and was not scanned is NOT sent to Event History at all.
 //
 // Rows point straight at the Event. People are matched by their
 // 10-digit mobile number AND their name: a husband and wife who registered
@@ -70,9 +71,11 @@ const loadEvent = async (eventId) => {
 };
 
 // ================= PEOPLE OF AN EVENT =================
-// Only REGISTERED tickets (isRegistered) and scanned (Used) tickets count.
-// A ticket that is neither registered nor scanned is just a booking, so
-// it is skipped. A ticket's person is its registered attendee when there
+// REGISTERED tickets (isRegistered), scanned (Used) tickets and tickets of a
+// single-QR PASS (entryMode "single_qr": the guest was sent a WhatsApp pass
+// and never registers one by one) count. Anything else is just an old-style
+// booking, so it is skipped. A cancelled pass (Contact set to Pending /
+// Rejected) is already excluded below. A ticket's person is its registered attendee when there
 // is one, otherwise the booking holder. Identified by 10-digit mobile.
 const loadEventPeople = async (eventId) => {
   const tickets = await BookingTicket.find({
@@ -89,7 +92,7 @@ const loadEventPeople = async (eventId) => {
     isDeleted: { $ne: true },
     bookingStatus: { $ne: "Cancelled" },
   })
-    .select("name mobileNumber")
+    .select("name mobileNumber entryMode")
     .lean();
 
   const bookingById = new Map(bookings.map((b) => [String(b._id), b]));
@@ -122,8 +125,9 @@ const loadEventPeople = async (eventId) => {
     const booking = bookingById.get(String(ticket.bookingId));
     if (!booking) continue;
 
-    // Booking only (not registered, not scanned) -> not part of history.
-    if (!ticket.isRegistered && ticket.status !== "Used") continue;
+    // Booking only (not registered, no pass, not scanned) -> not part of history.
+    const hasPass = booking.entryMode === "single_qr";
+    if (!ticket.isRegistered && !hasPass && ticket.status !== "Used") continue;
 
     const attendeeMobile = toLocalMobileNumber(ticket.attendee?.mobileNumber);
     const mobile = attendeeMobile || toLocalMobileNumber(booking.mobileNumber);
