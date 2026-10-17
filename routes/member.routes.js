@@ -20,6 +20,9 @@ router.post(
 // Move members (ids, or every member matching filters) to Guest List.
 router.post("/move-to-guest-list", protect, memberController.moveToGuestList);
 
+// Add one member by hand.
+router.post("/", protect, memberController.createMember);
+
 router.get("/", protect, memberController.getAllMembers);
 
 router.put("/:id", protect, memberController.updateMember);

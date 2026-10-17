@@ -34,18 +34,25 @@ const importMembers = async (req, res, next) => {
     }
 
     const dryRun = String(req.query.dryRun || "") === "true";
+    // ?mode=all saves every row (duplicate / invalid ones flagged "Needs Fix").
+    const mode = String(req.query.mode || "") === "all" ? "all" : "valid";
     const result = await memberService.importMembers(
       req.file.buffer,
       req.file.originalname,
       req.user.id,
-      { dryRun }
+      { dryRun, mode }
     );
 
+    const added = result.successCount + (result.flaggedCount || 0);
+    const message = dryRun
+      ? `Processed ${result.totalRows} row(s): ${result.successCount} ready to import, ${result.duplicateCount} duplicate(s), ${result.failureCount} invalid`
+      : mode === "all"
+      ? `${added} member(s) added, ${result.flaggedCount} of them need fixing (see Needs Fix tab)`
+      : `Processed ${result.totalRows} row(s): ${result.successCount} member(s) added, ${result.duplicateCount} duplicate(s) skipped, ${result.failureCount} failed`;
+
     return res.status(200).json({
-      success: dryRun || result.successCount > 0,
-      message: `Processed ${result.totalRows} row(s): ${result.successCount} ${
-        dryRun ? "ready to import" : "member(s) added"
-      }, ${result.duplicateCount} duplicate(s) skipped, ${result.failureCount} failed`,
+      success: dryRun || added > 0,
+      message,
       data: result,
     });
   } catch (error) {
@@ -57,6 +64,19 @@ const moveToGuestList = async (req, res, next) => {
   try {
     const result = await memberService.moveMembersToGuestList(req.body, req.user.id);
     return res.status(200).json(result);
+  } catch (error) {
+    next(error);
+  }
+};
+
+const createMember = async (req, res, next) => {
+  try {
+    const member = await memberService.createMember(req.body, req.user.id);
+    return res.status(201).json({
+      success: true,
+      message: "Member added successfully",
+      data: member,
+    });
   } catch (error) {
     next(error);
   }
@@ -90,6 +110,7 @@ module.exports = {
   getReferences,
   importMembers,
   moveToGuestList,
+  createMember,
   updateMember,
   deleteMember,
 };

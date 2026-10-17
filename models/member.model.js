@@ -13,7 +13,30 @@ const memberSchema = new mongoose.Schema(
     name: { type: String, required: true, trim: true },
 
     // 10-digit local mobile number (91 prefix / spaces removed on import).
-    mobile: { type: String, required: true, trim: true },
+    // Only required for a "valid" member: a row imported with "Import all"
+    // can have a missing / wrong number until it is fixed by editing.
+    mobile: {
+      type: String,
+      trim: true,
+      default: "",
+      required: function () {
+        return (this.mobileStatus || "valid") === "valid";
+      },
+    },
+
+    // "valid"     - normal member (number is unique in Member List).
+    // "invalid"   - imported with "Import all" but name / number was wrong.
+    // "duplicate" - imported with "Import all" but the number already exists.
+    // Flagged members show a "Needs Fix" tag, cannot be moved to the Guest
+    // List until edited, and turn "valid" again once the details are fixed.
+    mobileStatus: {
+      type: String,
+      enum: ["valid", "invalid", "duplicate"],
+      default: "valid",
+    },
+
+    // Why the row was flagged (e.g. "Invalid mobile number").
+    importNote: { type: String, trim: true, default: "" },
 
     email: { type: String, trim: true, default: "" },
     profession: { type: String, trim: true, default: "" },
@@ -54,7 +77,12 @@ const memberSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-memberSchema.index({ mobile: 1 }, { unique: true });
+// Unique only among valid members, so duplicate / invalid rows imported with
+// "Import all" never clash with the real ones.
+memberSchema.index(
+  { mobile: 1 },
+  { unique: true, partialFilterExpression: { mobileStatus: "valid" } }
+);
 memberSchema.index({ name: 1 });
 memberSchema.index({ profession: 1 });
 

@@ -127,48 +127,33 @@ const parseMembersFile = async (buffer, fileName) => {
 const MAX_PROBLEM_ROWS = 300;
 
 // ================= IMPORT (OR DRY-RUN CHECK) =================
-const importMembers = async (buffer, fileName, adminId, { dryRun = false } = {}) => {
+// Every problem row of a file is returned (the report needs all of them).
+const MAX_IMPORT_PROBLEM_ROWS = 5000;
+
+// mode "valid" (default): only good rows are saved; duplicates and invalid
+//   rows are skipped and listed.
+// mode "all": every row is saved. Duplicate / invalid rows are saved too,
+//   flagged (mobileStatus + importNote) so they can be found under the
+//   "Needs Fix" tab and corrected by editing.
+const importMembers = async (
+  buffer,
+  fileName,
+  adminId,
+  { dryRun = false, mode = "valid" } = {}
+) => {
+  const importAll = mode === "all";
   const rows = await parseMembersFile(buffer, fileName);
 
-  const existing = await Member.find({}, { mobile: 1 }).lean();
+  const existing = await Member.find({ mobileStatus: "valid" }, { mobile: 1 }).lean();
   const seen = new Set(existing.map((m) => m.mobile));
 
   const problems = [];
   const toInsert = [];
+  const flaggedToInsert = [];
   let duplicateCount = 0;
   let failureCount = 0;
 
-  const addProblem = (rowNumber, name, mobile, error, duplicate) => {
-    if (duplicate) duplicateCount += 1;
-    else failureCount += 1;
-    if (problems.length < MAX_PROBLEM_ROWS) {
-      problems.push({ row: rowNumber, name, mobileNumber: mobile, error, duplicate });
-    }
-  };
-
-  for (const { rowNumber, data } of rows) {
-    if (!data.name) {
-      addProblem(rowNumber, "", data.mobile, "Name is required", false);
-      continue;
-    }
-
-    if (!data.mobile) {
-      addProblem(rowNumber, data.name, "", "Contact (mobile) is missing", false);
-      continue;
-    }
-
-    const mobile = toLocalMobile(data.mobile);
-    if (!mobile) {
-      addProblem(rowNumber, data.name, data.mobile, "Invalid mobile number", false);
-      continue;
-    }
-
-    if (seen.has(mobile)) {
-      addProblem(rowNumber, data.name, mobile, "Mobile number already in Member List", true);
-      continue;
-    }
-    seen.add(mobile);
-
+  const baseFields = (data) => {
     const references = [];
     [data.reference1, data.reference2, data.reference3].forEach((ref) => {
       const text = String(ref || "").trim();
@@ -177,9 +162,8 @@ const importMembers = async (buffer, fileName, adminId, { dryRun = false } = {})
       }
     });
 
-    toInsert.push({
+    return {
       name: data.name,
-      mobile,
       email: /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email) ? data.email : "",
       profession: data.profession,
       companyName: data.companyName,
@@ -192,36 +176,96 @@ const importMembers = async (buffer, fileName, adminId, { dryRun = false } = {})
       remark: data.remark,
       memberStatus: data.memberStatus || "Active",
       createdBy: adminId || null,
-    });
+    };
+  };
+
+  const addProblem = (rowNumber, data, mobileText, error, duplicate) => {
+    if (duplicate) duplicateCount += 1;
+    else failureCount += 1;
+
+    if (problems.length < MAX_IMPORT_PROBLEM_ROWS) {
+      problems.push({
+        row: rowNumber,
+        name: data.name || "",
+        mobileNumber: mobileText,
+        error,
+        duplicate,
+        data,
+      });
+    }
+
+    if (importAll) {
+      flaggedToInsert.push({
+        ...baseFields(data),
+        name: data.name || "(No name)",
+        mobile: mobileText || "",
+        mobileStatus: duplicate ? "duplicate" : "invalid",
+        importNote: error,
+      });
+    }
+  };
+
+  for (const { rowNumber, data } of rows) {
+    if (!data.name) {
+      addProblem(rowNumber, data, toLocalMobile(data.mobile) || data.mobile, "Name is required", false);
+      continue;
+    }
+
+    if (!data.mobile) {
+      addProblem(rowNumber, data, "", "Contact (mobile) is missing", false);
+      continue;
+    }
+
+    const mobile = toLocalMobile(data.mobile);
+    if (!mobile) {
+      addProblem(rowNumber, data, data.mobile, "Invalid mobile number", false);
+      continue;
+    }
+
+    if (seen.has(mobile)) {
+      addProblem(rowNumber, data, mobile, "Mobile number already in Member List", true);
+      continue;
+    }
+    seen.add(mobile);
+
+    toInsert.push({ ...baseFields(data), mobile });
   }
 
   let successCount = toInsert.length;
+  let flaggedCount = importAll ? flaggedToInsert.length : 0;
 
-  if (!dryRun && toInsert.length) {
-    successCount = 0;
-    for (let i = 0; i < toInsert.length; i += 500) {
-      const chunk = toInsert.slice(i, i + 500);
+  const insertAll = async (docs) => {
+    let saved = 0;
+    for (let i = 0; i < docs.length; i += 500) {
+      const chunk = docs.slice(i, i + 500);
       try {
         const inserted = await Member.insertMany(chunk, { ordered: false });
-        successCount += inserted.length;
+        saved += inserted.length;
       } catch (error) {
         // ordered:false -> the rest of the chunk is still saved.
         const savedCount = error?.insertedDocs?.length ?? 0;
-        successCount += savedCount;
+        saved += savedCount;
         failureCount += chunk.length - savedCount;
       }
     }
+    return saved;
+  };
+
+  if (!dryRun) {
+    successCount = toInsert.length ? await insertAll(toInsert) : 0;
+    flaggedCount = flaggedToInsert.length ? await insertAll(flaggedToInsert) : 0;
   }
 
   return {
     dryRun,
+    mode: importAll ? "all" : "valid",
     totalRows: rows.length,
     successCount,
+    flaggedCount,
     duplicateCount,
     failureCount,
     problems,
-    problemsTruncated:
-      duplicateCount + failureCount > problems.length,
+    problemsTruncated: duplicateCount + failureCount > problems.length,
   };
 };
 
@@ -229,7 +273,25 @@ const importMembers = async (buffer, fileName, adminId, { dryRun = false } = {})
 const MOVED_FILTERS = ["inGuestList", "notInGuestList"];
 const SORTABLE = ["name", "mobile", "profession", "companyName", "city", "createdAt"];
 
-const buildMemberQuery = (query = {}) => {
+// An edition is "current" while its event still exists, is switched on and
+// has not ended - the same rule the frontend uses for the active-edition
+// list (hooks/useEditionOptions). Members stay in the directory for good;
+// this only decides whether they count as "In Guest List" RIGHT NOW, so
+// after an event ends or is deleted its members become selectable again
+// for the next edition.
+const getActiveEventIds = async () =>
+  Event.distinct("_id", {
+    isDeleted: { $ne: true },
+    isActive: { $ne: false },
+    status: { $ne: "Expired" },
+    $or: [
+      { endDateTime: null },
+      { endDateTime: { $exists: false } },
+      { endDateTime: { $gte: new Date() } },
+    ],
+  });
+
+const buildMemberQuery = (query = {}, activeEventIds = []) => {
   const filter = {};
   const and = [];
 
@@ -265,11 +327,15 @@ const buildMemberQuery = (query = {}) => {
     filter.memberStatus = new RegExp(`^${escapeRegex(String(query.memberStatus).trim())}$`, "i");
   }
 
+  if (query.moved === "needsFix") {
+    filter.mobileStatus = { $in: ["invalid", "duplicate"] };
+  }
+
   if (MOVED_FILTERS.includes(query.moved)) {
     and.push(
       query.moved === "inGuestList"
-        ? { "movedTo.0": { $exists: true } }
-        : { "movedTo.0": { $exists: false } }
+        ? { "movedTo.eventId": { $in: activeEventIds } }
+        : { "movedTo.eventId": { $nin: activeEventIds } }
     );
   }
 
@@ -284,9 +350,11 @@ const getAllMembers = async (query = {}) => {
   const sortBy = SORTABLE.includes(query.sortBy) ? query.sortBy : "name";
   const sortOrder = query.sortOrder === "desc" ? -1 : 1;
 
-  const filter = buildMemberQuery(query);
+  const activeEventIds = await getActiveEventIds();
+  const activeSet = new Set(activeEventIds.map(String));
+  const filter = buildMemberQuery(query, activeEventIds);
 
-  const [data, total] = await Promise.all([
+  const [rows, total] = await Promise.all([
     Member.find(filter)
       .sort({ [sortBy]: sortOrder, _id: 1 })
       .collation({ locale: "en", strength: 2 })
@@ -298,16 +366,25 @@ const getAllMembers = async (query = {}) => {
 
   // Numbers on the All / Not in Guest List / In Guest List tabs (whole
   // directory, independent of search and other filters).
-  const [all, inGuestList] = await Promise.all([
+  const [all, inGuestList, needsFix] = await Promise.all([
     Member.countDocuments({}),
-    Member.countDocuments({ "movedTo.0": { $exists: true } }),
+    Member.countDocuments({ "movedTo.eventId": { $in: activeEventIds } }),
+    Member.countDocuments({ mobileStatus: { $in: ["invalid", "duplicate"] } }),
   ]);
+
+  // movedTo is the permanent record of every edition a member went to
+  // (kept even after that event ends or is deleted); currentMovedTo is only
+  // the editions that are still running.
+  const data = rows.map((m) => ({
+    ...m,
+    currentMovedTo: (m.movedTo || []).filter((x) => activeSet.has(String(x.eventId))),
+  }));
 
   return {
     success: true,
     message: "Members fetched successfully",
     data,
-    counts: { all, inGuestList, notInGuestList: all - inGuestList },
+    counts: { all, inGuestList, notInGuestList: all - inGuestList, needsFix },
     pagination: {
       total,
       page,
@@ -354,7 +431,7 @@ const getMemberReferences = async () => {
 // ids -> those members; selectAll -> every member matching `filters`.
 const resolveMembers = async ({ ids, selectAll, filters }) => {
   if (selectAll) {
-    return Member.find(buildMemberQuery(filters || {}));
+    return Member.find(buildMemberQuery(filters || {}, await getActiveEventIds()));
   }
 
   if (!Array.isArray(ids) || ids.length === 0) {
@@ -425,6 +502,13 @@ const moveMembersToGuestList = async (body, adminId) => {
 
   for (const member of members) {
     try {
+      // A member imported with a wrong / repeated number must be fixed first.
+      if ((member.mobileStatus || "valid") !== "valid") {
+        counts.failed += 1;
+        note(member, "failed", "Fix the mobile number first (Needs Fix) - edit this member");
+        continue;
+      }
+
       const companyCategory = await resolveCategoryId(member.profession);
 
       const existing = await Contact.findOne({
@@ -529,14 +613,21 @@ const updateMember = async (id, body = {}) => {
       throw new AppError("Mobile Number must be a valid 10-digit number", 400);
     }
 
-    if (mobile !== member.mobile) {
-      const clash = await Member.findOne({ mobile, _id: { $ne: member._id } })
+    if (mobile !== member.mobile || member.mobileStatus === "duplicate") {
+      const clash = await Member.findOne({
+        mobile,
+        mobileStatus: "valid",
+        _id: { $ne: member._id },
+      })
         .select("name")
         .lean();
       if (clash) {
         throw new AppError(`This mobile number already belongs to ${clash.name}`, 409);
       }
       member.mobile = mobile;
+      // The number is now valid and unique -> no longer "Needs Fix".
+      member.mobileStatus = "valid";
+      member.importNote = "";
     }
   }
 
@@ -568,8 +659,79 @@ const updateMember = async (id, body = {}) => {
     member.references = refs;
   }
 
+  // Flagged only because the name was missing: valid number + a name now.
+  if (member.mobileStatus === "invalid" && member.name && toLocalMobile(member.mobile)) {
+    const local = toLocalMobile(member.mobile);
+    const taken = await Member.findOne({
+      mobile: local,
+      mobileStatus: "valid",
+      _id: { $ne: member._id },
+    })
+      .select("_id")
+      .lean();
+    if (!taken) {
+      member.mobile = local;
+      member.mobileStatus = "valid";
+      member.importNote = "";
+    }
+  }
+
   await member.save();
   return member;
+};
+
+// ================= CREATE (ONE MEMBER) =================
+// POST /api/members - add a single member by hand (the Excel / CSV import
+// is still there for bulk). Same rules as import and edit: name and a valid
+// 10-digit mobile are required, the mobile must be unique, email is optional.
+const createMember = async (body = {}, adminId = null) => {
+  const text = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
+
+  const name = text(body.name);
+  if (!name) throw new AppError("Name is required", 400);
+
+  const mobile = toLocalMobile(body.mobile);
+  if (!mobile) {
+    throw new AppError("Mobile Number must be a valid 10-digit number", 400);
+  }
+
+  const clash = await Member.findOne({ mobile, mobileStatus: "valid" }).select("name").lean();
+  if (clash) {
+    throw new AppError(`This mobile number already belongs to ${clash.name}`, 409);
+  }
+
+  const email = text(body.email);
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new AppError("Invalid email address", 400);
+  }
+
+  const rawRefs = Array.isArray(body.references)
+    ? body.references
+    : String(body.references || "").split(/[,|;]/);
+  const references = [];
+  rawRefs.forEach((ref) => {
+    const value = text(ref);
+    if (value && !references.some((r) => r.toLowerCase() === value.toLowerCase())) {
+      references.push(value);
+    }
+  });
+
+  return Member.create({
+    name,
+    mobile,
+    email,
+    profession: text(body.profession),
+    companyName: text(body.companyName),
+    objective: text(body.objective),
+    area: text(body.area),
+    city: text(body.city),
+    state: text(body.state),
+    references,
+    source: text(body.source),
+    remark: text(body.remark),
+    memberStatus: text(body.memberStatus) || "Active",
+    createdBy: adminId || null,
+  });
 };
 
 // ================= DELETE (HARD) =================
@@ -586,6 +748,7 @@ module.exports = {
   getMemberProfessions,
   getMemberReferences,
   moveMembersToGuestList,
+  createMember,
   updateMember,
   deleteMember,
 };

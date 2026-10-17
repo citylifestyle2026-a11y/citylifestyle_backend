@@ -26,6 +26,20 @@ const connectDB = async () => {
     // (Contact's included) are touched.
     const CompanyCategory = require("../models/companycategory.model");
     await CompanyCategory.syncIndexes();
+
+    // ================= MEMBER LIST: UNIQUE MOBILE INDEX =================
+    // The unique index on Member.mobile is now partial (only members with
+    // mobileStatus "valid"), so rows imported with "Import all" can be kept
+    // even when their number is wrong or repeated. Members saved before this
+    // change have no mobileStatus yet, so they are marked "valid" first, then
+    // syncIndexes() swaps the old full unique index for the partial one.
+    // Safe to run on every start.
+    const Member = require("../models/member.model");
+    await Member.updateMany(
+      { mobileStatus: { $exists: false } },
+      { $set: { mobileStatus: "valid" } }
+    );
+    await Member.syncIndexes();
   } catch (error) {
     console.error("========== FULL ERROR ==========");
     console.error(error);
