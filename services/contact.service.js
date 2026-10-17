@@ -518,9 +518,16 @@ function buildContactQuery(query) {
 // Numbers shown on the Pending / Approved / Rejected filter tabs. Counted
 // over every visible contact (same base filter as the list), independent of
 // the search / category / reference filters.
-const getApprovalStatusCounts = async () => {
+const getApprovalStatusCounts = async (editionEventId = null) => {
+  const match = { isDeleted: { $ne: true }, historyOnly: { $ne: true } };
+
+  // When one edition is selected the tabs count only that edition's guests.
+  if (editionEventId && mongoose.Types.ObjectId.isValid(editionEventId)) {
+    match.editionEventId = new mongoose.Types.ObjectId(editionEventId);
+  }
+
   const rows = await Contact.aggregate([
-    { $match: { isDeleted: { $ne: true }, historyOnly: { $ne: true } } },
+    { $match: match },
     {
       $group: {
         _id: { $ifNull: ["$approvalStatus", "approved"] },
@@ -1242,7 +1249,7 @@ const getAllContacts = async (query) => {
       .limit(limit)
   );
 
-  const statusCounts = await getApprovalStatusCounts();
+  const statusCounts = await getApprovalStatusCounts(query.editionEventId);
 
   return {
     success: true,

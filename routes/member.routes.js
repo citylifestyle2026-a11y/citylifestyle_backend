@@ -7,6 +7,7 @@ const upload = require("../middlewares/upload.middleware");
 
 // Static paths first so they are never read as an :id.
 router.get("/professions", protect, memberController.getProfessions);
+router.get("/references", protect, memberController.getReferences);
 
 // Import members from .xlsx / .csv. Add ?dryRun=true to only check the file.
 router.post(

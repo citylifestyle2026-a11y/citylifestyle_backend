@@ -253,6 +253,14 @@ const buildMemberQuery = (query = {}) => {
     filter.profession = new RegExp(`^${escapeRegex(String(query.profession).trim())}$`, "i");
   }
 
+  // Reference (case-insensitive) - matches any of the member's references.
+  if (query.reference) {
+    filter.references = new RegExp(
+      `^${escapeRegex(String(query.reference).trim())}$`,
+      "i"
+    );
+  }
+
   if (query.memberStatus) {
     filter.memberStatus = new RegExp(`^${escapeRegex(String(query.memberStatus).trim())}$`, "i");
   }
@@ -288,10 +296,18 @@ const getAllMembers = async (query = {}) => {
     Member.countDocuments(filter),
   ]);
 
+  // Numbers on the All / Not in Guest List / In Guest List tabs (whole
+  // directory, independent of search and other filters).
+  const [all, inGuestList] = await Promise.all([
+    Member.countDocuments({}),
+    Member.countDocuments({ "movedTo.0": { $exists: true } }),
+  ]);
+
   return {
     success: true,
     message: "Members fetched successfully",
     data,
+    counts: { all, inGuestList, notInGuestList: all - inGuestList },
     pagination: {
       total,
       page,
@@ -312,6 +328,23 @@ const getMemberProfessions = async () => {
       if (!seen.has(p.toLowerCase())) {
         seen.add(p.toLowerCase());
         list.push(p);
+      }
+    });
+  list.sort((a, b) => a.localeCompare(b));
+  return list;
+};
+
+const getMemberReferences = async () => {
+  const rows = await Member.distinct("references");
+  const seen = new Set();
+  const list = [];
+  rows
+    .map((r) => String(r || "").trim())
+    .filter(Boolean)
+    .forEach((r) => {
+      if (!seen.has(r.toLowerCase())) {
+        seen.add(r.toLowerCase());
+        list.push(r);
       }
     });
   list.sort((a, b) => a.localeCompare(b));
@@ -477,6 +510,7 @@ module.exports = {
   importMembers,
   getAllMembers,
   getMemberProfessions,
+  getMemberReferences,
   moveMembersToGuestList,
   deleteMember,
 };

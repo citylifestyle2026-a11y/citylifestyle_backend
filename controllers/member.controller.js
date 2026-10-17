@@ -17,6 +17,15 @@ const getProfessions = async (req, res, next) => {
   }
 };
 
+const getReferences = async (req, res, next) => {
+  try {
+    const data = await memberService.getMemberReferences();
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    next(error);
+  }
+};
+
 // POST /api/members/import  (?dryRun=true only checks the file)
 const importMembers = async (req, res, next) => {
   try {
@@ -65,6 +74,7 @@ const deleteMember = async (req, res, next) => {
 module.exports = {
   getAllMembers,
   getProfessions,
+  getReferences,
   importMembers,
   moveToGuestList,
   deleteMember,
