@@ -16,6 +16,10 @@ const toLocalMobile = (value) => {
   return canonical ? canonical.slice(2) : null;
 };
 
+// Member status is only ever "Active" or "Inactive".
+const normalizeMemberStatus = (value) =>
+  String(value ?? "").trim().toLowerCase() === "inactive" ? "Inactive" : "Active";
+
 const escapeRegex = (text) => String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 // ================= FILE PARSING =================
@@ -174,7 +178,7 @@ const importMembers = async (
       references,
       source: data.source,
       remark: data.remark,
-      memberStatus: data.memberStatus || "Active",
+      memberStatus: normalizeMemberStatus(data.memberStatus),
       createdBy: adminId || null,
     };
   };
@@ -638,12 +642,25 @@ const updateMember = async (id, body = {}) => {
     }
   }
 
+  // The edit form always sends these, so they cannot be saved empty.
+  [
+    ["companyName", "Company / Brand"],
+    ["profession", "Profession"],
+  ].forEach(([field, label]) => {
+    if (body[field] !== undefined && !String(body[field]).trim()) {
+      throw new AppError(`${label} is required`, 400);
+    }
+  });
+
   UPDATABLE_TEXT_FIELDS.forEach((field) => {
     if (body[field] !== undefined) {
       member[field] = String(body[field]).replace(/\s+/g, " ").trim();
     }
   });
   member.name = name;
+  if (body.memberStatus !== undefined) {
+    member.memberStatus = normalizeMemberStatus(body.memberStatus);
+  }
 
   if (body.references !== undefined) {
     const raw = Array.isArray(body.references)
@@ -656,6 +673,7 @@ const updateMember = async (id, body = {}) => {
         refs.push(text);
       }
     });
+    if (refs.length === 0) throw new AppError("At least one Reference is required", 400);
     member.references = refs;
   }
 
@@ -700,6 +718,12 @@ const createMember = async (body = {}, adminId = null) => {
     throw new AppError(`This mobile number already belongs to ${clash.name}`, 409);
   }
 
+  const companyName = text(body.companyName);
+  if (!companyName) throw new AppError("Company / Brand is required", 400);
+
+  const profession = text(body.profession);
+  if (!profession) throw new AppError("Profession is required", 400);
+
   const email = text(body.email);
   if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     throw new AppError("Invalid email address", 400);
@@ -716,12 +740,14 @@ const createMember = async (body = {}, adminId = null) => {
     }
   });
 
+  if (references.length === 0) throw new AppError("At least one Reference is required", 400);
+
   return Member.create({
     name,
     mobile,
     email,
-    profession: text(body.profession),
-    companyName: text(body.companyName),
+    profession,
+    companyName,
     objective: text(body.objective),
     area: text(body.area),
     city: text(body.city),
@@ -729,7 +755,7 @@ const createMember = async (body = {}, adminId = null) => {
     references,
     source: text(body.source),
     remark: text(body.remark),
-    memberStatus: text(body.memberStatus) || "Active",
+    memberStatus: normalizeMemberStatus(body.memberStatus),
     createdBy: adminId || null,
   });
 };

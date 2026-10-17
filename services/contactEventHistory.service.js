@@ -207,6 +207,37 @@ const getAllEventHistory = async (query = {}) => {
   };
 };
 
+// ================= EDITIONS THAT HAVE HISTORY =================
+// Options for the Event History "All Editions" filter. Built from the
+// history itself, so an edition stays in the list (and stays filterable)
+// even after its Event was deleted - for those the name comes from the
+// eventSnapshot saved at delete time.
+const getHistoryEditions = async () => {
+  const groups = await ContactEventHistory.aggregate([
+    { $match: { isDeleted: { $ne: true } } },
+    { $group: { _id: "$eventId", snapshot: { $max: "$eventSnapshot" } } },
+  ]);
+
+  const liveEvents = await Event.find({ _id: { $in: groups.map((g) => g._id) } })
+    .select("title edition startDateTime")
+    .lean();
+  const liveById = new Map(liveEvents.map((e) => [String(e._id), e]));
+
+  return groups
+    .map((g) => {
+      const source = liveById.get(String(g._id)) || g.snapshot;
+      if (!source) return null;
+      return {
+        value: String(g._id),
+        label: source.edition || source.title || "-",
+        startDateTime: source.startDateTime || null,
+        isEventDeleted: !liveById.has(String(g._id)),
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => new Date(b.startDateTime || 0) - new Date(a.startDateTime || 0));
+};
+
 // ================= GET EVENT HISTORY BY CONTACT =================
 // Supports optional ?page=&limit= — omit both to get the full,
 // unpaginated timeline (the page's default view), same "pass what you
@@ -367,6 +398,7 @@ function withEventFallback(doc) {
 module.exports = {
   createEventHistory,
   getAllEventHistory,
+  getHistoryEditions,
   getEventHistoryByContact,
   updateEventHistory,
   deleteEventHistory,

@@ -53,6 +53,13 @@ router.get(
   contactEventHistoryController.getAllEventHistory
 );
 
+// Editions that have history (also those of deleted events) - filter dropdown.
+router.get(
+  "/editions",
+  protect,
+  contactEventHistoryController.getHistoryEditions
+);
+
 // Get Event History for a Contact — supports ?page=&limit=
 router.get(
   "/contact/:contactId",

@@ -190,13 +190,36 @@ const checkInQr = async ({ qrToken, scannedBy }) => {
     throw new AppError("Ticket not found.", 404);
   }
 
-  // 3. Status Validation (unchanged)
+  // 3. Validation - the same rules verifyQr applies. The scanner app only
+  // calls check-in, so without these a cancelled booking, an inactive event
+  // or an event that is already over would still be let in.
+  if (!ticket.bookingId) {
+    throw new AppError("Booking not found.", 404);
+  }
+
+  if (ticket.bookingId.isDeleted) {
+    throw new AppError("This booking has been cancelled.", 400);
+  }
+
   if (ticket.status === "Used") {
     throw new AppError("This ticket has already been checked in.", 400);
   }
 
   if (ticket.status === "Cancelled") {
     throw new AppError("This ticket has been cancelled.", 400);
+  }
+
+  if (!ticket.eventId) {
+    throw new AppError("Event not found.", 404);
+  }
+
+  if (!ticket.eventId.isActive) {
+    throw new AppError("This event is inactive.", 400);
+  }
+
+  // (worded without "already" so the app does not show it as "ticket used")
+  if (ticket.eventId.endDateTime && new Date() > new Date(ticket.eventId.endDateTime)) {
+    throw new AppError("This event has ended.", 400);
   }
 
   // 4. Update Ticket(s)

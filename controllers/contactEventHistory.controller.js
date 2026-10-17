@@ -38,6 +38,17 @@ const getAllEventHistory = async (req, res, next) => {
   }
 };
 
+// ================= EDITIONS THAT HAVE HISTORY =================
+// GET /api/contact-event-history/editions - includes deleted events' editions.
+const getHistoryEditions = async (req, res, next) => {
+  try {
+    const data = await contactEventHistoryService.getHistoryEditions();
+    return res.status(200).json({ success: true, message: "Editions fetched successfully", data });
+  } catch (error) {
+    next(error);
+  }
+};
+
 // ================= GET EVENT HISTORY BY CONTACT =================
 // GET /api/contact-event-history/contact/:contactId — supports optional
 // ?page=&limit= (see contactEventHistoryService.getEventHistoryByContact).
@@ -134,6 +145,7 @@ module.exports = {
   syncFromEvent,
   createEventHistory,
   getAllEventHistory,
+  getHistoryEditions,
   getEventHistoryByContact,
   updateEventHistory,
   deleteEventHistory,

@@ -20,8 +20,6 @@ const verifyQr = async (req, res, next) => {
 };
 // ================= CHECK-IN QR =================
 const checkInQr = async (req, res, next) => {
-    console.log("========== CHECK-IN API HIT ==========");
-  console.log("Body:", req.body);
   try {
     const result = await qrService.checkInQr({
       qrToken: req.body.qrToken,
