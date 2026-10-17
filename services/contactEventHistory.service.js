@@ -128,6 +128,8 @@ const getAllEventHistory = async (query = {}) => {
             isSpouse: true,
           },
           { eventId: { $in: matchedEvents.map((e) => e._id) } },
+          { "eventSnapshot.edition": pattern },
+          { "eventSnapshot.title": pattern },
         ],
       },
     ];
@@ -161,7 +163,7 @@ const getAllEventHistory = async (query = {}) => {
         .populate("eventId", "title edition startDateTime endDateTime venueName status")
     : [];
 
-  const entryById = new Map(entries.map((e) => [String(e._id), e]));
+  const entryById = new Map(entries.map((e) => [String(e._id), withEventFallback(e)]));
 
   const history = groups.map((g) => {
     const groupEntries = g.entryIds
@@ -223,9 +225,10 @@ const getEventHistoryByContact = async (contactId, query = {}) => {
 
   const total = await ContactEventHistory.countDocuments(filter);
 
-  const history = limit
+  const rawHistory = limit
     ? await baseQuery.skip((page - 1) * limit).limit(limit)
     : await baseQuery;
+  const history = rawHistory.map(withEventFallback);
 
   return {
     message: history.length
@@ -260,9 +263,12 @@ const updateEventHistory = async (id, data) => {
     throw new AppError("Event history entry not found", 404);
   }
 
-  if (data.eventId) {
+  // Unchanged event (e.g. only status/notes edited) needs no lookup, so a
+  // row whose Event was deleted can still be edited.
+  if (data.eventId && String(data.eventId) !== String(history.eventId)) {
     await assertEventExists(data.eventId);
     history.eventId = data.eventId;
+    history.eventSnapshot = null;
   }
 
   if (data.status !== undefined) {
@@ -339,10 +345,23 @@ async function assertEventExists(eventId) {
 // shape exactly (the frontend can drop either straight into its list
 // state without a refetch).
 async function populateHistory(history) {
-  return ContactEventHistory.findById(history._id).populate(
+  const doc = await ContactEventHistory.findById(history._id).populate(
     "eventId",
     "title edition startDateTime endDateTime venueName status"
   );
+  return withEventFallback(doc);
+}
+
+// When the Event was deleted, populate() returns null for eventId. Rebuild
+// it from the snapshot saved at delete time so the response keeps the same
+// shape (eventId.title / edition / startDateTime ...) the frontend reads.
+function withEventFallback(doc) {
+  if (!doc) return doc;
+  const obj = typeof doc.toObject === "function" ? doc.toObject() : doc;
+  if (!obj.eventId && obj.eventSnapshot) {
+    obj.eventId = { ...obj.eventSnapshot };
+  }
+  return obj;
 }
 
 module.exports = {

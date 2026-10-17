@@ -63,6 +63,14 @@ const contactEventHistorySchema = new mongoose.Schema(
       default: "manual",
     },
 
+    // Copy of the event's details, written when the Event is deleted
+    // (services/event.service.js deleteEvent) so this row keeps showing
+    // the event's title/edition/dates after the Event document is gone.
+    eventSnapshot: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+    },
+
     // Soft-delete — same convention as every other model in this
     // project (Contact/Event/Booking).
     isDeleted: {

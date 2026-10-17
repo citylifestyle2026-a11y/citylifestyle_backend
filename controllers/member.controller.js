@@ -62,6 +62,19 @@ const moveToGuestList = async (req, res, next) => {
   }
 };
 
+const updateMember = async (req, res, next) => {
+  try {
+    const member = await memberService.updateMember(req.params.id, req.body);
+    return res.status(200).json({
+      success: true,
+      message: "Member updated successfully",
+      data: member,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 const deleteMember = async (req, res, next) => {
   try {
     await memberService.deleteMember(req.params.id);
@@ -77,5 +90,6 @@ module.exports = {
   getReferences,
   importMembers,
   moveToGuestList,
+  updateMember,
   deleteMember,
 };

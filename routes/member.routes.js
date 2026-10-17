@@ -22,6 +22,8 @@ router.post("/move-to-guest-list", protect, memberController.moveToGuestList);
 
 router.get("/", protect, memberController.getAllMembers);
 
+router.put("/:id", protect, memberController.updateMember);
+
 router.delete("/:id", protect, memberController.deleteMember);
 
 module.exports = router;

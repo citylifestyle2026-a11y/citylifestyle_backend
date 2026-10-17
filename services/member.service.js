@@ -498,6 +498,80 @@ const moveMembersToGuestList = async (body, adminId) => {
   };
 };
 
+// ================= UPDATE =================
+// PUT /api/members/:id - edit one member's details.
+const UPDATABLE_TEXT_FIELDS = [
+  "name",
+  "email",
+  "profession",
+  "companyName",
+  "objective",
+  "area",
+  "city",
+  "state",
+  "source",
+  "remark",
+  "memberStatus",
+];
+
+const updateMember = async (id, body = {}) => {
+  if (!mongoose.Types.ObjectId.isValid(id)) throw new AppError("Invalid Member ID", 400);
+
+  const member = await Member.findById(id);
+  if (!member) throw new AppError("Member not found", 404);
+
+  const name = body.name !== undefined ? String(body.name).trim() : member.name;
+  if (!name) throw new AppError("Name is required", 400);
+
+  if (body.mobile !== undefined) {
+    const mobile = toLocalMobile(body.mobile);
+    if (!mobile) {
+      throw new AppError("Mobile Number must be a valid 10-digit number", 400);
+    }
+
+    if (mobile !== member.mobile) {
+      const clash = await Member.findOne({ mobile, _id: { $ne: member._id } })
+        .select("name")
+        .lean();
+      if (clash) {
+        throw new AppError(`This mobile number already belongs to ${clash.name}`, 409);
+      }
+      member.mobile = mobile;
+    }
+  }
+
+  if (body.email !== undefined) {
+    const email = String(body.email).trim();
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      throw new AppError("Invalid email address", 400);
+    }
+  }
+
+  UPDATABLE_TEXT_FIELDS.forEach((field) => {
+    if (body[field] !== undefined) {
+      member[field] = String(body[field]).replace(/\s+/g, " ").trim();
+    }
+  });
+  member.name = name;
+
+  if (body.references !== undefined) {
+    const raw = Array.isArray(body.references)
+      ? body.references
+      : String(body.references).split(/[,|;]/);
+    const refs = [];
+    raw.forEach((ref) => {
+      const text = String(ref || "").trim();
+      if (text && !refs.some((r) => r.toLowerCase() === text.toLowerCase())) {
+        refs.push(text);
+      }
+    });
+    member.references = refs;
+  }
+
+  await member.save();
+  return member;
+};
+
 // ================= DELETE (HARD) =================
 const deleteMember = async (id) => {
   if (!mongoose.Types.ObjectId.isValid(id)) throw new AppError("Invalid Member ID", 400);
@@ -512,5 +586,6 @@ module.exports = {
   getMemberProfessions,
   getMemberReferences,
   moveMembersToGuestList,
+  updateMember,
   deleteMember,
 };
