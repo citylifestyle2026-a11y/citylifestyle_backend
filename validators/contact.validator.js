@@ -58,6 +58,16 @@ const contactExtraFieldValidation = [
   }),
 ];
 
+// Edit: nothing is compulsory. Only the FORMAT of values that are actually
+// filled in is checked (Instagram link, mobile numbers, email, ids).
+const contactUpdateExtraFieldValidation = [
+  body("area").optional({ values: "falsy" }).trim(),
+  instagramRule("instagramId", "Instagram Link"),
+  instagramRule("spouseInstagramId", "Spouse Instagram Link", {
+    coupleOnly: true,
+  }),
+];
+
 // Create Contact Validation
 // This only checks shape/type/presence — trimming and case-insensitive
 // de-duplication of `references` happens in the model itself
@@ -216,18 +226,11 @@ const createContactValidation = [
 // "missing" from a differently-shaped request; every other field below
 // is required outright, same as create.
 const updateContactValidation = [
-  body("fullName")
-    .optional()
-    .trim()
-    .notEmpty()
-    .withMessage("Full Name is required"),
+  body("fullName").optional({ values: "falsy" }).trim(),
 
   body("whatsappNumber")
-    .optional()
+    .optional({ values: "falsy" })
     .trim()
-    .notEmpty()
-    .withMessage("WhatsApp Number is required")
-    .bail()
     .custom(
       mobileCustomValidator(
         "Invalid WhatsApp Number (10 digits, with or without 91)"
@@ -235,39 +238,26 @@ const updateContactValidation = [
     )
     .customSanitizer(toLocalMobileSanitizer),
 
-  body("companyName")
-    .trim()
-    .notEmpty()
-    .withMessage("Company Name is required"),
+  body("companyName").optional({ values: "falsy" }).trim(),
 
-  body("designation")
-    .trim()
-    .notEmpty()
-    .withMessage("Designation is required"),
+  body("designation").optional({ values: "falsy" }).trim(),
 
-  body("address")
-    .optional({ values: "falsy" })
-    .trim(),
+  body("address").optional({ values: "falsy" }).trim(),
 
-  body("references")
-    .isArray({ min: 1 })
-    .withMessage("At least one Reference is required"),
+  // References may be left empty on edit; if sent, each must be text.
+  body("references").optional().isArray().withMessage("References must be a list"),
 
   body("references.*")
+    .optional()
     .isString()
     .withMessage("Each reference must be text")
-    .trim()
-    .notEmpty()
-    .withMessage("Reference cannot be empty"),
+    .trim(),
 
   body("companyCategory")
-    .notEmpty()
-    .withMessage("Company Category is required")
+    .optional({ values: "falsy" })
     .isMongoId()
     .withMessage("Invalid Company Category"),
 
-  // Same rules as createContactValidation above — see the comments
-  // there for the reasoning behind each one.
   body("email")
     .optional({ checkFalsy: true })
     .trim()
@@ -275,61 +265,38 @@ const updateContactValidation = [
     .withMessage("Invalid email address"),
 
   body("relationship")
+    .optional({ values: "falsy" })
     .trim()
-    .notEmpty()
-    .withMessage("Relationship is required")
-    .bail()
     .isIn(["Single", "Couple"])
     .withMessage('Relationship must be "Single" or "Couple"'),
 
-  body("spouseName")
-    .trim()
-    .custom((value, { req }) => {
-      if (req.body.relationship === "Couple" && !String(value || "").trim()) {
-        throw new Error("Spouse Name is required for Couple");
-      }
-      return true;
-    }),
+  body("spouseName").optional({ values: "falsy" }).trim(),
 
   body("spouseMobile")
+    .optional({ values: "falsy" })
     .trim()
-    .custom((value, { req }) => {
+    .custom((value) => {
       const trimmed = String(value || "").trim();
-      const isCouple = req.body.relationship === "Couple";
-
-      if (isCouple && !trimmed) {
-        throw new Error("Spouse Mobile Number is required for Couple");
-      }
-
       if (trimmed && !toLocalMobileNumber(trimmed)) {
         throw new Error(
           "Invalid Spouse Mobile Number (10 digits, with or without 91)"
         );
       }
-
       return true;
     })
     .customSanitizer(toLocalMobileSanitizer),
 
-  // Profession text is no longer asked for: the spouse only picks a Category
-  // (professionCategory below). The frontend still fills `profession` with the
-  // category name so lists/exports keep showing it.
   body("profession").optional({ values: "falsy" }).trim(),
 
-  // Spouse's profession Category (from the Company Category list) —
-  // compulsory for Couple, ignored for Single.
-  body("professionCategory").custom((value, { req }) => {
+  body("professionCategory").optional({ values: "falsy" }).custom((value) => {
     const v = String(value ?? "").trim();
-    if (req.body.relationship === "Couple" && !v) {
-      throw new Error("Category is required for Couple");
-    }
     if (v && !/^[0-9a-fA-F]{24}$/.test(v)) {
       throw new Error("Invalid Category");
     }
     return true;
   }),
 
-  ...contactExtraFieldValidation,
+  ...contactUpdateExtraFieldValidation,
 ];
 
 // Validation Result

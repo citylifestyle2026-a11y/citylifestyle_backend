@@ -1207,6 +1207,17 @@ const deleteBooking = async (bookingId, remark, deletedBy) => {
 
   await booking.save();
 
+  // Keep Guest List in sync: clear "Pass sent" on the contact that owned it.
+  try {
+    const Contact = require("../models/contact.model");
+    await Contact.updateMany(
+      { passBookingId: booking._id },
+      { $set: { passSentAt: null, passEventId: null, passBookingId: null } }
+    );
+  } catch (e) {
+    console.error("Failed to clear contact pass mark:", e.message);
+  }
+
   return booking;
 };
 // ================= EXPORT ALL BOOKINGS =================

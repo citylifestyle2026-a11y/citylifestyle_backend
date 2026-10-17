@@ -90,6 +90,7 @@ app.use("/api/public/contact", publicContactRoutes);
 // delete, it just was never mounted, hence every /api/contacts/...
 // request falling through to the 404 handler below)
 app.use("/api/contacts", contactRoutes);
+app.use("/api/invite-guests", require("./routes/invite.routes"));
 // contact event history (Step 4B — Contact List -> Event History)
 app.use("/api/contact-event-history", contactEventHistoryRoutes);
 // editions — kept as shared master data for Contact Event History's

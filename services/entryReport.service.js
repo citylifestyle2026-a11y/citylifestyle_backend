@@ -298,6 +298,8 @@ const buildEntryReportPipeline = ({ match, postMatch }) => [
     },
   },
   { $unwind: { path: "$booking", preserveNullAndEmptyArrays: true } },
+  // Deleted bookings must not appear in the Entry Report.
+  { $match: { "booking.isDeleted": { $ne: true } } },
   ...(postMatch.length > 0 ? [{ $match: { $and: postMatch } }] : []),
   { $sort: { createdAt: 1, _id: 1 } },
   {

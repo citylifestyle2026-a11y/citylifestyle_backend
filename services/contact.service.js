@@ -894,6 +894,22 @@ const deleteBookingsOfContacts = async ({ ids }, adminId) => {
       const bookings = await findPassBookingsIncludingCancelled(contact);
 
       if (!bookings.length) {
+        // The booking was already removed elsewhere (e.g. from Manual
+        // Booking) but the contact still shows "Pass sent". Clear the stale
+        // mark so the list is correct and Send Pass works again.
+        if (contact.passSentAt || contact.passBookingId) {
+          await Contact.updateOne(
+            { _id: contact._id },
+            { $set: { passSentAt: null, passEventId: null, passBookingId: null } }
+          );
+          results.push({
+            ...base,
+            status: "deleted",
+            message: "Booking was already removed; pass mark cleared.",
+          });
+          continue;
+        }
+
         results.push({ ...base, status: "skipped", message: "No booking found." });
         continue;
       }
@@ -1493,19 +1509,21 @@ const updateContact = async (id, data, files = {}) => {
 
   const updateFields = {};
 
-  if (data.fullName !== undefined) updateFields.fullName = data.fullName;
-  if (data.whatsappNumber !== undefined) updateFields.whatsappNumber = data.whatsappNumber;
-  if (data.companyName !== undefined) updateFields.companyName = data.companyName;
-  if (data.designation !== undefined) updateFields.designation = data.designation;
+  if (data.fullName) updateFields.fullName = data.fullName; // blank on edit = keep existing
+  if (data.whatsappNumber) updateFields.whatsappNumber = data.whatsappNumber;
+  if (data.companyName) updateFields.companyName = data.companyName;
+  if (data.designation) updateFields.designation = data.designation;
   if (data.address !== undefined) updateFields.address = data.address;
   if (data.area !== undefined) updateFields.area = data.area;
   if (data.instagramId !== undefined) updateFields.instagramId = data.instagramId;
-  if (data.references !== undefined) updateFields.references = data.references;
+  if (Array.isArray(data.references) && data.references.length) {
+    updateFields.references = data.references;
+  }
   if (data.companyCategory !== undefined) {
     updateFields.companyCategory = data.companyCategory || null;
   }
   if (data.email !== undefined) updateFields.email = data.email;
-  if (data.relationship !== undefined) updateFields.relationship = data.relationship;
+  if (data.relationship) updateFields.relationship = data.relationship;
   if (data.spouseName !== undefined) updateFields.spouseName = data.spouseName;
   if (data.spouseMobile !== undefined) updateFields.spouseMobile = data.spouseMobile;
   if (data.profession !== undefined) updateFields.profession = data.profession;
