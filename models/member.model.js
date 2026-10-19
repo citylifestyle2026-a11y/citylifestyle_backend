@@ -41,7 +41,6 @@ const memberSchema = new mongoose.Schema(
     email: { type: String, trim: true, default: "" },
     profession: { type: String, trim: true, default: "" },
     companyName: { type: String, trim: true, default: "" },
-    objective: { type: String, trim: true, default: "" },
     area: { type: String, trim: true, default: "" },
     city: { type: String, trim: true, default: "" },
     state: { type: String, trim: true, default: "" },

@@ -8,6 +8,7 @@ const mongoose = require("mongoose");
 const Contact = require("../models/contact.model");
 const CompanyCategory = require("../models/companycategory.model");
 const AppError = require("../utils/AppError");
+const { toReferenceList } = require("../utils/splitReferences");
 const contactService = require("./contact.service");
 const deleteImage = require("../utils/deleteLocalFile");
 const {
@@ -158,11 +159,9 @@ const buildCategoryResolver = async () => {
   };
 };
 
-const splitReferences = (text) =>
-  String(text || "")
-    .split(/[|;]/)
-    .map((r) => r.trim())
-    .filter(Boolean);
+// "|" or ";" separate references; "&", "/" and "-" also split one value
+// into separate names (see utils/splitReferences.js).
+const splitReferences = (text) => toReferenceList(String(text || "").split(/[|;]/));
 
 // Validates one row and returns { data } ready for createContact, or { error }.
 const buildContactFromRow = (raw, resolveCategory) => {
@@ -174,20 +173,18 @@ const buildContactFromRow = (raw, resolveCategory) => {
     return { error: "Invalid WhatsApp Number (10 digits, with or without 91)", whatsappNumber: raw.whatsappNumber };
   }
 
-  if (!raw.companyName) return { error: "Company Name is required" };
-  if (!raw.designation) return { error: "Designation is required" };
-  if (!raw.area) return { error: "Area is required" };
-
-  const companyCategory = resolveCategory(raw.companyCategory);
-  if (!raw.companyCategory) return { error: "Company Category is required" };
-  if (!companyCategory) {
-    return { error: `Company Category "${raw.companyCategory}" not found` };
+  // In the import ONLY Full Name + WhatsApp Number are required. Company,
+  // Designation, Area, Category, Reference and the rest can stay empty (they
+  // can be filled by importing the same number again later).
+  let companyCategory = null;
+  if (raw.companyCategory) {
+    companyCategory = resolveCategory(raw.companyCategory);
+    if (!companyCategory) {
+      return { error: `Company Category "${raw.companyCategory}" not found` };
+    }
   }
 
   const references = splitReferences(raw.references);
-  if (references.length === 0) {
-    return { error: "At least one Reference is required (separate several with | )" };
-  }
 
   if (raw.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw.email)) {
     return { error: "Invalid email address" };
@@ -209,10 +206,10 @@ const buildContactFromRow = (raw, resolveCategory) => {
   const data = {
     fullName,
     whatsappNumber,
-    companyName: raw.companyName,
-    designation: raw.designation,
+    companyName: raw.companyName || "",
+    designation: raw.designation || "",
     address: raw.address || "",
-    area: raw.area,
+    area: raw.area || "",
     instagramId,
     email: raw.email || "",
     relationship,
@@ -226,18 +223,19 @@ const buildContactFromRow = (raw, resolveCategory) => {
   };
 
   if (relationship === "Couple") {
-    if (!raw.spouseName) return { error: "Spouse Name is required for Couple" };
-
-    const spouseMobile = toLocalMobile(raw.spouseMobile);
-    if (!raw.spouseMobile) return { error: "Spouse Mobile Number is required for Couple" };
-    if (!spouseMobile) {
+    // Spouse details are optional in the import; a value that IS given
+    // must still be valid.
+    const spouseMobile = raw.spouseMobile ? toLocalMobile(raw.spouseMobile) : "";
+    if (raw.spouseMobile && !spouseMobile) {
       return { error: "Invalid Spouse Mobile Number (10 digits, with or without 91)" };
     }
 
-    if (!raw.spouseCategory) return { error: "Spouse Category is required for Couple" };
-    const professionCategory = resolveCategory(raw.spouseCategory);
-    if (!professionCategory) {
-      return { error: `Spouse Category "${raw.spouseCategory}" not found` };
+    let professionCategory = null;
+    if (raw.spouseCategory) {
+      professionCategory = resolveCategory(raw.spouseCategory);
+      if (!professionCategory) {
+        return { error: `Spouse Category "${raw.spouseCategory}" not found` };
+      }
     }
 
     const spouseInstagramId = normalizeInstagramId(raw.spouseInstagramId);
@@ -245,20 +243,20 @@ const buildContactFromRow = (raw, resolveCategory) => {
       return { error: "Invalid Spouse Instagram ID / link" };
     }
 
-    data.spouseName = raw.spouseName;
+    data.spouseName = raw.spouseName || "";
     data.spouseMobile = spouseMobile;
     data.spouseInstagramId = spouseInstagramId;
     data.professionCategory = professionCategory;
     // Same as the Create Contact form: profession text = category name.
-    data.profession = String(raw.spouseCategory).trim();
+    data.profession = raw.spouseCategory ? String(raw.spouseCategory).trim() : "";
   }
 
   return { data };
 };
 
 // Same WhatsApp number again -> the saved contact is UPDATED with this row.
-//  - Name, company, designation, area and category come from the row.
-//  - Address / Instagram / Email only change when the row has a value.
+//  - Every cell that has a value in the row is written; an EMPTY cell never
+//    wipes what the contact already has.
 //  - Relationship + spouse details only change when the row has a
 //    Relationship value (Single clears the spouse details and photo).
 //  - References are ADDED to the contact's existing ones, never replaced.
@@ -268,10 +266,10 @@ const updateExistingContact = async (contactId, data, raw) => {
   if (!contact) throw new AppError("Contact not found", 404);
 
   contact.fullName = data.fullName;
-  contact.companyName = data.companyName;
-  contact.designation = data.designation;
-  contact.area = data.area;
-  contact.companyCategory = data.companyCategory;
+  if (raw.companyName) contact.companyName = data.companyName;
+  if (raw.designation) contact.designation = data.designation;
+  if (raw.area) contact.area = data.area;
+  if (data.companyCategory) contact.companyCategory = data.companyCategory;
   if (raw.address) contact.address = data.address;
   if (raw.instagramId) contact.instagramId = data.instagramId;
   if (raw.email) contact.email = data.email;
@@ -279,11 +277,14 @@ const updateExistingContact = async (contactId, data, raw) => {
   if (raw.relationship) {
     contact.relationship = data.relationship;
     if (data.relationship === "Couple") {
-      contact.spouseName = data.spouseName;
-      contact.spouseMobile = data.spouseMobile;
-      contact.spouseInstagramId = data.spouseInstagramId;
-      contact.professionCategory = data.professionCategory;
-      contact.profession = data.profession;
+      // Only the spouse cells that have a value are written.
+      if (raw.spouseName) contact.spouseName = data.spouseName;
+      if (raw.spouseMobile) contact.spouseMobile = data.spouseMobile;
+      if (raw.spouseInstagramId) contact.spouseInstagramId = data.spouseInstagramId;
+      if (data.professionCategory) {
+        contact.professionCategory = data.professionCategory;
+        contact.profession = data.profession;
+      }
     } else {
       const staleSpousePhoto = contact.spouseProfileImagePublicId;
       contact.spouseName = "";

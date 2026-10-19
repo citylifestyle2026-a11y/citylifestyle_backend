@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { toReferenceList } = require("../utils/splitReferences");
 
 /**
  * Contact Model
@@ -336,26 +337,13 @@ const contactSchema = new mongoose.Schema(
 // first occurrence's original casing — e.g. ["a", " A ", "b", "a"]
 // becomes ["a", "b"]. Also drops empty/non-string entries (defensive;
 // the validator already rejects these at the request layer).
+// A value like "Ramesh & Suresh" / "Ramesh/Suresh" / "Ramesh-Suresh" is split
+// at the special character (& / -) into separate references - see
+// utils/splitReferences.js.
 function normalizeReferences(list) {
   if (!Array.isArray(list)) return [];
 
-  const seen = new Set();
-  const result = [];
-
-  for (const raw of list) {
-    if (typeof raw !== "string") continue;
-
-    const trimmed = raw.trim();
-    if (!trimmed) continue;
-
-    const key = trimmed.toLowerCase();
-    if (seen.has(key)) continue;
-
-    seen.add(key);
-    result.push(trimmed);
-  }
-
-  return result;
+  return toReferenceList(list);
 }
 
 // Exposed so later services/controllers normalize/compare references

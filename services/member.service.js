@@ -9,6 +9,7 @@ const Contact = require("../models/contact.model");
 const CompanyCategory = require("../models/companycategory.model");
 const Event = require("../models/event.model");
 const AppError = require("../utils/AppError");
+const { toReferenceList } = require("../utils/splitReferences");
 const { normalizeInstagramId, isValidInstagramId, parseInstagramLink } = require("../utils/normalizeInstagramId");
 const { normalizeMobileNumber } = require("../utils/normalizeMobileNumber");
 
@@ -122,7 +123,6 @@ const HEADER_ALIASES = {
   email: ["email", "emailid"],
   profession: ["profession", "category"],
   companyName: ["companybrand", "company", "companyname", "brand"],
-  objective: ["objective"],
   area: ["area"],
   city: ["city"],
   state: ["state"],
@@ -259,12 +259,8 @@ const importMembers = async (
   // Old references first, then the new ones that are not there yet
   // (compared case-insensitively, original spelling kept).
   const mergeRefs = (oldRefs = [], newRefs = []) => {
-    const out = [];
-    [...oldRefs, ...newRefs].forEach((ref) => {
-      const text = String(ref || "").replace(/\s+/g, " ").trim();
-      if (text && !out.some((r) => r.toLowerCase() === text.toLowerCase())) out.push(text);
-    });
-    return out;
+    // Also splits older saved values like "A & B" into A and B.
+    return toReferenceList([...oldRefs, ...newRefs]);
   };
   const insertIndexByMobile = new Map();
   const updates = []; // { id, set }
@@ -277,20 +273,14 @@ const importMembers = async (
   let failureCount = 0;
 
   const baseFields = (data) => {
-    const references = [];
-    [data.reference1, data.reference2, data.reference3].forEach((ref) => {
-      const text = String(ref || "").trim();
-      if (text && !references.some((r) => r.toLowerCase() === text.toLowerCase())) {
-        references.push(text);
-      }
-    });
+    // "A & B" / "A/B" / "A-B" in a Reference cell = separate references.
+    const references = toReferenceList([data.reference1, data.reference2, data.reference3]);
 
     return {
       name: data.name,
       email: /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email) ? data.email : "",
       profession: data.profession,
       companyName: data.companyName,
-      objective: data.objective,
       area: data.area,
       city: data.city,
       state: data.state,
@@ -309,7 +299,7 @@ const importMembers = async (
     const base = baseFields(data);
     const set = {};
     [
-      "name", "email", "profession", "companyName", "objective", "area", "city",
+      "name", "email", "profession", "companyName", "area", "city",
       "state", "references", "source", "remark", "designation", "address",
       "instagramId", "spouseName", "spouseMobile", "spouseInstagramId", "spouseProfession",
     ].forEach((key) => {
@@ -746,7 +736,7 @@ const moveMembersToGuestList = async (body, adminId) => {
           whatsappNumber: member.mobile,
           email: member.email || "",
           companyName: member.companyName || "",
-          designation: member.designation || member.objective || "",
+          designation: member.designation || "",
           area: member.area || "",
           address: member.address || [member.city, member.state].filter(Boolean).join(", "),
           instagramId: member.instagramId || "",
@@ -800,7 +790,6 @@ const UPDATABLE_TEXT_FIELDS = [
   "email",
   "profession",
   "companyName",
-  "objective",
   "area",
   "city",
   "state",
@@ -871,16 +860,7 @@ const updateMember = async (id, body = {}) => {
   }
 
   if (body.references !== undefined) {
-    const raw = Array.isArray(body.references)
-      ? body.references
-      : String(body.references).split(/[,|;]/);
-    const refs = [];
-    raw.forEach((ref) => {
-      const text = String(ref || "").trim();
-      if (text && !refs.some((r) => r.toLowerCase() === text.toLowerCase())) {
-        refs.push(text);
-      }
-    });
+    const refs = toReferenceList(body.references, { splitLists: true });
     if (refs.length === 0) throw new AppError("At least one Reference is required", 400);
     member.references = refs;
   }
@@ -937,16 +917,7 @@ const createMember = async (body = {}, adminId = null) => {
     throw new AppError("Invalid email address", 400);
   }
 
-  const rawRefs = Array.isArray(body.references)
-    ? body.references
-    : String(body.references || "").split(/[,|;]/);
-  const references = [];
-  rawRefs.forEach((ref) => {
-    const value = text(ref);
-    if (value && !references.some((r) => r.toLowerCase() === value.toLowerCase())) {
-      references.push(value);
-    }
-  });
+  const references = toReferenceList(body.references, { splitLists: true });
 
   if (references.length === 0) throw new AppError("At least one Reference is required", 400);
 
@@ -956,7 +927,6 @@ const createMember = async (body = {}, adminId = null) => {
     email,
     profession,
     companyName,
-    objective: text(body.objective),
     area: text(body.area),
     city: text(body.city),
     state: text(body.state),
