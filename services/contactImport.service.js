@@ -9,6 +9,7 @@ const Contact = require("../models/contact.model");
 const CompanyCategory = require("../models/companycategory.model");
 const AppError = require("../utils/AppError");
 const contactService = require("./contact.service");
+const deleteImage = require("../utils/deleteLocalFile");
 const {
   normalizeInstagramId,
   isValidInstagramId,
@@ -255,6 +256,55 @@ const buildContactFromRow = (raw, resolveCategory) => {
   return { data };
 };
 
+// Same WhatsApp number again -> the saved contact is UPDATED with this row.
+//  - Name, company, designation, area and category come from the row.
+//  - Address / Instagram / Email only change when the row has a value.
+//  - Relationship + spouse details only change when the row has a
+//    Relationship value (Single clears the spouse details and photo).
+//  - References are ADDED to the contact's existing ones, never replaced.
+//  - Approval status, pass and edition details are left alone.
+const updateExistingContact = async (contactId, data, raw) => {
+  const contact = await Contact.findById(contactId);
+  if (!contact) throw new AppError("Contact not found", 404);
+
+  contact.fullName = data.fullName;
+  contact.companyName = data.companyName;
+  contact.designation = data.designation;
+  contact.area = data.area;
+  contact.companyCategory = data.companyCategory;
+  if (raw.address) contact.address = data.address;
+  if (raw.instagramId) contact.instagramId = data.instagramId;
+  if (raw.email) contact.email = data.email;
+
+  if (raw.relationship) {
+    contact.relationship = data.relationship;
+    if (data.relationship === "Couple") {
+      contact.spouseName = data.spouseName;
+      contact.spouseMobile = data.spouseMobile;
+      contact.spouseInstagramId = data.spouseInstagramId;
+      contact.professionCategory = data.professionCategory;
+      contact.profession = data.profession;
+    } else {
+      const staleSpousePhoto = contact.spouseProfileImagePublicId;
+      contact.spouseName = "";
+      contact.spouseMobile = "";
+      contact.spouseInstagramId = "";
+      contact.professionCategory = null;
+      contact.profession = "";
+      contact.spouseProfileImage = "";
+      contact.spouseProfileImagePublicId = "";
+      if (staleSpousePhoto) await deleteImage(staleSpousePhoto);
+    }
+  }
+
+  contact.references = Contact.normalizeReferences([
+    ...(contact.references || []),
+    ...data.references,
+  ]);
+
+  await contact.save();
+};
+
 // ================= IMPORT (OR DRY-RUN CHECK) =================
 // dryRun = true validates everything and reports duplicates but creates nothing.
 const importContactsCsv = async (
@@ -288,28 +338,37 @@ const importContactsCsv = async (
     const { data } = built;
     base.mobileNumber = data.whatsappNumber;
 
-    // Same number twice in the file, or already saved -> skipped, never merged.
-    const existing = seenNumbers.has(data.whatsappNumber)
-      ? { fullName: "an earlier row of this file" }
-      : await Contact.findOne({
-          isDeleted: { $ne: true },
-          historyOnly: { $ne: true },
-          whatsappNumber: data.whatsappNumber,
-        })
-          .select("fullName")
-          .lean();
+    // Already saved (or repeated earlier in this file) -> update, not skip.
+    const existing = await Contact.findOne({
+      isDeleted: { $ne: true },
+      historyOnly: { $ne: true },
+      whatsappNumber: data.whatsappNumber,
+    })
+      .select("_id")
+      .lean();
 
-    if (existing) {
-      results.push({
-        ...base,
-        success: false,
-        duplicate: true,
-        error: `Already exists (${existing.fullName})`,
-      });
+    const repeatedInFile = seenNumbers.has(data.whatsappNumber);
+    seenNumbers.add(data.whatsappNumber);
+
+    if (existing || repeatedInFile) {
+      if (dryRun || !existing) {
+        results.push({ ...base, success: true, duplicate: false, updated: true });
+        continue;
+      }
+
+      try {
+        await updateExistingContact(existing._id, data, raw);
+        results.push({ ...base, success: true, duplicate: false, updated: true });
+      } catch (error) {
+        results.push({
+          ...base,
+          success: false,
+          duplicate: false,
+          error: error.message || "Failed to update contact",
+        });
+      }
       continue;
     }
-
-    seenNumbers.add(data.whatsappNumber);
 
     if (dryRun) {
       results.push({ ...base, success: true, duplicate: false });
@@ -330,6 +389,7 @@ const importContactsCsv = async (
   }
 
   const successCount = results.filter((r) => r.success).length;
+  const updatedCount = results.filter((r) => r.updated && r.success).length;
   const duplicateCount = results.filter((r) => r.duplicate).length;
   const failureCount = results.length - successCount - duplicateCount;
 
@@ -338,6 +398,7 @@ const importContactsCsv = async (
     approvalStatus,
     totalRows: results.length,
     successCount,
+    updatedCount,
     duplicateCount,
     failureCount,
     results,

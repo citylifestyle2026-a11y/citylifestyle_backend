@@ -251,8 +251,21 @@ const importMembers = async (
 
   // Same mobile number again (already saved, or repeated in the file) is no
   // longer a duplicate: that member is UPDATED with the new row's details.
-  const existing = await Member.find({ mobileStatus: "valid" }, { mobile: 1 }).lean();
+  const existing = await Member.find({ mobileStatus: "valid" }, { mobile: 1, references: 1 }).lean();
   const existingIdByMobile = new Map(existing.map((m) => [m.mobile, m._id]));
+  // Current references per member, so a re-import ADDS new ones to them.
+  const refsById = new Map(existing.map((m) => [String(m._id), m.references || []]));
+
+  // Old references first, then the new ones that are not there yet
+  // (compared case-insensitively, original spelling kept).
+  const mergeRefs = (oldRefs = [], newRefs = []) => {
+    const out = [];
+    [...oldRefs, ...newRefs].forEach((ref) => {
+      const text = String(ref || "").replace(/\s+/g, " ").trim();
+      if (text && !out.some((r) => r.toLowerCase() === text.toLowerCase())) out.push(text);
+    });
+    return out;
+  };
   const insertIndexByMobile = new Map();
   const updates = []; // { id, set }
   let mergedInFileCount = 0;
@@ -361,13 +374,23 @@ const importMembers = async (
 
     // Already in Member List -> update that member.
     if (existingIdByMobile.has(mobile)) {
-      updates.push({ id: existingIdByMobile.get(mobile), set: buildUpdate(data) });
+      const id = existingIdByMobile.get(mobile);
+      const set = buildUpdate(data);
+      // New references are added to the member's existing ones, never replace them.
+      if (set.references) {
+        set.references = mergeRefs(refsById.get(String(id)), set.references);
+        refsById.set(String(id), set.references);
+      }
+      updates.push({ id, set });
       continue;
     }
 
     // Repeated inside the same file -> later row fills / changes the earlier one.
     if (insertIndexByMobile.has(mobile)) {
-      Object.assign(toInsert[insertIndexByMobile.get(mobile)], buildUpdate(data));
+      const target = toInsert[insertIndexByMobile.get(mobile)];
+      const set = buildUpdate(data);
+      if (set.references) set.references = mergeRefs(target.references, set.references);
+      Object.assign(target, set);
       mergedInFileCount += 1;
       continue;
     }

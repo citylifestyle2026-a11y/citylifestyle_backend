@@ -256,9 +256,10 @@ const importContactsCsv = async (req, res, next) => {
       }
     );
 
-    const summary = `Processed ${result.totalRows} row(s): ${result.successCount} ${
-      dryRun ? "ready to import" : "contact(s) created"
-    }, ${result.duplicateCount} duplicate(s) skipped, ${result.failureCount} failed`;
+    const newCount = result.successCount - (result.updatedCount || 0);
+    const summary = `Processed ${result.totalRows} row(s): ${newCount} ${
+      dryRun ? "new" : "contact(s) created"
+    }, ${result.updatedCount || 0} ${dryRun ? "to update" : "updated"}, ${result.failureCount} failed`;
 
     return res.status(200).json({
       success: dryRun || result.successCount > 0,
