@@ -44,11 +44,13 @@ const importMembers = async (req, res, next) => {
     );
 
     const added = result.successCount + (result.flaggedCount || 0);
+    const updated = result.updatedCount || 0;
+    const newOnes = result.successCount - updated;
     const message = dryRun
-      ? `Processed ${result.totalRows} row(s): ${result.successCount} ready to import, ${result.duplicateCount} duplicate(s), ${result.failureCount} invalid`
+      ? `Processed ${result.totalRows} row(s): ${newOnes} new, ${updated} to update, ${result.failureCount} invalid`
       : mode === "all"
-      ? `${added} member(s) added, ${result.flaggedCount} of them need fixing (see Needs Fix tab)`
-      : `Processed ${result.totalRows} row(s): ${result.successCount} member(s) added, ${result.duplicateCount} duplicate(s) skipped, ${result.failureCount} failed`;
+      ? `${newOnes} member(s) added, ${updated} updated, ${result.flaggedCount} need fixing (see Needs Fix tab)`
+      : `Processed ${result.totalRows} row(s): ${newOnes} member(s) added, ${updated} updated, ${result.failureCount} failed`;
 
     return res.status(200).json({
       success: dryRun || added > 0,

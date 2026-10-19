@@ -9,6 +9,7 @@ const Contact = require("../models/contact.model");
 const CompanyCategory = require("../models/companycategory.model");
 const Event = require("../models/event.model");
 const AppError = require("../utils/AppError");
+const { normalizeInstagramId, isValidInstagramId, parseInstagramLink } = require("../utils/normalizeInstagramId");
 const { normalizeMobileNumber } = require("../utils/normalizeMobileNumber");
 
 const toLocalMobile = (value) => {
@@ -21,6 +22,98 @@ const normalizeMemberStatus = (value) =>
   String(value ?? "").trim().toLowerCase() === "inactive" ? "Inactive" : "Active";
 
 const escapeRegex = (text) => String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// Invisible / odd characters that can hide inside imported text
+// (zero-width space, BOM, non-breaking space ...).
+const INVISIBLE = "\\u200B-\\u200D\\u2060\\uFEFF";
+const stripInvisible = (text) =>
+  String(text || "")
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+// Regex source for one reference: ignores case, invisible characters and
+// the kind / amount of whitespace between words.
+const looseRefSource = (ref) =>
+  Array.from(stripInvisible(ref))
+    .map((ch) => (/\s/.test(ch) ? `[\\s${INVISIBLE}]+` : `${escapeRegex(ch)}[${INVISIBLE}]*`))
+    .join("");
+
+// ================= EXTRA (GUEST LIST) FIELDS =================
+// designation, address, instagram, relationship and the spouse details.
+// Lenient reader used by the import (bad values are dropped, never fatal).
+const looseExtraFields = (data = {}) => {
+  const text = (v) => String(v ?? "").replace(/\s+/g, " ").trim();
+  const insta = (v) => {
+    const id = normalizeInstagramId(v);
+    return id && isValidInstagramId(id) ? id : "";
+  };
+  // Relationship column blank but spouse details given -> Couple.
+  const isCouple =
+    text(data.relationship).toLowerCase() === "couple" ||
+    (!text(data.relationship) && Boolean(text(data.spouseName) || text(data.spouseMobile)));
+
+  return {
+    designation: text(data.designation),
+    address: text(data.address),
+    instagramId: insta(data.instagramId),
+    relationship: isCouple ? "Couple" : "Single",
+    spouseName: isCouple ? text(data.spouseName) : "",
+    spouseMobile: isCouple ? toLocalMobile(data.spouseMobile) || "" : "",
+    spouseInstagramId: isCouple ? insta(data.spouseInstagramId) : "",
+    spouseProfession: isCouple ? text(data.spouseProfession) : "",
+  };
+};
+
+// Strict reader for Add / Edit Member (throws a clear message).
+// Only the keys present in `body` are returned, so a partial update never
+// wipes the other fields.
+const strictExtraFields = (body = {}, current = {}) => {
+  const text = (v) => String(v ?? "").replace(/\s+/g, " ").trim();
+  const out = {};
+
+  ["designation", "address", "spouseName", "spouseProfession"].forEach((f) => {
+    if (body[f] !== undefined) out[f] = text(body[f]);
+  });
+
+  const instagram = (field, label) => {
+    if (body[field] === undefined) return;
+    const raw = text(body[field]);
+    if (!raw) {
+      out[field] = "";
+      return;
+    }
+    const id = parseInstagramLink(raw) || (isValidInstagramId(normalizeInstagramId(raw)) ? normalizeInstagramId(raw) : null);
+    if (!id) throw new AppError(`${label}: please enter a valid Instagram profile link`, 400);
+    out[field] = id;
+  };
+  instagram("instagramId", "Instagram Link");
+  instagram("spouseInstagramId", "Spouse Instagram Link");
+
+  if (body.relationship !== undefined) {
+    out.relationship = text(body.relationship).toLowerCase() === "couple" ? "Couple" : "Single";
+  }
+
+  if (body.spouseMobile !== undefined) {
+    const raw = text(body.spouseMobile);
+    if (!raw) out.spouseMobile = "";
+    else {
+      const local = toLocalMobile(raw);
+      if (!local) throw new AppError("Spouse Mobile Number must be a valid 10-digit number", 400);
+      out.spouseMobile = local;
+    }
+  }
+
+  // Single = no spouse details.
+  const relationship = out.relationship || current.relationship || "Single";
+  if (relationship !== "Couple") {
+    out.spouseName = "";
+    out.spouseMobile = "";
+    out.spouseInstagramId = "";
+    out.spouseProfession = "";
+  }
+
+  return out;
+};
 
 // ================= FILE PARSING =================
 const HEADER_ALIASES = {
@@ -39,6 +132,14 @@ const HEADER_ALIASES = {
   source: ["source"],
   remark: ["remark", "remarks"],
   memberStatus: ["status"],
+  designation: ["designation", "companydesignation"],
+  address: ["address"],
+  instagramId: ["instagram", "instagramid", "instagramlink"],
+  relationship: ["relationship", "relation"],
+  spouseName: ["spousename"],
+  spouseMobile: ["spousemobile", "spousenumber", "spousecontact"],
+  spouseInstagramId: ["spouseinstagram", "spouseinstagramid", "spouseinstagramlink"],
+  spouseProfession: ["spouseprofession", "spousecategory"],
 };
 
 const headerKey = (text) => String(text || "").toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -148,8 +249,13 @@ const importMembers = async (
   const importAll = mode === "all";
   const rows = await parseMembersFile(buffer, fileName);
 
+  // Same mobile number again (already saved, or repeated in the file) is no
+  // longer a duplicate: that member is UPDATED with the new row's details.
   const existing = await Member.find({ mobileStatus: "valid" }, { mobile: 1 }).lean();
-  const seen = new Set(existing.map((m) => m.mobile));
+  const existingIdByMobile = new Map(existing.map((m) => [m.mobile, m._id]));
+  const insertIndexByMobile = new Map();
+  const updates = []; // { id, set }
+  let mergedInFileCount = 0;
 
   const problems = [];
   const toInsert = [];
@@ -178,9 +284,36 @@ const importMembers = async (
       references,
       source: data.source,
       remark: data.remark,
+      ...looseExtraFields(data),
       memberStatus: normalizeMemberStatus(data.memberStatus),
       createdBy: adminId || null,
     };
+  };
+
+  // Only the cells that are filled in the file are written, so an empty
+  // cell never wipes what the member already has.
+  const buildUpdate = (data) => {
+    const base = baseFields(data);
+    const set = {};
+    [
+      "name", "email", "profession", "companyName", "objective", "area", "city",
+      "state", "references", "source", "remark", "designation", "address",
+      "instagramId", "spouseName", "spouseMobile", "spouseInstagramId", "spouseProfession",
+    ].forEach((key) => {
+      const value = base[key];
+      if (Array.isArray(value) ? value.length > 0 : Boolean(value)) set[key] = value;
+    });
+    if (data.memberStatus) set.memberStatus = base.memberStatus;
+    if (data.relationship || set.spouseName || set.spouseMobile) {
+      set.relationship = base.relationship;
+      if (base.relationship !== "Couple") {
+        set.spouseName = "";
+        set.spouseMobile = "";
+        set.spouseInstagramId = "";
+        set.spouseProfession = "";
+      }
+    }
+    return set;
   };
 
   const addProblem = (rowNumber, data, mobileText, error, duplicate) => {
@@ -226,16 +359,25 @@ const importMembers = async (
       continue;
     }
 
-    if (seen.has(mobile)) {
-      addProblem(rowNumber, data, mobile, "Mobile number already in Member List", true);
+    // Already in Member List -> update that member.
+    if (existingIdByMobile.has(mobile)) {
+      updates.push({ id: existingIdByMobile.get(mobile), set: buildUpdate(data) });
       continue;
     }
-    seen.add(mobile);
 
+    // Repeated inside the same file -> later row fills / changes the earlier one.
+    if (insertIndexByMobile.has(mobile)) {
+      Object.assign(toInsert[insertIndexByMobile.get(mobile)], buildUpdate(data));
+      mergedInFileCount += 1;
+      continue;
+    }
+
+    insertIndexByMobile.set(mobile, toInsert.length);
     toInsert.push({ ...baseFields(data), mobile });
   }
 
-  let successCount = toInsert.length;
+  let updatedCount = updates.length;
+  let successCount = toInsert.length + updates.length + mergedInFileCount;
   let flaggedCount = importAll ? flaggedToInsert.length : 0;
 
   const insertAll = async (docs) => {
@@ -256,7 +398,25 @@ const importMembers = async (
   };
 
   if (!dryRun) {
-    successCount = toInsert.length ? await insertAll(toInsert) : 0;
+    const inserted = toInsert.length ? await insertAll(toInsert) : 0;
+
+    // Several rows for one existing member are applied in file order.
+    updatedCount = 0;
+    const ops = updates.filter((u) => Object.keys(u.set).length > 0);
+    for (let i = 0; i < ops.length; i += 500) {
+      const chunk = ops.slice(i, i + 500);
+      try {
+        const res = await Member.bulkWrite(
+          chunk.map((u) => ({ updateOne: { filter: { _id: u.id }, update: { $set: u.set } } })),
+          { ordered: true }
+        );
+        updatedCount += res.matchedCount ?? chunk.length;
+      } catch (error) {
+        failureCount += chunk.length;
+      }
+    }
+
+    successCount = inserted + updatedCount + mergedInFileCount;
     flaggedCount = flaggedToInsert.length ? await insertAll(flaggedToInsert) : 0;
   }
 
@@ -265,6 +425,7 @@ const importMembers = async (
     mode: importAll ? "all" : "valid",
     totalRows: rows.length,
     successCount,
+    updatedCount,
     flaggedCount,
     duplicateCount,
     failureCount,
@@ -320,11 +481,27 @@ const buildMemberQuery = (query = {}, activeEventIds = []) => {
   }
 
   // Reference (case-insensitive) - matches any of the member's references.
-  if (query.reference) {
-    filter.references = new RegExp(
-      `^${escapeRegex(String(query.reference).trim())}$`,
-      "i"
-    );
+  // Accepts an array, or one string where several references are joined
+  // with "|" (the importer splits on , | ; so a reference never contains
+  // "|"). A member matches when ANY selected reference is theirs.
+  const referenceList = (
+    Array.isArray(query.reference)
+      ? query.reference
+      : query.reference
+      ? [query.reference]
+      : []
+  )
+    .flatMap((ref) => String(ref).split("|"))
+    .map((ref) => ref.trim())
+    .filter(Boolean);
+
+  // ONE combined regex (not one per reference) so selecting many
+  // references stays fast. \s* tolerates stray spaces stored in the DB.
+  if (referenceList.length > 0) {
+    const pattern = referenceList.map(looseRefSource).join("|");
+    and.push({
+      references: new RegExp(`^[\\s${INVISIBLE}]*(?:${pattern})[\\s${INVISIBLE}]*$`, "i"),
+    });
   }
 
   if (query.memberStatus) {
@@ -420,7 +597,7 @@ const getMemberReferences = async () => {
   const seen = new Set();
   const list = [];
   rows
-    .map((r) => String(r || "").trim())
+    .map((r) => stripInvisible(r))
     .filter(Boolean)
     .forEach((r) => {
       if (!seen.has(r.toLowerCase())) {
@@ -514,6 +691,8 @@ const moveMembersToGuestList = async (body, adminId) => {
       }
 
       const companyCategory = await resolveCategoryId(member.profession);
+      const professionCategory =
+        member.relationship === "Couple" ? await resolveCategoryId(member.spouseProfession) : null;
 
       const existing = await Contact.findOne({
         isDeleted: { $ne: true },
@@ -544,12 +723,17 @@ const moveMembersToGuestList = async (body, adminId) => {
           whatsappNumber: member.mobile,
           email: member.email || "",
           companyName: member.companyName || "",
-          designation: member.objective || "",
+          designation: member.designation || member.objective || "",
           area: member.area || "",
-          address: [member.city, member.state].filter(Boolean).join(", "),
+          address: member.address || [member.city, member.state].filter(Boolean).join(", "),
+          instagramId: member.instagramId || "",
           references: member.references || [],
           companyCategory,
-          relationship: "Single",
+          relationship: member.relationship === "Couple" ? "Couple" : "Single",
+          spouseName: member.relationship === "Couple" ? member.spouseName || "" : "",
+          spouseMobile: member.relationship === "Couple" ? member.spouseMobile || "" : "",
+          spouseInstagramId: member.relationship === "Couple" ? member.spouseInstagramId || "" : "",
+          professionCategory,
           editionEventId: event._id,
           editionName,
           memberId: member._id,
@@ -657,6 +841,7 @@ const updateMember = async (id, body = {}) => {
       member[field] = String(body[field]).replace(/\s+/g, " ").trim();
     }
   });
+  Object.assign(member, strictExtraFields(body, member));
   member.name = name;
   if (body.memberStatus !== undefined) {
     member.memberStatus = normalizeMemberStatus(body.memberStatus);
@@ -755,6 +940,7 @@ const createMember = async (body = {}, adminId = null) => {
     references,
     source: text(body.source),
     remark: text(body.remark),
+    ...strictExtraFields(body),
     memberStatus: normalizeMemberStatus(body.memberStatus),
     createdBy: adminId || null,
   });

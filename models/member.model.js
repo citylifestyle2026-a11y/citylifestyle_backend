@@ -46,6 +46,19 @@ const memberSchema = new mongoose.Schema(
     city: { type: String, trim: true, default: "" },
     state: { type: String, trim: true, default: "" },
 
+    // ---- Same extra details the Guest List (Contact) holds, so they are
+    // kept on the member and carried over when the member is moved. ----
+    designation: { type: String, trim: true, default: "" },
+    address: { type: String, trim: true, default: "" },
+    // Bare Instagram username (no "@"), same as Contact.instagramId.
+    instagramId: { type: String, trim: true, default: "" },
+    relationship: { type: String, enum: ["Single", "Couple"], default: "Single" },
+    spouseName: { type: String, trim: true, default: "" },
+    spouseMobile: { type: String, trim: true, default: "" },
+    spouseInstagramId: { type: String, trim: true, default: "" },
+    // Spouse profession = a Company Category name (like Member.profession).
+    spouseProfession: { type: String, trim: true, default: "" },
+
     // Reference, Reference 2, Reference 3 columns of the sheet.
     references: { type: [{ type: String, trim: true }], default: [] },
 

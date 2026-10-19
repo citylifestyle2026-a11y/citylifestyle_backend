@@ -89,6 +89,8 @@ const discardUploadedImages = async (images) => {
 // settings as the collation-based indexes already defined on
 // Contact.model.js (`references`) and CompanyCategory.model.js (`name`),
 // so this query actually uses those indexes instead of a full scan.
+const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 const CASE_INSENSITIVE_COLLATION = { locale: "en", strength: 2 };
 
 // Fields the List API is allowed to sort by — kept to an explicit
@@ -497,18 +499,43 @@ function buildContactQuery(query) {
   // exact same collation the `references` index was built with in Step
   // 1) makes Mongo compare "a" and "A" as equal while still using that
   // index, without needing a separate lowercase shadow field.
-  const referenceFilterValue = query.reference
-    ? Contact.normalizeReferenceKey(query.reference)
-    : null;
+  // `reference` can be one value or several (?reference=a&reference=b):
+  // a contact matches when it has ANY of the selected references.
+  const referenceKeys = [
+    ...new Set(
+      (Array.isArray(query.reference)
+        ? query.reference
+        : query.reference
+        ? [query.reference]
+        : []
+      )
+        .map((ref) => Contact.normalizeReferenceKey(ref))
+        .filter(Boolean)
+    ),
+  ];
+  const referenceFilterValue = referenceKeys.length > 0;
 
+  // One condition per selected reference, joined with $or, so selecting
+  // Ankita AND Mitesh lists every contact that has Ankita OR Mitesh (a
+  // contact that has both is listed once). Each condition is a
+  // case-insensitive whole-value match on the references array (an array
+  // field matches when ANY of its items matches), so this does not depend
+  // on collation or on $in handling.
   if (referenceFilterValue) {
-    filter.references = referenceFilterValue;
+    filter.$and = [
+      ...(filter.$and || []),
+      {
+        $or: referenceKeys.map((key) => ({
+          references: {
+            $regex: `^\\s*${escapeRegex(key)}\\s*$`,
+            $options: "i",
+          },
+        })),
+      },
+    ];
   }
 
-  const applyCollationIfNeeded = (mongooseQuery) =>
-    referenceFilterValue
-      ? mongooseQuery.collation(CASE_INSENSITIVE_COLLATION)
-      : mongooseQuery;
+  const applyCollationIfNeeded = (mongooseQuery) => mongooseQuery;
 
   return { filter, sortField, sortOrder, applyCollationIfNeeded };
 }
