@@ -5,6 +5,7 @@ const upload = require("../middlewares/upload.middleware");
 const publicRateLimit = require("../middlewares/publicRateLimit.middleware");
 const CompanyCategory = require("../models/companycategory.model");
 const contactService = require("../services/contact.service");
+const formLinkService = require("../services/formLink.service");
 const {
   parseContactFormData,
   createContactValidation,
@@ -44,20 +45,44 @@ const honeypot = (req, res, next) => {
   return next();
 };
 
+// Info for a "Share Form Link" (name + how many places are left), so the
+// public page can show the form, or a "closed / full" message.
+router.get("/link/:token", async (req, res, next) => {
+  try {
+    const data = await formLinkService.getPublicInfo(req.params.token);
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    next(error);
+  }
+});
+
+const normalLimit = publicRateLimit({ windowMs: 60 * 60 * 1000, max: 10 });
+// One person may fill the form for several people from the same phone, so a
+// link (whose quantity is the real limit) gets a higher per-IP allowance.
+const linkLimit = publicRateLimit({ windowMs: 60 * 60 * 1000, max: 200 });
+const rateLimit = (req, res, next) =>
+  (req.query.link ? linkLimit : normalLimit)(req, res, next);
+
 router.post(
   "/",
-  publicRateLimit({ windowMs: 60 * 60 * 1000, max: 10 }),
+  rateLimit,
   contactUpload,
   honeypot,
   parseContactFormData,
+  formLinkService.attachLink, // ?link=<token>: forces the link's name as Reference
   createContactValidation,
   validate,
   async (req, res, next) => {
     try {
-      // Public submissions wait for an admin to approve them in Contact List.
-      await contactService.createContact(req.body, null, req.files, {
-        approvalStatus: "pending",
-      });
+      if (req.formLink) {
+        // Counts one place on the link, then saves in Contact List / Member List.
+        await formLinkService.submitThroughLink(req.formLink, req.body, req.files);
+      } else {
+        // Public submissions wait for an admin to approve them in Contact List.
+        await contactService.createContact(req.body, null, req.files, {
+          approvalStatus: "pending",
+        });
+      }
 
       return res.status(201).json({
         success: true,

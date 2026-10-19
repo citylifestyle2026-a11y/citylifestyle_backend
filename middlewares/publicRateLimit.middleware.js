@@ -2,9 +2,11 @@
 // Per IP: `max` requests per `windowMs`. Good enough for a single Render
 // instance; if the app is ever scaled to several instances, swap for a
 // shared store (e.g. express-rate-limit + Redis).
-const hits = new Map();
-
 const publicRateLimit = ({ windowMs = 60 * 60 * 1000, max = 10 } = {}) => {
+  // Each limiter keeps its own counters, so the normal form limit and the
+  // (higher) form-link limit never count against each other.
+  const hits = new Map();
+
   // forget old entries now and then so the map cannot grow forever
   setInterval(() => {
     const now = Date.now();
