@@ -50,9 +50,11 @@ const getTodayBooking = async (eventId) => {
 
     // Deleted (soft-deleted) bookings must not count — same rule as
     // getTotalBooking / getPassBookingBreakdown below.
+    // Cancelled bookings (e.g. a cancelled pass) are not counted either.
     return await Booking.countDocuments({
         eventId,
         isDeleted: false,
+        bookingStatus: { $ne: "Cancelled" },
         createdAt: {
             $gte: start,
             $lte: end,
@@ -67,7 +69,8 @@ const getTodayBooking = async (eventId) => {
 // Booking records with quantity 2 each must read as 4, not 2.
 const getTotalBooking = async (eventId) => {
     const result = await Booking.aggregate([
-        { $match: { eventId, isDeleted: false } },
+        // A cancelled booking (e.g. a cancelled pass) is not a booking any more.
+        { $match: { eventId, isDeleted: false, bookingStatus: { $ne: "Cancelled" } } },
         { $group: { _id: null, qty: { $sum: "$quantity" } } },
     ]);
 
@@ -184,8 +187,9 @@ const getBookingCounts = async (eventId) => {
         {
             $match: {
                 eventId,
-                // Deleted bookings must not appear in the booking chart.
+                // Deleted / cancelled bookings must not appear in the booking chart.
                 isDeleted: false,
+                bookingStatus: { $ne: "Cancelled" },
             },
         },
         {
@@ -219,6 +223,7 @@ const getTotalBookingDetails = async (eventId) => {
     const bookings = await Booking.find({
         eventId,
         isDeleted: false,
+        bookingStatus: { $ne: "Cancelled" },
     })
         .select("quantity ticketTypeId")
         .populate({
@@ -288,8 +293,28 @@ const getDashboardCounts = async (eventId) => {
         isDeleted: true,
     });
 
+    // A CANCELLED booking (e.g. a cancelled pass) is no longer a real booking:
+    // its tickets must not count as pending / registered / "not checked in".
+    const cancelledBookingIds = await Booking.distinct("_id", {
+        eventId,
+        isDeleted: { $ne: true },
+        bookingStatus: "Cancelled",
+    });
+
+    const inactiveBookingIds = [...deletedBookingIds, ...cancelledBookingIds];
+
     const liveBookingTicketScope = {
         eventId,
+        ...(inactiveBookingIds.length > 0
+            ? { bookingId: { $nin: inactiveBookingIds } }
+            : {}),
+    };
+
+    // Checked In: only the guests that really entered, and - like the Entry
+    // Report - never the ones of a deleted booking.
+    const checkedInScope = {
+        eventId,
+        status: "Used",
         ...(deletedBookingIds.length > 0
             ? { bookingId: { $nin: deletedBookingIds } }
             : {}),
@@ -315,24 +340,22 @@ const getDashboardCounts = async (eventId) => {
     ] =
         await Promise.all([
             Booking.aggregate([
-                { $match: { eventId, isDeleted: false } },
+                { $match: { eventId, isDeleted: false, bookingStatus: { $ne: "Cancelled" } } },
                 { $group: { _id: null, qty: { $sum: "$quantity" } } },
             ]),
             BookingTicket.countDocuments({
                 ...liveBookingTicketScope,
                 isRegistered: true,
+                status: { $ne: "Cancelled" },
             }),
             BookingTicket.countDocuments({
                 ...liveBookingTicketScope,
                 isRegistered: false,
+                status: { $ne: "Cancelled" },
             }),
-            // Scanned Entries is intentionally NOT narrowed: an entry that
-            // was really scanned stays in the Entry Report, so the
-            // dashboard count keeps matching it.
-            BookingTicket.countDocuments({
-                eventId,
-                status: "Used",
-            }),
+            // Scanned Entries = guests checked in (same bookings as the
+            // Entry Report, which leaves out deleted bookings).
+            BookingTicket.countDocuments(checkedInScope),
             // Registered but Not Scanned: the attendee registered (so a
             // QR pass exists) yet the pass was never scanned at entry —
             // i.e. the person did not come to the event. Counted

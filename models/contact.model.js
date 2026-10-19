@@ -300,6 +300,21 @@ const contactSchema = new mongoose.Schema(
       default: null,
     },
 
+    // The booking (pass) that was cancelled. Kept so "Approve Pass" can bring
+    // back the SAME pass (same QR) and send it again, instead of making a
+    // new one. Cleared when the pass is restored or a new pass is sent.
+    passCancelledBookingId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Booking",
+      default: null,
+    },
+
+    passCancelledEventId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Event",
+      default: null,
+    },
+
     // Soft-delete fields, same pattern already used on Event/Booking
     // (isDeleted / deletedAt / deletedBy) — deleting a contact never
     // hard-removes the document.

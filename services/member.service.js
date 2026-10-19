@@ -12,6 +12,35 @@ const AppError = require("../utils/AppError");
 const { toReferenceList } = require("../utils/splitReferences");
 const { normalizeInstagramId, isValidInstagramId, parseInstagramLink } = require("../utils/normalizeInstagramId");
 const { normalizeMobileNumber } = require("../utils/normalizeMobileNumber");
+const uploadImage = require("../utils/localUpload.util");
+const deleteImage = require("../utils/deleteLocalFile");
+
+// ================= MEMBER PHOTO HELPERS =================
+// Profile photo + spouse profile photo arrive as multer files
+// (req.files.profileImage[0] / req.files.spouseProfileImage[0]) and are
+// re-encoded to WEBP under uploads/contacts (same folder as Guest List photos).
+const MEMBER_IMAGE_FOLDER = "event-management/contacts";
+const isTrue = (value) => value === true || value === "true";
+const firstFile = (files, field) =>
+  files && files[field] && files[field][0] ? files[field][0] : null;
+
+const uploadOne = async (file) => {
+  if (!file) return null;
+  const result = await uploadImage(file, MEMBER_IMAGE_FOLDER, "image");
+  return { url: result.url, publicId: result.public_id };
+};
+
+// Best-effort delete: a missing file must never fail a save / delete.
+const removeFiles = async (publicIds = []) => {
+  for (const publicId of publicIds) {
+    if (!publicId) continue;
+    try {
+      await deleteImage(publicId);
+    } catch (error) {
+      console.error("Could not delete member photo:", error.message);
+    }
+  }
+};
 
 const toLocalMobile = (value) => {
   const canonical = normalizeMobileNumber(value);
@@ -449,6 +478,7 @@ const importMembers = async (
 
 // ================= LIST =================
 const MOVED_FILTERS = ["inGuestList", "notInGuestList"];
+const FIX_TYPES = ["invalid", "duplicate"];
 const SORTABLE = ["name", "mobile", "profession", "companyName", "city", "createdAt"];
 
 // An edition is "current" while its event still exists, is switched on and
@@ -522,7 +552,11 @@ const buildMemberQuery = (query = {}, activeEventIds = []) => {
   }
 
   if (query.moved === "needsFix") {
-    filter.mobileStatus = { $in: ["invalid", "duplicate"] };
+    // Needs Fix can be narrowed to only "invalid" or only "duplicate" rows.
+    const fixType = String(query.fixType || "").toLowerCase();
+    filter.mobileStatus = FIX_TYPES.includes(fixType)
+      ? fixType
+      : { $in: FIX_TYPES };
   }
 
   if (MOVED_FILTERS.includes(query.moved)) {
@@ -560,11 +594,13 @@ const getAllMembers = async (query = {}) => {
 
   // Numbers on the All / Not in Guest List / In Guest List tabs (whole
   // directory, independent of search and other filters).
-  const [all, inGuestList, needsFix] = await Promise.all([
+  const [all, inGuestList, invalidCount, duplicateCount] = await Promise.all([
     Member.countDocuments({}),
     Member.countDocuments({ "movedTo.eventId": { $in: activeEventIds } }),
-    Member.countDocuments({ mobileStatus: { $in: ["invalid", "duplicate"] } }),
+    Member.countDocuments({ mobileStatus: "invalid" }),
+    Member.countDocuments({ mobileStatus: "duplicate" }),
   ]);
+  const needsFix = invalidCount + duplicateCount;
 
   // movedTo is the permanent record of every edition a member went to
   // (kept even after that event ends or is deleted); currentMovedTo is only
@@ -578,7 +614,14 @@ const getAllMembers = async (query = {}) => {
     success: true,
     message: "Members fetched successfully",
     data,
-    counts: { all, inGuestList, notInGuestList: all - inGuestList, needsFix },
+    counts: {
+      all,
+      inGuestList,
+      notInGuestList: all - inGuestList,
+      needsFix,
+      invalid: invalidCount,
+      duplicate: duplicateCount,
+    },
     pagination: {
       total,
       page,
@@ -720,6 +763,10 @@ const moveMembersToGuestList = async (body, adminId) => {
         existing.editionName = editionName;
         existing.memberId = member._id;
         existing.historyOnly = false;
+        if (!existing.profileImage && member.profileImage) existing.profileImage = member.profileImage;
+        if (!existing.spouseProfileImage && member.relationship === "Couple" && member.spouseProfileImage) {
+          existing.spouseProfileImage = member.spouseProfileImage;
+        }
         existing.approvalStatus = "pending";
         existing.approvalUpdatedAt = new Date();
         if (String(existing.passEventId || "") !== String(event._id)) {
@@ -746,6 +793,10 @@ const moveMembersToGuestList = async (body, adminId) => {
           spouseName: member.relationship === "Couple" ? member.spouseName || "" : "",
           spouseMobile: member.relationship === "Couple" ? member.spouseMobile || "" : "",
           spouseInstagramId: member.relationship === "Couple" ? member.spouseInstagramId || "" : "",
+          // Photos are shared by URL only. PublicId is left empty on purpose, so
+          // deleting the guest never deletes the file the Contact Book entry owns.
+          profileImage: member.profileImage || "",
+          spouseProfileImage: member.relationship === "Couple" ? member.spouseProfileImage || "" : "",
           professionCategory,
           editionEventId: event._id,
           editionName,
@@ -776,7 +827,7 @@ const moveMembersToGuestList = async (body, adminId) => {
   return {
     success: done > 0 || counts.alreadyThere > 0,
     message:
-      `${done} member${done === 1 ? "" : "s"} moved to Guest List (${editionName})` +
+      `${done} contact${done === 1 ? "" : "s"} moved to Guest List (${editionName})` +
       (counts.alreadyThere ? `, ${counts.alreadyThere} already there` : "") +
       (counts.failed ? `, ${counts.failed} failed` : ""),
     data: { editionName, total: members.length, ...counts, problems },
@@ -798,19 +849,19 @@ const UPDATABLE_TEXT_FIELDS = [
   "memberStatus",
 ];
 
-const updateMember = async (id, body = {}) => {
-  if (!mongoose.Types.ObjectId.isValid(id)) throw new AppError("Invalid Member ID", 400);
+const updateMember = async (id, body = {}, files = null) => {
+  if (!mongoose.Types.ObjectId.isValid(id)) throw new AppError("Invalid Contact ID", 400);
 
   const member = await Member.findById(id);
-  if (!member) throw new AppError("Member not found", 404);
+  if (!member) throw new AppError("Contact not found", 404);
 
   const name = body.name !== undefined ? String(body.name).trim() : member.name;
-  if (!name) throw new AppError("Name is required", 400);
+  if (!name) throw new AppError("Full Name is required", 400);
 
   if (body.mobile !== undefined) {
     const mobile = toLocalMobile(body.mobile);
     if (!mobile) {
-      throw new AppError("Mobile Number must be a valid 10-digit number", 400);
+      throw new AppError("WhatsApp Number must be a valid 10-digit number", 400);
     }
 
     if (mobile !== member.mobile || member.mobileStatus === "duplicate") {
@@ -822,7 +873,7 @@ const updateMember = async (id, body = {}) => {
         .select("name")
         .lean();
       if (clash) {
-        throw new AppError(`This mobile number already belongs to ${clash.name}`, 409);
+        throw new AppError(`This WhatsApp number already belongs to ${clash.name}`, 409);
       }
       member.mobile = mobile;
       // The number is now valid and unique -> no longer "Needs Fix".
@@ -840,8 +891,8 @@ const updateMember = async (id, body = {}) => {
 
   // The edit form always sends these, so they cannot be saved empty.
   [
-    ["companyName", "Company / Brand"],
-    ["profession", "Profession"],
+    ["companyName", "Company Name"],
+    ["profession", "Company Category"],
   ].forEach(([field, label]) => {
     if (body[field] !== undefined && !String(body[field]).trim()) {
       throw new AppError(`${label} is required`, 400);
@@ -882,7 +933,52 @@ const updateMember = async (id, body = {}) => {
     }
   }
 
-  await member.save();
+  // ---------- Photos ----------
+  // New upload replaces the saved one; "remove" clears it; Single has no spouse photo.
+  const isCoupleNow = member.relationship === "Couple";
+  const staleImageIds = []; // old files are deleted only AFTER the save succeeds
+  const uploaded = [];
+
+  try {
+    const profileUpload = await uploadOne(firstFile(files, "profileImage"));
+    if (profileUpload) {
+      uploaded.push(profileUpload.publicId);
+      staleImageIds.push(member.profileImagePublicId);
+      member.profileImage = profileUpload.url;
+      member.profileImagePublicId = profileUpload.publicId;
+    } else if (isTrue(body.removeProfileImage) && member.profileImage) {
+      staleImageIds.push(member.profileImagePublicId);
+      member.profileImage = "";
+      member.profileImagePublicId = "";
+    }
+
+    if (!isCoupleNow) {
+      if (member.spouseProfileImage) {
+        staleImageIds.push(member.spouseProfileImagePublicId);
+        member.spouseProfileImage = "";
+        member.spouseProfileImagePublicId = "";
+      }
+    } else {
+      const spouseUpload = await uploadOne(firstFile(files, "spouseProfileImage"));
+      if (spouseUpload) {
+        uploaded.push(spouseUpload.publicId);
+        staleImageIds.push(member.spouseProfileImagePublicId);
+        member.spouseProfileImage = spouseUpload.url;
+        member.spouseProfileImagePublicId = spouseUpload.publicId;
+      } else if (isTrue(body.removeSpouseProfileImage) && member.spouseProfileImage) {
+        staleImageIds.push(member.spouseProfileImagePublicId);
+        member.spouseProfileImage = "";
+        member.spouseProfileImagePublicId = "";
+      }
+    }
+
+    await member.save();
+  } catch (error) {
+    await removeFiles(uploaded); // the save failed - do not leave orphan files
+    throw error;
+  }
+
+  await removeFiles(staleImageIds);
   return member;
 };
 
@@ -890,27 +986,27 @@ const updateMember = async (id, body = {}) => {
 // POST /api/members - add a single member by hand (the Excel / CSV import
 // is still there for bulk). Same rules as import and edit: name and a valid
 // 10-digit mobile are required, the mobile must be unique, email is optional.
-const createMember = async (body = {}, adminId = null) => {
+const createMember = async (body = {}, adminId = null, files = null) => {
   const text = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 
   const name = text(body.name);
-  if (!name) throw new AppError("Name is required", 400);
+  if (!name) throw new AppError("Full Name is required", 400);
 
   const mobile = toLocalMobile(body.mobile);
   if (!mobile) {
-    throw new AppError("Mobile Number must be a valid 10-digit number", 400);
+    throw new AppError("WhatsApp Number must be a valid 10-digit number", 400);
   }
 
   const clash = await Member.findOne({ mobile, mobileStatus: "valid" }).select("name").lean();
   if (clash) {
-    throw new AppError(`This mobile number already belongs to ${clash.name}`, 409);
+    throw new AppError(`This WhatsApp number already belongs to ${clash.name}`, 409);
   }
 
   const companyName = text(body.companyName);
-  if (!companyName) throw new AppError("Company / Brand is required", 400);
+  if (!companyName) throw new AppError("Company Name is required", 400);
 
   const profession = text(body.profession);
-  if (!profession) throw new AppError("Profession is required", 400);
+  if (!profession) throw new AppError("Company Category is required", 400);
 
   const email = text(body.email);
   if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -921,22 +1017,50 @@ const createMember = async (body = {}, adminId = null) => {
 
   if (references.length === 0) throw new AppError("At least one Reference is required", 400);
 
-  return Member.create({
-    name,
-    mobile,
-    email,
-    profession,
-    companyName,
-    area: text(body.area),
-    city: text(body.city),
-    state: text(body.state),
-    references,
-    source: text(body.source),
-    remark: text(body.remark),
-    ...strictExtraFields(body),
-    memberStatus: normalizeMemberStatus(body.memberStatus),
-    createdBy: adminId || null,
-  });
+  const extra = strictExtraFields(body);
+  const isCouple = extra.relationship === "Couple";
+
+  // Photos: profile always, spouse only for Couple.
+  const uploaded = [];
+  const photoFields = {};
+  try {
+    const profileUpload = await uploadOne(firstFile(files, "profileImage"));
+    if (profileUpload) {
+      uploaded.push(profileUpload.publicId);
+      photoFields.profileImage = profileUpload.url;
+      photoFields.profileImagePublicId = profileUpload.publicId;
+    }
+
+    if (isCouple) {
+      const spouseUpload = await uploadOne(firstFile(files, "spouseProfileImage"));
+      if (spouseUpload) {
+        uploaded.push(spouseUpload.publicId);
+        photoFields.spouseProfileImage = spouseUpload.url;
+        photoFields.spouseProfileImagePublicId = spouseUpload.publicId;
+      }
+    }
+
+    return await Member.create({
+      name,
+      mobile,
+      email,
+      profession,
+      companyName,
+      area: text(body.area),
+      city: text(body.city),
+      state: text(body.state),
+      references,
+      source: text(body.source),
+      remark: text(body.remark),
+      ...extra,
+      ...photoFields,
+      memberStatus: normalizeMemberStatus(body.memberStatus),
+      createdBy: adminId || null,
+    });
+  } catch (error) {
+    await removeFiles(uploaded); // the save failed - do not leave orphan files
+    throw error;
+  }
 };
 
 // ================= DELETE (HARD) =================
@@ -996,13 +1120,102 @@ const releaseMembersWithoutContact = async ({ memberIds = [], mobiles = [] } = {
 };
 
 const deleteMember = async (id) => {
-  if (!mongoose.Types.ObjectId.isValid(id)) throw new AppError("Invalid Member ID", 400);
+  if (!mongoose.Types.ObjectId.isValid(id)) throw new AppError("Invalid Contact ID", 400);
   const member = await Member.findByIdAndDelete(id);
-  if (!member) throw new AppError("Member not found", 404);
+  if (!member) throw new AppError("Contact not found", 404);
+  await removeFiles([member.profileImagePublicId, member.spouseProfileImagePublicId]);
   return member;
 };
 
+// ================= BULK DELETE (NEEDS FIX ONLY) =================
+// body: { ids: string[] }  or  { selectAll: true, filters: {...} }
+// Only members that are in "Needs Fix" (invalid / duplicate number) can be
+// deleted this way, so a wrong request can never wipe valid members.
+const deleteNeedsFixMembers = async (body = {}) => {
+  const base = { mobileStatus: { $in: FIX_TYPES } };
+  let filter;
+
+  if (body.selectAll) {
+    const activeEventIds = await getActiveEventIds();
+    filter = buildMemberQuery({ ...(body.filters || {}), moved: "needsFix" }, activeEventIds);
+  } else {
+    const ids = Array.isArray(body.ids) ? body.ids.filter((id) => mongoose.Types.ObjectId.isValid(id)) : [];
+    if (ids.length === 0) throw new AppError("Select at least one member", 400);
+    filter = { ...base, _id: { $in: ids } };
+  }
+
+  const result = await Member.deleteMany(filter);
+  return { success: true, message: `${result.deletedCount} contact(s) deleted`, deletedCount: result.deletedCount };
+};
+
+// ================= EXPORT (CSV) =================
+// Same filters as the list (tab, fixType, search, profession, reference).
+// Columns use the SAME headers as the import file, so an exported Needs Fix
+// file can be corrected and imported again. "Problem" is the extra column.
+const csvCell = (value) => `"${String(value ?? "").replace(/"/g, '""')}"`;
+
+const exportMembersCsv = async (query = {}) => {
+  const activeEventIds = await getActiveEventIds();
+  const filter = buildMemberQuery(query, activeEventIds);
+  const members = await Member.find(filter)
+    .sort({ name: 1, _id: 1 })
+    .collation({ locale: "en", strength: 2 })
+    .lean();
+
+  const headers = [
+    "#", "Name", "Contact", "Email", "Profession", "Company / Brand", "Objective",
+    "Area", "City", "State", "Reference", "Reference 2", "Reference 3", "Source",
+    "Remark", "Status", "Company Designation", "Address", "Instagram Link",
+    "Relationship", "Spouse Name", "Spouse Mobile", "Spouse Instagram Link",
+    "Spouse Profession", "Problem", "Problem Type",
+  ];
+
+  const lines = [headers.map(csvCell).join(",")];
+
+  members.forEach((m, index) => {
+    const refs = m.references || [];
+    const typeLabel =
+      m.mobileStatus === "duplicate" ? "Duplicate" : m.mobileStatus === "invalid" ? "Invalid" : "";
+    const row = [
+      index + 1,
+      m.name === "(No name)" ? "" : m.name,
+      m.mobile,
+      m.email,
+      m.profession,
+      m.companyName,
+      m.objective,
+      m.area,
+      m.city,
+      m.state,
+      refs[0] || "",
+      refs[1] || "",
+      // More than 3 references: the rest go in the 3rd column joined with "&"
+      // (the importer splits "A & B" into two references again).
+      refs.slice(2).join(" & "),
+      m.source,
+      m.remark,
+      m.memberStatus,
+      m.designation,
+      m.address,
+      m.instagramId ? `https://instagram.com/${m.instagramId}` : "",
+      m.relationship,
+      m.spouseName,
+      m.spouseMobile,
+      m.spouseInstagramId ? `https://instagram.com/${m.spouseInstagramId}` : "",
+      m.spouseProfession,
+      m.importNote,
+      typeLabel,
+    ];
+    lines.push(row.map(csvCell).join(","));
+  });
+
+  // BOM so Excel reads Gujarati / Hindi names correctly.
+  return { csv: "\uFEFF" + lines.join("\r\n"), count: members.length };
+};
+
 module.exports = {
+  deleteNeedsFixMembers,
+  exportMembersCsv,
   importMembers,
   getAllMembers,
   getMemberProfessions,

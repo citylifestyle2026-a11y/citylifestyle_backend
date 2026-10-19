@@ -49,8 +49,8 @@ const importMembers = async (req, res, next) => {
     const message = dryRun
       ? `Processed ${result.totalRows} row(s): ${newOnes} new, ${updated} to update, ${result.failureCount} invalid`
       : mode === "all"
-      ? `${newOnes} member(s) added, ${updated} updated, ${result.flaggedCount} need fixing (see Needs Fix tab)`
-      : `Processed ${result.totalRows} row(s): ${newOnes} member(s) added, ${updated} updated, ${result.failureCount} failed`;
+      ? `${newOnes} contact(s) added, ${updated} updated, ${result.flaggedCount} need fixing (see Needs Fix tab)`
+      : `Processed ${result.totalRows} row(s): ${newOnes} contact(s) added, ${updated} updated, ${result.failureCount} failed`;
 
     return res.status(200).json({
       success: dryRun || added > 0,
@@ -73,10 +73,10 @@ const moveToGuestList = async (req, res, next) => {
 
 const createMember = async (req, res, next) => {
   try {
-    const member = await memberService.createMember(req.body, req.user.id);
+    const member = await memberService.createMember(req.body, req.user.id, req.files);
     return res.status(201).json({
       success: true,
-      message: "Member added successfully",
+      message: "Contact added successfully",
       data: member,
     });
   } catch (error) {
@@ -86,10 +86,10 @@ const createMember = async (req, res, next) => {
 
 const updateMember = async (req, res, next) => {
   try {
-    const member = await memberService.updateMember(req.params.id, req.body);
+    const member = await memberService.updateMember(req.params.id, req.body, req.files);
     return res.status(200).json({
       success: true,
-      message: "Member updated successfully",
+      message: "Contact updated successfully",
       data: member,
     });
   } catch (error) {
@@ -100,13 +100,41 @@ const updateMember = async (req, res, next) => {
 const deleteMember = async (req, res, next) => {
   try {
     await memberService.deleteMember(req.params.id);
-    return res.status(200).json({ success: true, message: "Member deleted successfully" });
+    return res.status(200).json({ success: true, message: "Contact deleted successfully" });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// POST /members/bulk-delete  { ids } | { selectAll: true, filters }
+const bulkDeleteNeedsFix = async (req, res, next) => {
+  try {
+    return res.status(200).json(await memberService.deleteNeedsFixMembers(req.body));
+  } catch (error) {
+    next(error);
+  }
+};
+
+// GET /members/export?moved=needsFix&fixType=invalid  -> .csv download
+const exportMembers = async (req, res, next) => {
+  try {
+    const { csv } = await memberService.exportMembersCsv(req.query);
+    const type = String(req.query.fixType || "").toLowerCase();
+    const name =
+      req.query.moved === "needsFix"
+        ? `members-needs-fix${type ? `-${type}` : ""}`
+        : "members";
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${name}.csv"`);
+    return res.status(200).send(csv);
   } catch (error) {
     next(error);
   }
 };
 
 module.exports = {
+  bulkDeleteNeedsFix,
+  exportMembers,
   getAllMembers,
   getProfessions,
   getReferences,

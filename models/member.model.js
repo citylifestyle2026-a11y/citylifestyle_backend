@@ -58,6 +58,15 @@ const memberSchema = new mongoose.Schema(
     // Spouse profession = a Company Category name (like Member.profession).
     spouseProfession: { type: String, trim: true, default: "" },
 
+    // ---- Profile photos (Add / Edit Member form). `*Image` is the public URL,
+    // `*PublicId` is the relative path under uploads/ that
+    // utils/deleteLocalFile.js needs to remove the file later - same pair of
+    // fields Contact.model.js uses. ----
+    profileImage: { type: String, trim: true, default: "" },
+    profileImagePublicId: { type: String, trim: true, default: "" },
+    spouseProfileImage: { type: String, trim: true, default: "" },
+    spouseProfileImagePublicId: { type: String, trim: true, default: "" },
+
     // Reference, Reference 2, Reference 3 columns of the sheet.
     references: { type: [{ type: String, trim: true }], default: [] },
 

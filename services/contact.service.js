@@ -463,6 +463,22 @@ function buildContactQuery(query) {
     filter.editionEventId = query.editionEventId;
   }
 
+  // Pass filter: sent | cancelled | notSent
+  //  sent      - a pass is active (sent to WhatsApp)
+  //  cancelled - the pass was cancelled and not restored yet
+  //  notSent   - no pass has been sent (and none was cancelled)
+  if (query.passStatus === "sent") {
+    filter.passSentAt = { $ne: null };
+  } else if (query.passStatus === "cancelled") {
+    // The "Pass Cancelled" tab: rejected guests whose pass was cancelled.
+    filter.approvalStatus = "rejected";
+    filter.passSentAt = null;
+    filter.passCancelledAt = { $ne: null };
+  } else if (query.passStatus === "notSent") {
+    filter.passSentAt = null;
+    filter.passCancelledAt = null;
+  }
+
   if (APPROVAL_STATUSES.includes(query.approvalStatus)) {
     filter.$and = [
       ...(filter.$and || []),
@@ -470,6 +486,14 @@ function buildContactQuery(query) {
         ? { approvalStatus: { $in: ["approved", null] } }
         : { approvalStatus: query.approvalStatus },
     ];
+
+    // A guest whose pass was cancelled lives in the "Pass Cancelled" tab only,
+    // not in Rejected.
+    if (query.approvalStatus === "rejected") {
+      filter.$and.push({
+        $or: [{ passCancelledAt: null }, { passSentAt: { $ne: null } }],
+      });
+    }
   }
 
   if (query.companyCategory) {
@@ -567,7 +591,16 @@ const getApprovalStatusCounts = async (editionEventId = null) => {
   rows.forEach((row) => {
     if (counts[row._id] !== undefined) counts[row._id] = row.count;
   });
-  counts.all = counts.pending + counts.approved + counts.rejected;
+  // Guests whose pass was cancelled (and not brought back) have their own
+  // "Pass Cancelled" tab, so they are not counted under Rejected.
+  counts.passCancelled = await Contact.countDocuments({
+    ...match,
+    approvalStatus: "rejected",
+    passSentAt: null,
+    passCancelledAt: { $ne: null },
+  });
+  counts.rejected = Math.max(0, counts.rejected - counts.passCancelled);
+  counts.all = counts.pending + counts.approved + counts.rejected + counts.passCancelled;
 
   return counts;
 };
@@ -632,6 +665,7 @@ const cancelPassForContact = async (contact, adminId) => {
   const bookings = await findActivePassBookings(contact);
   let cancelled = 0;
   let alreadyUsed = 0;
+  let cancelledBookingId = null;
 
   for (const booking of bookings) {
     const usedCount = await BookingTicket.countDocuments({
@@ -664,17 +698,110 @@ const cancelPassForContact = async (contact, adminId) => {
       { $inc: { availableCount: booking.quantity } }
     );
 
+    if (!cancelledBookingId) cancelledBookingId = booking._id;
     cancelled += 1;
   }
 
   if (alreadyUsed === 0) {
     await Contact.updateOne(
       { _id: contact._id },
-      { $set: { passSentAt: null, passEventId: null, passBookingId: null } }
+      {
+        $set: {
+          passSentAt: null,
+          passEventId: null,
+          passBookingId: null,
+          // Remembered so "Approve Pass" can bring this same pass back.
+          ...(cancelledBookingId
+            ? {
+                passCancelledBookingId: cancelledBookingId,
+                passCancelledEventId: contact.passEventId || null,
+              }
+            : {}),
+        },
+      }
     );
   }
 
   return { cancelled, alreadyUsed };
+};
+
+// ================= RESTORE A CANCELLED PASS (APPROVE PASS) =================
+// Brings back the SAME pass that "Cancel Pass" cancelled: the booking and its
+// QR ticket(s) become active again (the seats are taken from the ticket stock
+// again) and the pass is sent to the guest on WhatsApp once more.
+// Returns { restored, messageSent, reason }.
+const restorePassForContact = async (contact) => {
+  const Booking = require("../models/booking.model");
+  const BookingTicket = require("../models/bookingTicket.model");
+  const TicketType = require("../models/ticketType.model");
+  const bookingTicketService = require("./bookingTicket.service");
+
+  const fail = (reason) => ({ restored: false, messageSent: false, reason });
+
+  if (!contact.passCancelledBookingId) return fail("No cancelled pass to bring back.");
+
+  const booking = await Booking.findOne({
+    _id: contact.passCancelledBookingId,
+    isDeleted: { $ne: true },
+  });
+  if (!booking) return fail("The cancelled pass no longer exists. Send a new pass.");
+
+  if (booking.bookingStatus === "Cancelled") {
+    // Take the seats back from the ticket stock (never below zero).
+    const stock = await TicketType.findOneAndUpdate(
+      { _id: booking.ticketTypeId, availableCount: { $gte: booking.quantity } },
+      { $inc: { availableCount: -booking.quantity } }
+    );
+    if (!stock) return fail("Not enough tickets left to bring this pass back.");
+
+    await BookingTicket.updateMany(
+      { bookingId: booking._id, status: "Cancelled" },
+      { $set: { status: "Active" } }
+    );
+
+    await Booking.updateOne(
+      { _id: booking._id },
+      {
+        $set: {
+          bookingStatus: "Confirmed",
+          remark: String(booking.remark || "").replace(
+            / \| Pass cancelled \(contact status changed\)/g,
+            ""
+          ),
+        },
+      }
+    );
+  }
+
+  await Contact.updateOne(
+    { _id: contact._id },
+    {
+      $set: {
+        passSentAt: new Date(),
+        passEventId: booking.eventId || contact.passCancelledEventId || null,
+        passBookingId: booking._id,
+        passCancelledAt: null,
+        passCancelMessageSentAt: null,
+        passCancelledBookingId: null,
+        passCancelledEventId: null,
+      },
+    }
+  );
+
+  // Send the very same pass again.
+  try {
+    const primaryTicket = await BookingTicket.findOne({
+      bookingId: booking._id,
+      status: { $ne: "Cancelled" },
+    }).sort({ createdAt: 1, _id: 1 });
+
+    if (!primaryTicket) return { restored: true, messageSent: false, reason: "No active ticket found to send." };
+
+    await bookingTicketService.resendTicket(primaryTicket._id);
+    return { restored: true, messageSent: true, reason: "" };
+  } catch (error) {
+    return { restored: true, messageSent: false, reason: String(error?.message || "WhatsApp error") };
+  }
 };
 
 // ================= BULK UPDATE APPROVAL STATUS =================
@@ -695,31 +822,29 @@ const bulkUpdateApprovalStatus = async ({ ids, status }, adminId) => {
 
   let contactIds = validateIdList(ids);
 
-  // An approved guest cannot be "rejected" any more: the pass has already
-  // been issued, so the admin uses "Cancel Pass" (which sends the proper
-  // "your pass has been cancelled" message instead of the rejection text).
+  // Rejecting an APPROVED guest is allowed:
+  //  - with a pass sent  -> same as "Cancel Pass" (pass cancelled, proper
+  //                         "pass cancelled" message, guest moves to Rejected)
+  //  - without a pass    -> a normal rejection
   let skippedApproved = 0;
+  let cancelResult = null;
   if (status === "rejected") {
-    const approvedNow = await Contact.find({
+    const approvedWithPass = await Contact.find({
       _id: { $in: contactIds },
       isDeleted: { $ne: true },
       historyOnly: { $ne: true },
+      passSentAt: { $ne: null },
       $or: [{ approvalStatus: "approved" }, { approvalStatus: null }],
     })
       .select("_id")
       .lean();
 
-    if (approvedNow.length) {
-      const blocked = new Set(approvedNow.map((c) => String(c._id)));
-      skippedApproved = blocked.size;
-      contactIds = contactIds.filter((id) => !blocked.has(String(id)));
+    if (approvedWithPass.length) {
+      const handled = new Set(approvedWithPass.map((c) => String(c._id)));
+      cancelResult = await cancelPassesOfContacts({ ids: [...handled] }, adminId);
+      contactIds = contactIds.filter((id) => !handled.has(String(id)));
 
-      if (contactIds.length === 0) {
-        throw new AppError(
-          "Approved contacts cannot be rejected. Use Cancel Pass instead.",
-          400
-        );
-      }
+      if (contactIds.length === 0) return cancelResult;
     }
   }
 
@@ -760,6 +885,38 @@ const bulkUpdateApprovalStatus = async ({ ids, status }, adminId) => {
   const updated = result.modifiedCount ?? result.nModified ?? 0;
   const matched = result.matchedCount ?? result.n ?? contactIds.length;
 
+  // Approving a guest whose pass was cancelled brings the SAME pass back and
+  // sends it again.
+  let passesRestored = 0;
+  let passRestoreFailed = 0;
+  let passMessageFailed = 0;
+  let passRestoreError = "";
+
+  if (status === "approved") {
+    for (const contact of before) {
+      if (!contact.passCancelledBookingId) continue;
+      if ((contact.approvalStatus || "approved") === "approved") continue;
+
+      try {
+        const outcome = await restorePassForContact(contact);
+        if (!outcome.restored) {
+          passRestoreFailed += 1;
+          if (!passRestoreError) passRestoreError = outcome.reason;
+        } else {
+          passesRestored += 1;
+          if (!outcome.messageSent) {
+            passMessageFailed += 1;
+            if (!passRestoreError) passRestoreError = outcome.reason;
+          }
+        }
+      } catch (error) {
+        passRestoreFailed += 1;
+        if (!passRestoreError) passRestoreError = String(error?.message || "Failed to restore the pass");
+        console.error(`Pass restore failed for contact ${contact._id}:`, error);
+      }
+    }
+  }
+
   let rejectionSent = 0;
   let rejectionFailed = 0;
   let rejectionError = "";
@@ -799,6 +956,21 @@ const bulkUpdateApprovalStatus = async ({ ids, status }, adminId) => {
       `${skippedApproved} approved contact${skippedApproved === 1 ? "" : "s"} skipped (use Cancel Pass)`
     );
   }
+  if (cancelResult?.data?.cancelled) {
+    notes.push(`${cancelResult.data.cancelled} pass${cancelResult.data.cancelled === 1 ? "" : "es"} cancelled`);
+  }
+  if (passesRestored) {
+    notes.push(
+      `${passesRestored} pass${passesRestored === 1 ? "" : "es"} brought back` +
+        (passMessageFailed ? ` (WhatsApp failed for ${passMessageFailed})` : " and sent again")
+    );
+  }
+  if (passRestoreFailed) {
+    notes.push(
+      `${passRestoreFailed} pass${passRestoreFailed === 1 ? "" : "es"} could not be brought back` +
+        (passRestoreError ? ` (${passRestoreError})` : "")
+    );
+  }
   if (passesCancelled) {
     notes.push(`${passesCancelled} pass${passesCancelled === 1 ? "" : "es"} cancelled`);
   }
@@ -827,6 +999,10 @@ const bulkUpdateApprovalStatus = async ({ ids, status }, adminId) => {
       passesCancelled,
       passesUsed,
       skippedApproved,
+      passesRestored,
+      passRestoreFailed,
+      passMessageFailed,
+      passRestoreError,
       rejectionSent,
       rejectionFailed,
       rejectionError,
@@ -1435,6 +1611,8 @@ const sendPassToContacts = async ({ ids, eventId, ticketTypeId, quantities }, ad
             passSentAt: new Date(),
             passEventId: event._id,
             passBookingId: booking._id,
+            passCancelledBookingId: null,
+            passCancelledEventId: null,
           },
         }
       );
