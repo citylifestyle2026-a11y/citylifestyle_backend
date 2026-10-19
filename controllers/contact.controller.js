@@ -160,6 +160,20 @@ const bulkUpdateStatus = async (req, res, next) => {
   }
 };
 
+// ================= CANCEL PASS (APPROVED GUEST) =================
+const cancelPass = async (req, res, next) => {
+  try {
+    const result = await contactService.cancelPassesOfContacts(
+      req.body,
+      req.user.id
+    );
+
+    return res.status(result.success ? 200 : 400).json(result);
+  } catch (error) {
+    next(error);
+  }
+};
+
 // ================= SEND PASS OVER WHATSAPP =================
 const sendPass = async (req, res, next) => {
   try {
@@ -259,6 +273,7 @@ const importContactsCsv = async (req, res, next) => {
 module.exports = {
   importContactsCsv,
   bulkUpdateStatus,
+  cancelPass,
   sendPass,
   resendPass,
   deleteBooking,

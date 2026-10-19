@@ -699,6 +699,10 @@ const findDuplicateBooking = async (data) => {
     ticketTypeId,
     mobileNumber: { $in: mobileVariants },
     isDeleted: { $ne: true },
+    // A CANCELLED booking is dead (its QR is void and the seats went back to
+    // stock), so it must not block a new booking for the same number - e.g.
+    // after "Cancel Pass" the guest can be approved again and get a fresh pass.
+    bookingStatus: { $ne: "Cancelled" },
   })
     .select("bookingNumber name mobileNumber")
     .lean();
@@ -1670,6 +1674,7 @@ const updateBooking = async (bookingId, data = {}) => {
             ticketTypeId: newTicketTypeId,
             mobileNumber: { $in: variants },
             isDeleted: { $ne: true },
+            bookingStatus: { $ne: "Cancelled" },
           })
             .select("bookingNumber name mobileNumber")
             .lean()

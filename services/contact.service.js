@@ -666,7 +666,35 @@ const bulkUpdateApprovalStatus = async ({ ids, status }, adminId) => {
     throw new AppError("Status must be pending, approved or rejected.", 400);
   }
 
-  const contactIds = validateIdList(ids);
+  let contactIds = validateIdList(ids);
+
+  // An approved guest cannot be "rejected" any more: the pass has already
+  // been issued, so the admin uses "Cancel Pass" (which sends the proper
+  // "your pass has been cancelled" message instead of the rejection text).
+  let skippedApproved = 0;
+  if (status === "rejected") {
+    const approvedNow = await Contact.find({
+      _id: { $in: contactIds },
+      isDeleted: { $ne: true },
+      historyOnly: { $ne: true },
+      $or: [{ approvalStatus: "approved" }, { approvalStatus: null }],
+    })
+      .select("_id")
+      .lean();
+
+    if (approvedNow.length) {
+      const blocked = new Set(approvedNow.map((c) => String(c._id)));
+      skippedApproved = blocked.size;
+      contactIds = contactIds.filter((id) => !blocked.has(String(id)));
+
+      if (contactIds.length === 0) {
+        throw new AppError(
+          "Approved contacts cannot be rejected. Use Cancel Pass instead.",
+          400
+        );
+      }
+    }
+  }
 
   const baseFilter = {
     _id: { $in: contactIds },
@@ -739,6 +767,11 @@ const bulkUpdateApprovalStatus = async ({ ids, status }, adminId) => {
   }
 
   const notes = [];
+  if (skippedApproved) {
+    notes.push(
+      `${skippedApproved} approved contact${skippedApproved === 1 ? "" : "s"} skipped (use Cancel Pass)`
+    );
+  }
   if (passesCancelled) {
     notes.push(`${passesCancelled} pass${passesCancelled === 1 ? "" : "es"} cancelled`);
   }
@@ -766,10 +799,169 @@ const bulkUpdateApprovalStatus = async ({ ids, status }, adminId) => {
       status,
       passesCancelled,
       passesUsed,
+      skippedApproved,
       rejectionSent,
       rejectionFailed,
       rejectionError,
       rejectionUsedTemplate,
+    },
+  };
+};
+
+// ================= CANCEL PASS (APPROVED GUEST) =================
+// POST /api/contacts/cancel-pass { ids: [...] }
+//
+// For an APPROVED guest who already has a pass:
+//  1. the pass is cancelled (booking + QR ticket -> Cancelled, so the QR
+//     scanner answers "This ticket has been cancelled." and the invite page
+//     shows "Cancelled Pass"; the seat goes back to the ticket stock),
+//  2. the guest moves to Rejected (re-approve later to send a fresh pass),
+//  3. a professional "your pass has been cancelled" WhatsApp message is sent.
+// A pass whose guests already entered cannot be cancelled. A WhatsApp
+// failure never undoes the cancellation - it is reported per guest.
+const cancelPassesOfContacts = async ({ ids }, adminId) => {
+  const Event = require("../models/event.model");
+  const { sendPassCancelledMessage } = require("./contactNotification.service");
+
+  const contactIds = validateIdList(ids);
+
+  const contacts = await Contact.find({
+    _id: { $in: contactIds },
+    isDeleted: { $ne: true },
+    historyOnly: { $ne: true },
+  });
+
+  const byId = new Map(contacts.map((c) => [String(c._id), c]));
+  const results = [];
+
+  for (const id of contactIds) {
+    const contact = byId.get(String(id));
+
+    if (!contact) {
+      results.push({ id, name: "-", status: "failed", message: "Contact not found." });
+      continue;
+    }
+
+    const base = { id: String(contact._id), name: contact.fullName };
+
+    if ((contact.approvalStatus || "approved") !== "approved") {
+      results.push({
+        ...base,
+        status: "failed",
+        message: "Only an approved guest's pass can be cancelled.",
+      });
+      continue;
+    }
+
+    if (!contact.passSentAt) {
+      results.push({ ...base, status: "failed", message: "No pass has been sent to this guest." });
+      continue;
+    }
+
+    try {
+      // Read the edition BEFORE the cancel (it clears passEventId).
+      let editionName = contact.editionName || "";
+      if (contact.passEventId) {
+        const event = await Event.findById(contact.passEventId)
+          .select("title edition")
+          .lean();
+        if (event) editionName = event.edition || event.title || editionName;
+      }
+
+      const outcome = await cancelPassForContact(contact, adminId);
+
+      if (outcome.cancelled === 0) {
+        results.push({
+          ...base,
+          status: "failed",
+          message:
+            outcome.alreadyUsed > 0
+              ? "This pass has already been used at the gate, so it cannot be cancelled."
+              : "No active pass found to cancel.",
+        });
+        continue;
+      }
+
+      await Contact.updateOne(
+        { _id: contact._id },
+        {
+          $set: {
+            approvalStatus: "rejected",
+            approvalUpdatedAt: new Date(),
+            approvalUpdatedBy: adminId || null,
+            passCancelledAt: new Date(),
+            passCancelMessageSentAt: null,
+          },
+        }
+      );
+
+      let messageSent = false;
+      let messageError = "";
+      try {
+        await sendPassCancelledMessage(contact, editionName);
+        await Contact.updateOne(
+          { _id: contact._id },
+          { $set: { passCancelMessageSentAt: new Date() } }
+        );
+        messageSent = true;
+      } catch (error) {
+        messageError = String(error?.message || "Unknown WhatsApp error");
+        console.error(
+          `Pass-cancelled WhatsApp failed for contact ${contact._id}:`,
+          messageError
+        );
+      }
+
+      results.push({
+        ...base,
+        status: "cancelled",
+        messageSent,
+        message: messageSent
+          ? "Pass cancelled and WhatsApp message sent."
+          : `Pass cancelled, but the WhatsApp message could not be sent (${messageError}).`,
+      });
+    } catch (error) {
+      results.push({
+        ...base,
+        status: "failed",
+        message: error.message || "Failed to cancel the pass.",
+      });
+    }
+  }
+
+  const cancelled = results.filter((r) => r.status === "cancelled").length;
+  const messageSent = results.filter((r) => r.messageSent).length;
+  const messageFailed = cancelled - messageSent;
+  const failed = results.length - cancelled;
+  const firstFailure = results.find((r) => r.status === "failed");
+  const firstMessageError = results.find(
+    (r) => r.status === "cancelled" && !r.messageSent
+  );
+
+  const parts = [];
+  parts.push(
+    cancelled
+      ? `Pass cancelled for ${cancelled} guest${cancelled === 1 ? "" : "s"}`
+      : "No pass was cancelled"
+  );
+  if (cancelled && messageSent) parts.push(`WhatsApp message sent to ${messageSent}`);
+  if (messageFailed) parts.push(`WhatsApp message failed for ${messageFailed}`);
+  if (failed) parts.push(`${failed} could not be cancelled`);
+
+  return {
+    success: cancelled > 0,
+    message: `${parts.join(", ")}.`,
+    data: {
+      cancelled,
+      failed,
+      messageSent,
+      messageFailed,
+      failedReason: firstFailure ? firstFailure.message : "",
+      messageError: firstMessageError ? firstMessageError.message : "",
+      usedTemplate: Boolean(
+        String(process.env.CHATBOX_PASS_CANCEL_TEMPLATE_NAME || "").trim()
+      ),
+      results,
     },
   };
 };
@@ -1795,6 +1987,21 @@ const hardDeleteContacts = async (contacts) => {
 
   const result = await Contact.deleteMany({ _id: { $in: ids } });
 
+  // The deleted guests must show as "Not in Guest List" again on Member List.
+  // Never allowed to fail the delete itself.
+  try {
+    const { releaseMembersWithoutContact } = require("./member.service");
+    await releaseMembersWithoutContact({
+      memberIds: contacts.map((c) => c.memberId).filter(Boolean),
+      mobiles: contacts.flatMap((c) => {
+        const n = String(c.whatsappNumber || "");
+        return n ? [n, n.length === 12 && n.startsWith("91") ? n.slice(2) : n] : [];
+      }),
+    });
+  } catch (error) {
+    console.error("Could not update Member List after guest delete:", error.message);
+  }
+
   // Photos last and best-effort: a missing file must never fail the delete.
   for (const contact of contacts) {
     for (const publicId of [
@@ -1833,6 +2040,7 @@ const bulkDeleteContacts = async ({ ids }, adminId) => {
 };
 
 module.exports = {
+  cancelPassesOfContacts,
   bulkDeleteContacts,
   bulkUpdateApprovalStatus,
   resendPassToContacts,

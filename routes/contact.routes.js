@@ -108,6 +108,11 @@ router.post(
   contactController.resendPass
 );
 
+// Cancel the pass of approved guest(s): QR stops working, the guest moves
+// to Rejected and gets a "your pass has been cancelled" WhatsApp message.
+// Body: { ids: [...] }.
+router.post("/cancel-pass", protect, contactController.cancelPass);
+
 // Delete the booking (pass) made by Send Pass. Body: { ids: [...] }.
 router.post("/delete-booking", protect, contactController.deleteBooking);
 

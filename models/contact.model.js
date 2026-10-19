@@ -286,6 +286,19 @@ const contactSchema = new mongoose.Schema(
       default: null,
     },
 
+    // Set by "Cancel Pass" (Guest List -> Action): when the pass of an
+    // approved guest was cancelled, and when the "your pass has been
+    // cancelled" WhatsApp message was delivered (null = not delivered).
+    passCancelledAt: {
+      type: Date,
+      default: null,
+    },
+
+    passCancelMessageSentAt: {
+      type: Date,
+      default: null,
+    },
+
     // Soft-delete fields, same pattern already used on Event/Booking
     // (isDeleted / deletedAt / deletedBy) — deleting a contact never
     // hard-removes the document.

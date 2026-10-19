@@ -57,7 +57,64 @@ const sendRejectionMessage = async (contact) => {
   });
 };
 
+/**
+ * PASS CANCELLED MESSAGE
+ * Sent when an admin uses "Cancel Pass" on an approved guest who already
+ * received a pass. It tells the guest, politely and clearly, that the pass
+ * (and its QR code) is no longer valid.
+ *
+ * Same delivery rule as above: use the approved template when
+ * CHATBOX_PASS_CANCEL_TEMPLATE_NAME is set (two body variables:
+ * {{1}} = guest name, {{2}} = edition / event name), otherwise a normal text.
+ * Suggested template body (same wording as buildPassCancelledText):
+ *   "Dear {{1}}, we regret to inform you that your pass for {{2}} has been
+ *    cancelled. The QR code shared earlier is no longer valid and cannot be
+ *    used for entry. ..."
+ */
+const buildPassCancelledText = (name, editionName) => {
+  const firstName = String(name || "").trim() || "there";
+  const edition = String(editionName || "").trim() || "the event";
+
+  return [
+    `Dear ${firstName},`,
+    "",
+    `We regret to inform you that your pass for ${edition} has been cancelled. The QR code shared with you earlier is no longer valid and cannot be used for entry.`,
+    "",
+    "If you believe this was done in error, or if you have any questions, please get in touch with the City Toppers team and we will be glad to assist you.",
+    "",
+    "Warm regards,",
+    "Team City Toppers",
+  ].join("\n");
+};
+
+// Throws on failure - the caller decides that a failed message must not
+// undo the cancellation itself.
+const sendPassCancelledMessage = async (contact, editionName) => {
+  const templateName = String(
+    process.env.CHATBOX_PASS_CANCEL_TEMPLATE_NAME || ""
+  ).trim();
+
+  if (templateName) {
+    return whatsappService.sendTemplateMessage({
+      phone: contact.whatsappNumber,
+      templateName,
+      languageCode: process.env.CHATBOX_PASS_CANCEL_TEMPLATE_LANGUAGE || "en",
+      bodyParams: [
+        String(contact.fullName || "").trim() || "there",
+        String(editionName || "").trim() || "the event",
+      ],
+    });
+  }
+
+  return whatsappService.sendTextMessage({
+    phone: contact.whatsappNumber,
+    message: buildPassCancelledText(contact.fullName, editionName),
+  });
+};
+
 module.exports = {
   buildRejectionText,
   sendRejectionMessage,
+  buildPassCancelledText,
+  sendPassCancelledMessage,
 };

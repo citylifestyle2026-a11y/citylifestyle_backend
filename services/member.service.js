@@ -761,6 +761,61 @@ const createMember = async (body = {}, adminId = null) => {
 };
 
 // ================= DELETE (HARD) =================
+// ================= KEEP "IN GUEST LIST" IN SYNC =================
+// "In Guest List" on Member List comes from Member.movedTo. Deleting the
+// contact from Guest List used to leave movedTo behind, so the member kept
+// showing "In Guest List" (and never came back to "Not in Guest List").
+//
+// For the given members (by id and/or mobile): when NO live Guest List
+// contact is left for them, drop their movedTo entries for the running
+// editions so they show as "Not in Guest List" again and can be moved again.
+// Entries for ended / deleted editions stay (permanent history).
+const releaseMembersWithoutContact = async ({ memberIds = [], mobiles = [] } = {}) => {
+  const ids = memberIds.filter((id) => mongoose.Types.ObjectId.isValid(id));
+  const phones = [...new Set(mobiles.map((m) => String(m || "").trim()).filter(Boolean))];
+  if (!ids.length && !phones.length) return 0;
+
+  const members = await Member.find({
+    $or: [
+      ...(ids.length ? [{ _id: { $in: ids } }] : []),
+      ...(phones.length ? [{ mobile: { $in: phones } }] : []),
+    ],
+    "movedTo.0": { $exists: true },
+  })
+    .select("_id mobile")
+    .lean();
+  if (!members.length) return 0;
+
+  const memberObjectIds = members.map((m) => m._id);
+  const memberMobiles = members.flatMap((m) => [m.mobile, `91${m.mobile}`]);
+
+  // A contact still counts only if it is really in the Guest List.
+  const live = await Contact.find({
+    isDeleted: { $ne: true },
+    historyOnly: { $ne: true },
+    $or: [{ memberId: { $in: memberObjectIds } }, { whatsappNumber: { $in: memberMobiles } }],
+  })
+    .select("memberId whatsappNumber")
+    .lean();
+
+  const liveIds = new Set(live.map((c) => String(c.memberId || "")));
+  const liveMobiles = new Set(live.map((c) => String(c.whatsappNumber || "")));
+
+  const toRelease = members.filter(
+    (m) =>
+      !liveIds.has(String(m._id)) && !liveMobiles.has(m.mobile) && !liveMobiles.has(`91${m.mobile}`)
+  );
+  if (!toRelease.length) return 0;
+
+  const activeEventIds = await getActiveEventIds();
+  await Member.updateMany(
+    { _id: { $in: toRelease.map((m) => m._id) } },
+    { $pull: { movedTo: { eventId: { $in: activeEventIds } } } }
+  );
+
+  return toRelease.length;
+};
+
 const deleteMember = async (id) => {
   if (!mongoose.Types.ObjectId.isValid(id)) throw new AppError("Invalid Member ID", 400);
   const member = await Member.findByIdAndDelete(id);
@@ -774,6 +829,7 @@ module.exports = {
   getMemberProfessions,
   getMemberReferences,
   moveMembersToGuestList,
+  releaseMembersWithoutContact,
   createMember,
   updateMember,
   deleteMember,
