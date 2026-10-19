@@ -865,7 +865,14 @@ const cancelPassesOfContacts = async ({ ids }, adminId) => {
     const contact = byId.get(String(id));
 
     if (!contact) {
-      results.push({ id, name: "-", status: "failed", message: "Contact not found." });
+      // Say WHY it was not found (deleted / history-only / really missing)
+      // instead of a plain "Contact not found".
+      const raw = await Contact.findById(id).select("fullName isDeleted historyOnly").lean();
+      let message = "Contact not found. Refresh the Guest List and try again.";
+      if (raw?.isDeleted) message = "This guest was deleted. Refresh the Guest List.";
+      else if (raw?.historyOnly) message = "This is only an Event History record, not a Guest List contact.";
+      console.error(`Cancel pass: contact ${id} not usable (${raw ? "exists but excluded" : "missing in DB"}).`);
+      results.push({ id, name: raw?.fullName || "-", status: "failed", message });
       continue;
     }
 
