@@ -171,6 +171,10 @@ module.exports = upload;
 module.exports.designUpload = designUpload;
 module.exports.spreadsheetUpload = spreadsheetUpload;
 module.exports.largeImageUpload = largeImageUpload;
+// PUBLIC (no login) form photos: anyone can send these, and each file is held
+// in server memory while it is resized, so the limit is much lower than the
+// 100 MB used by logged-in admin forms. Phone photos are 2-6 MB.
+module.exports.publicPhotoUpload = buildUploadMiddleware(10 * 1024 * 1024); // 10 MB
 // Alias kept so existing imports of `upload.registrationPhotoUpload`
 // (bookingTicket.routes.js, publicRegistration.routes.js) keep working
 // unchanged — both names point at the exact same 100 MB middleware.

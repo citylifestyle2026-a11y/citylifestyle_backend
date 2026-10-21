@@ -65,8 +65,7 @@ const saveDuplicate = async (existing, data, files = {}, { source = "form", form
     throw error;
   }
 
-  try {
-    return await ContactDuplicate.create({
+  const payload = {
       fullName: data.fullName,
       whatsappNumber: String(data.whatsappNumber || "").trim(),
       companyName: data.companyName,
@@ -89,7 +88,48 @@ const saveDuplicate = async (existing, data, files = {}, { source = "form", form
       contactId: existing._id,
       source,
       formLinkId,
-    });
+  };
+
+  try {
+    // ONE row per guest: the same number submitted again (the same person
+    // pressing Submit twice, or someone spamming the form) updates that row
+    // instead of piling up thousands of rows. Latest details win, references
+    // are joined, and the older photo files are removed.
+    const previous = await ContactDuplicate.findOne({ contactId: existing._id });
+    if (previous) {
+      const oldFiles = [];
+      const pick = (next, old) => (clean(next) ? next : old);
+
+      for (const key of ["fullName", "companyName", "designation", "address", "area", "instagramId", "email",
+        "spouseName", "spouseMobile", "spouseInstagramId"]) {
+        previous[key] = pick(payload[key], previous[key]);
+      }
+      previous.whatsappNumber = payload.whatsappNumber || previous.whatsappNumber;
+      previous.relationship = payload.relationship || previous.relationship;
+      previous.companyCategory = payload.companyCategory || previous.companyCategory;
+      previous.professionCategory = payload.professionCategory || previous.professionCategory;
+      previous.references = joinReferences(previous.references, payload.references);
+
+      if (payload.profileImage) {
+        if (previous.profileImagePublicId) oldFiles.push(previous.profileImagePublicId);
+        previous.profileImage = payload.profileImage;
+        previous.profileImagePublicId = payload.profileImagePublicId;
+      }
+      if (payload.spouseProfileImage) {
+        if (previous.spouseProfileImagePublicId) oldFiles.push(previous.spouseProfileImagePublicId);
+        previous.spouseProfileImage = payload.spouseProfileImage;
+        previous.spouseProfileImagePublicId = payload.spouseProfileImagePublicId;
+      }
+      previous.submissionCount = (previous.submissionCount || 1) + 1;
+      previous.source = source;
+      previous.formLinkId = formLinkId || previous.formLinkId;
+
+      await previous.save();
+      for (const publicId of oldFiles) await deleteImage(publicId);
+      return previous;
+    }
+
+    return await ContactDuplicate.create(payload);
   } catch (error) {
     if (profile) await deleteImage(profile.publicId);
     if (spouse) await deleteImage(spouse.publicId);
@@ -345,7 +385,74 @@ const ignoreDuplicate = async (duplicateId) => {
   return { success: true, message: "Duplicate removed." };
 };
 
+// ================= BULK (for hundreds of duplicates) =================
+const BULK_LIMIT = 5000;
+
+// ids: explicit list, or all:true = every duplicate matching `search`.
+const collectIds = async ({ ids, all, search } = {}) => {
+  if (all) {
+    const text = clean(search);
+    const filter = {};
+    if (text) {
+      const rx = { $regex: escapeRegex(text), $options: "i" };
+      filter.$or = [{ fullName: rx }, { whatsappNumber: rx }, { companyName: rx }, { area: rx }];
+    }
+    const rows = await ContactDuplicate.find(filter).select("_id").limit(BULK_LIMIT).lean();
+    return rows.map((r) => String(r._id));
+  }
+  if (!Array.isArray(ids) || ids.length === 0) {
+    throw new AppError("Please select at least one duplicate.", 400);
+  }
+  return [...new Set(ids.map(String))]
+    .filter((id) => /^[a-f0-9]{24}$/i.test(id))
+    .slice(0, BULK_LIMIT);
+};
+
+// Fix many at once WITHOUT asking field by field: every field that differs
+// keeps the Guest List value (a longer name wins), empty fields are filled
+// from the form, references are joined, then Guest List + Contact Book are synced.
+const bulkFixDuplicates = async (body) => {
+  const ids = await collectIds(body);
+  let fixed = 0;
+  let synced = 0;
+  const failed = [];
+
+  for (const id of ids) {
+    try {
+      const res = await fixDuplicate(id, {});
+      fixed += 1;
+      if (res.data?.synced) synced += 1;
+    } catch (error) {
+      failed.push({ id, reason: error.message });
+    }
+  }
+
+  return {
+    success: true,
+    message: `${fixed} fixed${synced ? ` (${synced} also synced to Contact Book)` : ""}${
+      failed.length ? `, ${failed.length} failed` : ""
+    }.`,
+    data: { fixed, synced, failed: failed.length, errors: failed.slice(0, 5) },
+  };
+};
+
+const bulkIgnoreDuplicates = async (body) => {
+  const ids = await collectIds(body);
+  let removed = 0;
+  for (const id of ids) {
+    try {
+      await ignoreDuplicate(id);
+      removed += 1;
+    } catch (error) {
+      // already gone - nothing to do
+    }
+  }
+  return { success: true, message: `${removed} duplicate${removed === 1 ? "" : "s"} removed.`, data: { removed } };
+};
+
 module.exports = {
+  bulkFixDuplicates,
+  bulkIgnoreDuplicates,
   findGuestByNumber,
   saveDuplicate,
   captureIfDuplicate,

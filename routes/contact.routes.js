@@ -119,6 +119,9 @@ router.post("/delete-booking", protect, contactController.deleteBooking);
 // Duplicate tab: form submissions whose WhatsApp number is already in the
 // Guest List. Static paths, so they must stay above "/:id".
 router.get("/duplicates", protect, contactController.listDuplicates);
+// Bulk: body { ids: [...] } or { all: true, search }.
+router.post("/duplicates/bulk-fix", protect, contactController.bulkFixDuplicates);
+router.post("/duplicates/bulk-ignore", protect, contactController.bulkIgnoreDuplicates);
 router.get("/duplicates/:id/preview", protect, contactController.getDuplicatePreview);
 router.post("/duplicates/:id/fix", protect, contactController.fixDuplicate);
 router.delete("/duplicates/:id", protect, contactController.ignoreDuplicate);

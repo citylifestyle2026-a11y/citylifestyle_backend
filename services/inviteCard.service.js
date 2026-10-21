@@ -141,29 +141,17 @@ const resolveStyle = (saved = {}, override = {}) => {
 };
 
 // ---------- the card: design + name ----------
-// Returns a JPEG buffer (WhatsApp image headers accept JPG/PNG, not WebP).
-const generateCard = async (rawName, styleOverride = {}) => {
-  const name = String(rawName || "").trim() || "Guest";
-  const { design, saved } = await getDesignAndStyle();
-  const { width: W, height: H } = await sharp(design).metadata();
-  const style = resolveStyle(saved, styleOverride);
-  const n = cfg.NAME;
-
-  // Longer names get a smaller font so they stay on the card.
-  const over = Math.max(0, name.length - n.shrinkAfterChars);
-  const sizePct = Math.max(
-    Math.min(n.minFontSizePct, style.fontSizePct),
-    style.fontSizePct * (n.shrinkAfterChars / (n.shrinkAfterChars + over))
-  );
-  const fontSize = Math.max(8, Math.round((W * sizePct) / 100));
-  const boxWidth = Math.round((W * n.maxWidthPct) / 100);
-
-  const nameImage = await sharp({
+// Draws the name and cuts away the empty margin around the letters, so the
+// VISIBLE text can be centred exactly (a long name used to look pushed to one
+// side because of that margin).
+const renderName = async (text, color, fontSize, { width, wrap = "none" } = {}) => {
+  const input = await sharp({
     text: {
-      text: `<span foreground="${style.color}">${escapeMarkup(name)}</span>`,
+      text: `<span foreground="${color}">${escapeMarkup(text)}</span>`,
       font: `${cfg.FONT_FAMILY} ${fontSize}`,
       fontfile: cfg.FONT_FILE,
-      width: boxWidth,
+      ...(width ? { width } : {}),
+      wrap,
       align: "center",
       rgba: true,
       dpi: 72,
@@ -172,19 +160,76 @@ const generateCard = async (rawName, styleOverride = {}) => {
     .png()
     .toBuffer();
 
-  const meta = await sharp(nameImage).metadata();
+  try {
+    const { data, info } = await sharp(input)
+      .trim({ background: { r: 0, g: 0, b: 0, alpha: 0 }, threshold: 1 })
+      .png()
+      .toBuffer({ resolveWithObject: true });
+    return { buffer: data, width: info.width, height: info.height };
+  } catch {
+    const meta = await sharp(input).metadata();
+    return { buffer: input, width: meta.width, height: meta.height };
+  }
+};
+
+// Returns a JPEG buffer (WhatsApp image headers accept JPG/PNG, not WebP).
+//
+// The name is ALWAYS centred on the spot the admin chose (style.centerXPct).
+// Fitting a long name:
+//   1. fits on one line            -> written at the full chosen size
+//   2. too wide but has spaces     -> wrapped onto 2-3 centred lines, still full size
+//   3. too wide and a single word  -> shrunk only as much as needed to fit
+const generateCard = async (rawName, styleOverride = {}) => {
+  const name = String(rawName || "").replace(/\s+/g, " ").trim() || "Guest";
+  const { design, saved } = await getDesignAndStyle();
+  const { width: W, height: H } = await sharp(design).metadata();
+  const style = resolveStyle(saved, styleOverride);
+  const n = cfg.NAME;
+
+  const baseSize = Math.max(8, Math.round((W * style.fontSizePct) / 100));
+  const maxWidth = Math.round((W * n.maxWidthPct) / 100);
+
+  let text = await renderName(name, style.color, baseSize);
+
+  if (text.width > maxWidth) {
+    let fitted = false;
+
+    if (/\s/.test(name)) {
+      const wrapped = await renderName(name, style.color, baseSize, {
+        width: maxWidth,
+        wrap: "word",
+      });
+      if (wrapped.width <= maxWidth && wrapped.height <= baseSize * 1.5 * 3) {
+        text = wrapped;
+        fitted = true;
+      }
+    }
+
+    if (!fitted) {
+      let size = baseSize;
+      for (let i = 0; i < 4 && text.width > maxWidth; i += 1) {
+        size = Math.max(8, Math.floor(size * Math.min(0.98, maxWidth / text.width)));
+        text = await renderName(name, style.color, size);
+        if (size <= 8) break;
+      }
+    }
+  }
+
+  // The admin's spot is the CENTRE of the name: horizontally on centerXPct,
+  // vertically in the middle of a normal one-line box that starts at topPct.
+  const idealBoxHeight = baseSize * 1.5;
   const left = Math.min(
-    Math.max(0, W - meta.width),
-    Math.max(0, Math.round((W * style.centerXPct) / 100 - meta.width / 2))
+    Math.max(0, W - text.width),
+    Math.max(0, Math.round((W * style.centerXPct) / 100 - text.width / 2))
   );
   const top = Math.min(
-    Math.max(0, H - meta.height),
-    Math.max(0, Math.round((H * style.topPct) / 100))
+    Math.max(0, H - text.height),
+    Math.max(0, Math.round((H * style.topPct) / 100 + (idealBoxHeight - text.height) / 2))
   );
 
   return sharp(design)
     .flatten({ background: "#ffffff" })
-    .composite([{ input: nameImage, left, top }])
+    .composite([{ input: text.buffer, left, top }])
     .jpeg({ quality: 90 })
     .toBuffer();
 };
@@ -240,6 +285,9 @@ const saveDesign = async (file, adminId) => {
         width: info.width,
         height: info.height,
         originalName: String(file.originalname || "").slice(0, 120),
+        // A different design needs the name somewhere else: start from the
+        // defaults and let the admin click the spot (Invitation Cards page).
+        nameStyle: { centerXPct: null, topPct: null, fontSizePct: null, color: null },
         updatedBy: adminId || undefined,
       },
     },

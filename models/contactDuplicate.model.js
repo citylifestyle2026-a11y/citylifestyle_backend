@@ -39,6 +39,9 @@ const contactDuplicateSchema = new mongoose.Schema(
     // The Guest List row that already has this number.
     contactId: { type: mongoose.Schema.Types.ObjectId, ref: "Contact", required: true },
 
+    // How many times this number was submitted (one row per guest, latest data wins).
+    submissionCount: { type: Number, default: 1 },
+
     // "form" = open public form, "link" = Share Form Link.
     source: { type: String, enum: ["form", "link"], default: "form" },
     formLinkId: { type: mongoose.Schema.Types.ObjectId, ref: "FormLink", default: null },

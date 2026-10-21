@@ -213,6 +213,22 @@ const fixDuplicate = async (req, res, next) => {
   }
 };
 
+const bulkFixDuplicates = async (req, res, next) => {
+  try {
+    return res.status(200).json(await duplicateService().bulkFixDuplicates(req.body || {}));
+  } catch (error) {
+    next(error);
+  }
+};
+
+const bulkIgnoreDuplicates = async (req, res, next) => {
+  try {
+    return res.status(200).json(await duplicateService().bulkIgnoreDuplicates(req.body || {}));
+  } catch (error) {
+    next(error);
+  }
+};
+
 const ignoreDuplicate = async (req, res, next) => {
   try {
     return res.status(200).json(await duplicateService().ignoreDuplicate(req.params.id));
@@ -340,6 +356,8 @@ module.exports = {
   getDuplicatePreview,
   fixDuplicate,
   ignoreDuplicate,
+  bulkFixDuplicates,
+  bulkIgnoreDuplicates,
   getMergePreview,
   cancelPass,
   sendPass,

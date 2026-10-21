@@ -19,7 +19,7 @@ const {
 // form; the only differences are: no login, createdBy is empty, the response
 // never returns the saved contact, and submissions are rate-limited.
 
-const contactUpload = upload.largeImageUpload.fields([
+const contactUpload = upload.publicPhotoUpload.fields([
   { name: "profileImage", maxCount: 1 },
   { name: "spouseProfileImage", maxCount: 1 },
 ]);
@@ -58,10 +58,23 @@ router.get("/link/:token", async (req, res, next) => {
   }
 });
 
-const normalLimit = publicRateLimit({ windowMs: 60 * 60 * 1000, max: 10 });
+// Per IP per hour. Many people can share ONE IP (venue / office Wi-Fi, mobile
+// network), so the old value of 10 would block real guests. Change without a
+// code edit: PUBLIC_FORM_LIMIT_PER_HOUR / PUBLIC_FORM_LINK_LIMIT_PER_HOUR in .env.
+const envNumber = (name, fallback) => {
+  const n = parseInt(process.env[name], 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+};
+const normalLimit = publicRateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: envNumber("PUBLIC_FORM_LIMIT_PER_HOUR", 100),
+});
 // One person may fill the form for several people from the same phone, so a
 // link (whose quantity is the real limit) gets a higher per-IP allowance.
-const linkLimit = publicRateLimit({ windowMs: 60 * 60 * 1000, max: 200 });
+const linkLimit = publicRateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: envNumber("PUBLIC_FORM_LINK_LIMIT_PER_HOUR", 300),
+});
 const rateLimit = (req, res, next) =>
   (req.query.link ? linkLimit : normalLimit)(req, res, next);
 
@@ -91,9 +104,23 @@ router.post(
 
         // Public submissions wait for an admin to approve them in Contact List.
         if (!duplicate) {
-          await contactService.createContact(req.body, null, req.files, {
-            approvalStatus: "pending",
-          });
+          try {
+            await contactService.createContact(req.body, null, req.files, {
+              approvalStatus: "pending",
+            });
+          } catch (error) {
+            // Two forms with the SAME new number sent at the same moment: the
+            // second one lost the race. It is a duplicate now, so park it in
+            // the Duplicate tab instead of showing the person an error.
+            const lostRace =
+              error?.code === 11000 || /already exists/i.test(error?.message || "");
+            const parked = lostRace
+              ? await contactDuplicateService.captureIfDuplicate(req.body, req.files, {
+                  source: "form",
+                })
+              : null;
+            if (!parked) throw error;
+          }
         }
       }
 
