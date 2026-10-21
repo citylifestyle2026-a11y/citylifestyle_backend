@@ -55,7 +55,11 @@ const escapeRegex = (text) => String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"
 
 // Invisible / odd characters that can hide inside imported text
 // (zero-width space, BOM, non-breaking space ...).
-const INVISIBLE = "\\u200B-\\u200D\\u2060\\uFEFF";
+// NOTE: these are the REAL characters (not the text "\u200B"): MongoDB runs
+// regexes with PCRE, which does not understand \uXXXX and rejects the whole
+// query ("PCRE does not support \L, \l, \N{name}, \U, or \u"), which made
+// every Reference filter fail with "Failed to load contacts".
+const INVISIBLE = "\u200B\u200C\u200D\u2060\uFEFF";
 const stripInvisible = (text) =>
   String(text || "")
     .replace(/[\u200B-\u200D\u2060\uFEFF]/g, "")

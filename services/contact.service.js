@@ -2071,8 +2071,11 @@ const deleteContact = async (id, adminId) => {
 const getUniqueReferences = async (query = {}) => {
   const search = String(query.search || "").trim().toLowerCase();
 
+  // Same base filter as the Guest List itself (history-only records from
+  // Entry Report are never listed), so every reference offered in the filter
+  // dropdown really belongs to at least one guest that can be shown.
   const contacts = await Contact.find(
-    { isDeleted: { $ne: true } },
+    { isDeleted: { $ne: true }, historyOnly: { $ne: true } },
     { references: 1 }
   ).lean();
 
