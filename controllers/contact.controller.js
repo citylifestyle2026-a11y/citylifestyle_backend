@@ -160,6 +160,67 @@ const bulkUpdateStatus = async (req, res, next) => {
   }
 };
 
+// ================= MERGE WITH CONTACT BOOK =================
+const mergeWithContactBook = async (req, res, next) => {
+  try {
+    const result = await require("../services/contactMerge.service").mergeContactWithMember(
+      req.params.id,
+      req.body?.choices || {}
+    );
+    return res.status(200).json(result);
+  } catch (error) {
+    next(error);
+  }
+};
+
+// What the Merge & Sync popup shows (both versions of every field).
+const getMergePreview = async (req, res, next) => {
+  try {
+    const result = await require("../services/contactMerge.service").getMergePreview(
+      req.params.id
+    );
+    return res.status(200).json(result);
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ================= DUPLICATE TAB (FORM SUBMISSIONS WITH A KNOWN NUMBER) =================
+const duplicateService = () => require("../services/contactDuplicate.service");
+
+const listDuplicates = async (req, res, next) => {
+  try {
+    return res.status(200).json(await duplicateService().listDuplicates(req.query));
+  } catch (error) {
+    next(error);
+  }
+};
+
+const getDuplicatePreview = async (req, res, next) => {
+  try {
+    return res.status(200).json(await duplicateService().getDuplicatePreview(req.params.id));
+  } catch (error) {
+    next(error);
+  }
+};
+
+const fixDuplicate = async (req, res, next) => {
+  try {
+    const result = await duplicateService().fixDuplicate(req.params.id, req.body?.choices || {});
+    return res.status(200).json(result);
+  } catch (error) {
+    next(error);
+  }
+};
+
+const ignoreDuplicate = async (req, res, next) => {
+  try {
+    return res.status(200).json(await duplicateService().ignoreDuplicate(req.params.id));
+  } catch (error) {
+    next(error);
+  }
+};
+
 // ================= CANCEL PASS (APPROVED GUEST) =================
 const cancelPass = async (req, res, next) => {
   try {
@@ -274,6 +335,12 @@ const importContactsCsv = async (req, res, next) => {
 module.exports = {
   importContactsCsv,
   bulkUpdateStatus,
+  mergeWithContactBook,
+  listDuplicates,
+  getDuplicatePreview,
+  fixDuplicate,
+  ignoreDuplicate,
+  getMergePreview,
   cancelPass,
   sendPass,
   resendPass,

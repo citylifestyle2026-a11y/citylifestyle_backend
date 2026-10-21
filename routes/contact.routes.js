@@ -116,6 +116,17 @@ router.post("/cancel-pass", protect, contactController.cancelPass);
 // Delete the booking (pass) made by Send Pass. Body: { ids: [...] }.
 router.post("/delete-booking", protect, contactController.deleteBooking);
 
+// Duplicate tab: form submissions whose WhatsApp number is already in the
+// Guest List. Static paths, so they must stay above "/:id".
+router.get("/duplicates", protect, contactController.listDuplicates);
+router.get("/duplicates/:id/preview", protect, contactController.getDuplicatePreview);
+router.post("/duplicates/:id/fix", protect, contactController.fixDuplicate);
+router.delete("/duplicates/:id", protect, contactController.ignoreDuplicate);
+
+// Merge a Guest List row with the Contact Book member that has the same number.
+router.get("/:id/merge-preview", protect, contactController.getMergePreview);
+router.post("/:id/merge-member", protect, contactController.mergeWithContactBook);
+
 // Guest count of a contact's already-sent pass (shown in Edit Contact).
 router.get("/:id/pass", protect, contactController.getContactPass);
 router.put("/:id/pass", protect, contactController.updateContactPass);

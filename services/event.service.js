@@ -8,6 +8,7 @@ const Contact = require("../models/contact.model");
 const uploadImage = require("../utils/localUpload.util");
 const deleteLocalFile = require("../utils/deleteLocalFile");
 const generateEventCode = require("../utils/generateEventCode");
+const { cleanupAfterEventDelete } = require("./eventCleanup.service");
 
 // ================= EVENT EXPIRY STATUS SYNC (NO CRON) =================
 // Persists the derived expiry status onto the Event document itself,
@@ -274,6 +275,10 @@ exports.updateEvent = async (id, data, file) => {
 //     - Event History rows are KEPT. The event's details (title, edition,
 //       dates, venue) are copied onto each row first (eventSnapshot), so
 //       the history keeps showing them after the Event is gone.
+//     - Contact Book (Member) rows are KEPT, but the event is removed from
+//       their `movedTo` (so "Past: <edition>" disappears).
+//     - Form Links are KEPT untouched.
+//     - The Guest List is cleared - see services/eventCleanup.service.js.
 //   Server disk (after the transaction has committed, best-effort):
 //     - every ticket's QR image, ticket PDF and attendee/registration photo
 //     - the event's banner image
@@ -312,6 +317,7 @@ exports.deleteEvent = async (id, adminId) => {
   // ---- 2. database cascade, all-or-nothing ----
   const session = await mongoose.startSession();
   let historyRowsKept = 0;
+  let cleanup = { filesToDelete: [] };
 
   try {
     session.startTransaction();
@@ -344,6 +350,13 @@ exports.deleteEvent = async (id, adminId) => {
 
     await Event.deleteOne({ _id: id }, { session });
 
+    // Guest List cleared + Contact Book "Past: ..." tag removed.
+    // Contact Book, Event History and Form Links themselves are kept.
+    cleanup = await cleanupAfterEventDelete({
+      eventIds: [event._id],
+      session,
+    });
+
     await session.commitTransaction();
   } catch (error) {
     if (session.inTransaction()) {
@@ -360,6 +373,9 @@ exports.deleteEvent = async (id, adminId) => {
   try {
     // Never delete a file another record still points to (safety net —
     // normally every file belongs to exactly one ticket / event).
+    // Photos of the Guest List contacts that were removed.
+    for (const publicId of cleanup.filesToDelete) addFile(publicId);
+
     const ids = [...filesToDelete];
     if (ids.length > 0) {
       const [stillUsedByTickets, stillUsedByEvents] = await Promise.all([
@@ -395,7 +411,13 @@ exports.deleteEvent = async (id, adminId) => {
   return {
     success: true,
     message: "Event deleted successfully.",
-    data: { filesRemoved, historyRowsKept },
+    data: {
+      filesRemoved,
+      historyRowsKept,
+      guestListRemoved: cleanup.contactsRemoved || 0,
+      guestListHidden: cleanup.contactsHidden || 0,
+      contactBookCleared: cleanup.membersCleared || 0,
+    },
   };
 };
 

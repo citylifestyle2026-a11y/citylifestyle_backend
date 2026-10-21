@@ -38,6 +38,7 @@ const FOLDER_MAP = {
   "event-management/register-user": "register-user",
   "event-management/qr-codes": "qr-codes",
   "event-management/ticket-pdfs": "ticket-pdfs",
+  "event-management/invite-cards": "invite-cards",
 };
 
 const KNOWN_SUBFOLDERS = Object.values(FOLDER_MAP);

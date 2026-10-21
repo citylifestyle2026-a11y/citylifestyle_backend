@@ -5,9 +5,10 @@
 const InviteGuest = require("../models/inviteGuest.model");
 const AppError = require("../utils/AppError");
 const { normalizeMobileNumber } = require("../utils/normalizeMobileNumber");
-const { uploadToLocal } = require("../utils/localUpload.util");
+const uploadToLocal = require("../utils/localUpload.util");
 const whatsappService = require("./whatsapp.service");
-const { generateCard } = require("./inviteCard.service");
+const cardService = require("./inviteCard.service");
+const { generateCard } = cardService;
 
 const NAME_HEADERS = ["name", "fullname", "guestname"];
 const MOBILE_HEADERS = ["mobile", "mobilenumber", "whatsapp", "whatsappnumber", "phone", "number"];
@@ -212,11 +213,16 @@ const getTemplate = () => {
   };
 };
 
-const sendOne = async (guest, template) => {
-  const png = await generateCard(guest.name);
+// The card image already carries the event details, so the WhatsApp template
+// body is a plain message with ONE variable:  {{1}} = guest name.
+const buildBodyParams = (guest) => [guest.name];
 
-  const saved = await uploadToLocal(png, "event-management/invite-cards", "image", {
-    format: "png",
+const sendOne = async (guest, template) => {
+  // The admin's uploaded design with this guest's name written on it (JPG).
+  const jpg = await generateCard(guest.name);
+
+  const saved = await uploadToLocal(jpg, "event-management/invite-cards", "image", {
+    format: "jpg",
     public_id: `invite-${guest._id}-${Date.now()}`,
   });
 
@@ -225,7 +231,7 @@ const sendOne = async (guest, template) => {
     templateName: template.name,
     languageCode: template.language,
     imageUrl: saved.url,
-    bodyParams: [guest.name],
+    bodyParams: buildBodyParams(guest),
   });
 
   return saved;
@@ -316,4 +322,17 @@ const remove = async (ids) => {
   return { success: true, message: `${r.deletedCount} deleted.`, data: { deleted: r.deletedCount } };
 };
 
-module.exports = { importCsv, create, update, list, send, resetStuck, remove, generateCard };
+module.exports = {
+  importCsv,
+  create,
+  update,
+  list,
+  send,
+  resetStuck,
+  remove,
+  generateCard,
+  designInfo: cardService.designInfo,
+  saveDesign: cardService.saveDesign,
+  saveNameStyle: cardService.saveNameStyle,
+  removeDesign: cardService.removeDesign,
+};

@@ -6,6 +6,8 @@
 const fs = require("fs");
 const sharp = require("sharp");
 const cfg = require("../config/inviteDesign");
+const InviteDesign = require("../models/inviteDesign.model");
+const AppError = require("../utils/AppError");
 
 const escapeMarkup = (value) =>
   String(value)
@@ -81,7 +83,8 @@ const buildPlaceholderDesign = async () => {
     .toBuffer();
 };
 
-const loadDesign = async () => {
+// ---------- the design: uploaded by the admin (MongoDB) -> file -> placeholder ----------
+const loadFallbackDesign = async () => {
   if (fs.existsSync(cfg.DESIGN_FILE)) {
     return sharp(cfg.DESIGN_FILE).rotate().png().toBuffer();
   }
@@ -89,41 +92,75 @@ const loadDesign = async () => {
 };
 
 // Cache the (read-only) design between cards so sending to hundreds of
-// guests does not re-read / re-draw it every time.
-let cachedDesign = null;
-let cachedKey = "";
+// guests does not re-read / re-draw it every time. One tiny query per card
+// checks `updatedAt`, so a new upload is picked up immediately.
+let cache = { key: "", design: null };
 
-const getDesign = async () => {
-  const exists = fs.existsSync(cfg.DESIGN_FILE);
-  const key = exists ? `${cfg.DESIGN_FILE}:${fs.statSync(cfg.DESIGN_FILE).mtimeMs}` : "placeholder";
+const getDesignAndStyle = async () => {
+  const meta = await InviteDesign.findOne({ key: "default" })
+    .select("updatedAt nameStyle width height image")
+    .lean();
 
-  if (!cachedDesign || cachedKey !== key) {
-    cachedDesign = await loadDesign();
-    cachedKey = key;
+  const hasUpload = Boolean(meta && meta.image && meta.image.length);
+  const key = hasUpload ? `db:${new Date(meta.updatedAt).getTime()}` : "fallback";
+
+  if (!cache.design || cache.key !== key) {
+    cache = {
+      key,
+      design: hasUpload ? Buffer.from(meta.image.buffer || meta.image) : await loadFallbackDesign(),
+    };
   }
-  return cachedDesign;
+
+  return { design: cache.design, saved: (meta && meta.nameStyle) || {}, hasUpload };
+};
+
+const clamp = (value, min, max, fallback) => {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
+};
+
+const HEX = /^#[0-9a-f]{6}$/i;
+
+// default < saved by admin < temporary override (live preview sliders)
+const resolveStyle = (saved = {}, override = {}) => {
+  const base = cfg.NAME;
+  const pick = (field) =>
+    override[field] !== undefined && override[field] !== null && override[field] !== ""
+      ? override[field]
+      : saved[field] !== undefined && saved[field] !== null
+      ? saved[field]
+      : base[field];
+
+  const color = String(pick("color"));
+  return {
+    centerXPct: clamp(pick("centerXPct"), 0, 100, base.centerXPct),
+    topPct: clamp(pick("topPct"), 0, 100, base.topPct),
+    fontSizePct: clamp(pick("fontSizePct"), 1, 15, base.fontSizePct),
+    color: HEX.test(color) ? color : base.color,
+  };
 };
 
 // ---------- the card: design + name ----------
-// Returns a PNG buffer (WhatsApp image headers accept JPG/PNG, not WebP).
-const generateCard = async (rawName) => {
+// Returns a JPEG buffer (WhatsApp image headers accept JPG/PNG, not WebP).
+const generateCard = async (rawName, styleOverride = {}) => {
   const name = String(rawName || "").trim() || "Guest";
-  const design = await getDesign();
+  const { design, saved } = await getDesignAndStyle();
   const { width: W, height: H } = await sharp(design).metadata();
+  const style = resolveStyle(saved, styleOverride);
   const n = cfg.NAME;
 
   // Longer names get a smaller font so they stay on the card.
   const over = Math.max(0, name.length - n.shrinkAfterChars);
   const sizePct = Math.max(
-    n.minFontSizePct,
-    n.fontSizePct * (n.shrinkAfterChars / (n.shrinkAfterChars + over))
+    Math.min(n.minFontSizePct, style.fontSizePct),
+    style.fontSizePct * (n.shrinkAfterChars / (n.shrinkAfterChars + over))
   );
-  const fontSize = Math.round((W * sizePct) / 100);
+  const fontSize = Math.max(8, Math.round((W * sizePct) / 100));
   const boxWidth = Math.round((W * n.maxWidthPct) / 100);
 
   const nameImage = await sharp({
     text: {
-      text: `<span foreground="${n.color}">${escapeMarkup(name)}</span>`,
+      text: `<span foreground="${style.color}">${escapeMarkup(name)}</span>`,
       font: `${cfg.FONT_FAMILY} ${fontSize}`,
       fontfile: cfg.FONT_FILE,
       width: boxWidth,
@@ -136,16 +173,100 @@ const generateCard = async (rawName) => {
     .toBuffer();
 
   const meta = await sharp(nameImage).metadata();
-  const left = Math.max(
-    0,
-    Math.round((W * n.centerXPct) / 100 - meta.width / 2)
+  const left = Math.min(
+    Math.max(0, W - meta.width),
+    Math.max(0, Math.round((W * style.centerXPct) / 100 - meta.width / 2))
   );
-  const top = Math.max(0, Math.round((H * n.topPct) / 100));
+  const top = Math.min(
+    Math.max(0, H - meta.height),
+    Math.max(0, Math.round((H * style.topPct) / 100))
+  );
 
   return sharp(design)
+    .flatten({ background: "#ffffff" })
     .composite([{ input: nameImage, left, top }])
-    .png()
+    .jpeg({ quality: 90 })
     .toBuffer();
 };
 
-module.exports = { generateCard };
+// ---------- admin: design upload / position ----------
+const designInfo = async () => {
+  const doc = await InviteDesign.findOne({ key: "default" })
+    .select("width height originalName updatedAt nameStyle image")
+    .lean();
+  const hasDesign = Boolean(doc && doc.image && doc.image.length);
+
+  return {
+    hasDesign,
+    width: hasDesign ? doc.width : 0,
+    height: hasDesign ? doc.height : 0,
+    originalName: hasDesign ? doc.originalName : "",
+    updatedAt: hasDesign ? doc.updatedAt : null,
+    nameStyle: resolveStyle((doc && doc.nameStyle) || {}),
+    defaults: resolveStyle({}),
+  };
+};
+
+// multer file -> normalised JPEG stored in MongoDB.
+const saveDesign = async (file, adminId) => {
+  if (!file || !Buffer.isBuffer(file.buffer)) {
+    throw new AppError("Please choose the invitation card image (JPG or PNG).", 400);
+  }
+
+  let jpeg;
+  let info;
+  try {
+    const out = await sharp(file.buffer)
+      .rotate() // honour the phone's EXIF orientation
+      .resize({ width: 2400, height: 2400, fit: "inside", withoutEnlargement: true })
+      .flatten({ background: "#ffffff" })
+      .jpeg({ quality: 92 })
+      .toBuffer({ resolveWithObject: true });
+    jpeg = out.data;
+    info = out.info;
+  } catch {
+    throw new AppError("This file is not a readable image. Please upload a JPG or PNG.", 400);
+  }
+
+  if (info.width < 300 || info.height < 300) {
+    throw new AppError("The image is too small. Use at least 300 x 300 pixels.", 400);
+  }
+
+  await InviteDesign.findOneAndUpdate(
+    { key: "default" },
+    {
+      $set: {
+        image: jpeg,
+        width: info.width,
+        height: info.height,
+        originalName: String(file.originalname || "").slice(0, 120),
+        updatedBy: adminId || undefined,
+      },
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
+  cache = { key: "", design: null };
+  return designInfo();
+};
+
+const saveNameStyle = async (body = {}, adminId) => {
+  const style = resolveStyle({}, body);
+  await InviteDesign.findOneAndUpdate(
+    { key: "default" },
+    { $set: { nameStyle: style, updatedBy: adminId || undefined } },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
+  return designInfo();
+};
+
+// Back to the built-in placeholder card.
+const removeDesign = async () => {
+  await InviteDesign.findOneAndUpdate(
+    { key: "default" },
+    { $set: { image: null, width: 0, height: 0, originalName: "" } }
+  );
+  cache = { key: "", design: null };
+  return designInfo();
+};
+
+module.exports = { generateCard, designInfo, saveDesign, saveNameStyle, removeDesign };

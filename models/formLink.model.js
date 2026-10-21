@@ -11,7 +11,7 @@ const mongoose = require("mongoose");
  * target:
  *   "contact" -> submissions land in Contact List (pending approval, exactly
  *                like the normal public form).
- *   "member"  -> submissions land in Member List.
+ *   "member"  -> submissions land in Contact Book.
  */
 const formLinkSchema = new mongoose.Schema(
   {

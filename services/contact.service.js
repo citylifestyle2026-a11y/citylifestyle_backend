@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 const Contact = require("../models/contact.model")
+const ContactDuplicate = require("../models/contactDuplicate.model");
 const CompanyCategory = require("../models/companycategory.model");
 const AppError = require("../utils/AppError");
 const { normalizeMobileSearchTerm } = require("../utils/normalizeMobileNumber");
@@ -601,6 +602,8 @@ const getApprovalStatusCounts = async (editionEventId = null) => {
   });
   counts.rejected = Math.max(0, counts.rejected - counts.passCancelled);
   counts.all = counts.pending + counts.approved + counts.rejected + counts.passCancelled;
+  // Form submissions whose number is already in the Guest List (Duplicate tab).
+  counts.duplicate = await ContactDuplicate.countDocuments({});
 
   return counts;
 };
@@ -1671,10 +1674,35 @@ const getAllContacts = async (query) => {
 
   const statusCounts = await getApprovalStatusCounts(query.editionEventId);
 
+  // Which of these guests are also in the Contact Book (same WhatsApp number)?
+  // Powers the "Merge with Contact Book" button on a Guest List row.
+  const rows = contacts.map((c) => (typeof c.toObject === "function" ? c.toObject() : c));
+  try {
+    const { normalizeMobileNumber } = require("../utils/normalizeMobileNumber");
+    const Member = require("../models/member.model");
+    const locals = [
+      ...new Set(
+        rows.map((r) => (normalizeMobileNumber(r.whatsappNumber) || "").slice(2)).filter(Boolean)
+      ),
+    ];
+    const members = locals.length
+      ? await Member.find({ mobile: { $in: locals }, mobileStatus: "valid" })
+          .select("name mobile")
+          .lean()
+      : [];
+    const byMobile = new Map(members.map((m) => [m.mobile, m]));
+    rows.forEach((r) => {
+      const m = byMobile.get((normalizeMobileNumber(r.whatsappNumber) || "").slice(2));
+      r.memberMatch = m ? { _id: m._id, name: m.name } : null;
+    });
+  } catch (error) {
+    console.error("Could not check Contact Book matches:", error.message);
+  }
+
   return {
     success: true,
     message: "Contacts fetched successfully",
-    data: contacts,
+    data: rows,
     statusCounts,
     pagination: {
       total,

@@ -6,6 +6,8 @@ const publicRateLimit = require("../middlewares/publicRateLimit.middleware");
 const CompanyCategory = require("../models/companycategory.model");
 const contactService = require("../services/contact.service");
 const formLinkService = require("../services/formLink.service");
+const contactDuplicateService = require("../services/contactDuplicate.service");
+const { sendRegistrationAck } = require("../services/registrationAck.service");
 const {
   parseContactFormData,
   createContactValidation,
@@ -78,15 +80,34 @@ router.post(
         // Counts one place on the link, then saves in Contact List / Member List.
         await formLinkService.submitThroughLink(req.formLink, req.body, req.files);
       } else {
+        // A number that is already in the Guest List is parked in the
+        // Guest List "Duplicate" tab (no new row, no pass) - the person
+        // still just sees the normal thank-you message.
+        const duplicate = await contactDuplicateService.captureIfDuplicate(
+          req.body,
+          req.files,
+          { source: "form" }
+        );
+
         // Public submissions wait for an admin to approve them in Contact List.
-        await contactService.createContact(req.body, null, req.files, {
-          approvalStatus: "pending",
-        });
+        if (!duplicate) {
+          await contactService.createContact(req.body, null, req.files, {
+            approvalStatus: "pending",
+          });
+        }
       }
+
+      // "Registration received" WhatsApp message. Fire-and-forget: it never
+      // delays or fails the form (errors are logged inside the service).
+      sendRegistrationAck({
+        name: req.body.fullName,
+        phone: req.body.whatsappNumber,
+      });
 
       return res.status(201).json({
         success: true,
-        message: "Thank you! Your details have been submitted.",
+        message:
+          "Thank you! Your details have been received. Our team will review them and inform you whether your participation in Parv is confirmed.",
       });
     } catch (error) {
       next(error);

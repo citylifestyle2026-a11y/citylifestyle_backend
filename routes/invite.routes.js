@@ -11,6 +11,13 @@ router.use(protect, authorize("admin"));
 
 router.get("/", controller.list);
 router.get("/preview", controller.preview);
+
+// Card design: upload the JPG/PNG once, set where the name goes.
+router.get("/design", controller.designInfo);
+router.post("/design", upload.designUpload.single("design"), controller.uploadDesign);
+router.put("/design/style", controller.saveNameStyle);
+router.delete("/design", controller.removeDesign);
+
 router.post("/", controller.create);
 router.put("/:id", controller.update);
 router.post("/import-csv", upload.csvUpload.single("file"), controller.importCsv);

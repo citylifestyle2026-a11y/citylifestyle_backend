@@ -1,14 +1,17 @@
 // services/formLink.service.js
 //
-// "Share Form Link": the admin enters a Name and a Quantity (from Contact List
-// or Member List) and gets a link to the public form that accepts exactly that
+// "Share Form Link": the admin enters a Name and a Quantity and gets a link to the public form that accepts exactly that
 // many submissions. Each person's Reference is set to the Name automatically.
 const crypto = require("crypto");
 const FormLink = require("../models/formLink.model");
 const CompanyCategory = require("../models/companycategory.model");
 const AppError = require("../utils/AppError");
+const Contact = require("../models/contact.model");
+const Member = require("../models/member.model");
+const { normalizeMobileNumber } = require("../utils/normalizeMobileNumber");
 const contactService = require("./contact.service");
 const memberService = require("./member.service");
+const contactDuplicateService = require("./contactDuplicate.service");
 
 const MAX_QUANTITY = 1000;
 const TARGETS = ["contact", "member"];
@@ -111,7 +114,7 @@ const listFormLinks = async ({
 };
 
 // Edit a link: name, quantity (never below what was already used), where the
-// people go (Guest List / Member List) and open / closed.
+// people go (Guest List / Contact Book) and open / closed.
 // A new name is used for the people who submit AFTER the edit; people who
 // already submitted keep the reference they were saved with.
 const updateFormLink = async (id, body = {}) => {
@@ -236,8 +239,8 @@ const releaseSlot = async (linkId) => {
   await FormLink.updateOne({ _id: linkId, usedCount: { $gt: 0 } }, { $inc: { usedCount: -1 } });
 };
 
-// Public-form fields -> Member fields (Member List has no photos).
-const saveAsMember = async (data, link) => {
+// Public-form fields -> Member fields.
+const saveAsMember = async (data, link, files = null) => {
   const categoryName = async (id) => {
     if (!id) return "";
     const category = await CompanyCategory.findById(id).select("name").lean();
@@ -265,24 +268,81 @@ const saveAsMember = async (data, link) => {
       references: [link.name],
       source: "Form Link",
     },
-    link.createdBy || null
+    link.createdBy || null,
+    files
   );
 };
 
+// Every number spelling that could already be stored: "9876543210",
+// "919876543210" and what was typed.
+const numberVariants = (value) => {
+  const raw = String(value || "").trim();
+  const canonical = normalizeMobileNumber(raw);
+  return [...new Set([raw, canonical, canonical ? canonical.slice(2) : null].filter(Boolean))];
+};
+
 // Handles one public submission that came through a link.
+//
+// The person is saved in BOTH lists:
+//   - Guest List (Contact, waits for approval). If this WhatsApp number is
+//     already in the Guest List the submission is refused with
+//     "already exists" - this is the ONLY error a person gets for a repeated
+//     number, and it does not use up a place on the link.
+//   - Contact Book (Member). If the number is already in the Contact Book
+//     nothing is added there and NO error is shown - the person still goes
+//     to the Guest List. A problem while saving the Contact Book never stops
+//     the Guest List entry (it is only logged).
 const submitThroughLink = async (link, data, files) => {
+  const variants = numberVariants(data.whatsappNumber);
+
+  // A number that is already in the Guest List is NOT refused: the submission
+  // is saved in the Guest List "Duplicate" tab (it uses one place on the link,
+  // creates no guest row / pass) and the admin fixes + syncs it from there.
+  const alreadyGuest = variants.length
+    ? await Contact.findOne({
+        isDeleted: { $ne: true },
+        historyOnly: { $ne: true },
+        whatsappNumber: { $in: variants },
+      })
+        .select("_id")
+        .lean()
+    : null;
+
   await reserveSlot(link._id);
 
-  try {
-    if (link.target === "member") {
-      await saveAsMember(data, link);
-    } else {
-      // Same as the normal public form: waits for approval in Contact List.
-      await contactService.createContact(data, null, files, { approvalStatus: "pending" });
+  if (alreadyGuest) {
+    try {
+      await contactDuplicateService.saveDuplicate(alreadyGuest, data, files, {
+        source: "link",
+        formLinkId: link._id,
+      });
+    } catch (error) {
+      await releaseSlot(link._id);
+      throw error;
     }
+    return;
+  }
+
+  try {
+    // Guest List first: it is the one that must succeed.
+    await contactService.createContact(data, null, files, { approvalStatus: "pending" });
   } catch (error) {
     await releaseSlot(link._id);
     throw error;
+  }
+
+  // Contact Book: only when the number is not there yet; never fails the submit.
+  try {
+    const local = (normalizeMobileNumber(data.whatsappNumber) || "").slice(2);
+    const inContactBook = local
+      ? await Member.exists({ mobile: local, mobileStatus: "valid" })
+      : false;
+
+    if (!inContactBook) {
+      await saveAsMember(data, link, files);
+    }
+  } catch (error) {
+    console.error("Form link: could not add to Contact Book:", error.message);
   }
 };
 

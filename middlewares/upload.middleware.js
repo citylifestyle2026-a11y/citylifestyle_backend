@@ -143,7 +143,32 @@ const spreadsheetUpload = multer({
   fileFilter: spreadsheetFileFilter,
 });
 
+// Invitation card design (Invitation Cards -> Upload card design): JPG / PNG /
+// WEBP only, kept in memory, up to 15 MB. It is re-encoded to a JPEG by
+// services/inviteCard.service.js before it is stored.
+const designFileFilter = (req, file, cb) => {
+  const ext = path.extname(file.originalname).toLowerCase();
+  const okExt = [".jpg", ".jpeg", ".png", ".webp"].includes(ext);
+  const okMime = [
+    "image/jpeg",
+    "image/jpg",
+    "image/png",
+    "image/webp",
+    "application/octet-stream",
+  ].includes(file.mimetype);
+
+  if (okExt && okMime) return cb(null, true);
+  return cb(new AppError("Only JPG, PNG or WEBP images are allowed.", 400), false);
+};
+
+const designUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 15 * 1024 * 1024 },
+  fileFilter: designFileFilter,
+});
+
 module.exports = upload;
+module.exports.designUpload = designUpload;
 module.exports.spreadsheetUpload = spreadsheetUpload;
 module.exports.largeImageUpload = largeImageUpload;
 // Alias kept so existing imports of `upload.registrationPhotoUpload`
