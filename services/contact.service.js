@@ -480,6 +480,17 @@ function buildContactQuery(query) {
     filter.passCancelledAt = null;
   }
 
+  // Attendance answer filter: yes | no | none (reminder sent, not answered)
+  // | notSent (no reminder sent yet).
+  if (query.rsvpStatus === "yes" || query.rsvpStatus === "no") {
+    filter.rsvpStatus = query.rsvpStatus;
+  } else if (query.rsvpStatus === "none") {
+    filter.rsvpReminderSentAt = { $ne: null };
+    filter.rsvpStatus = { $in: ["none", null] };
+  } else if (query.rsvpStatus === "notSent") {
+    filter.rsvpReminderSentAt = null;
+  }
+
   if (APPROVAL_STATUSES.includes(query.approvalStatus)) {
     filter.$and = [
       ...(filter.$and || []),
@@ -603,6 +614,13 @@ const getApprovalStatusCounts = async (editionEventId = null) => {
   counts.rejected = Math.max(0, counts.rejected - counts.passCancelled);
   counts.all = counts.pending + counts.approved + counts.rejected + counts.passCancelled;
   // Form submissions whose number is already in the Guest List (Duplicate tab).
+  // Rows of guests that were deleted meanwhile are removed first, so the
+  // count matches what the Duplicate tab shows.
+  try {
+    await require("./contactDuplicate.service").purgeOrphanDuplicates();
+  } catch (error) {
+    console.error("Could not clean orphan duplicates:", error.message);
+  }
   counts.duplicate = await ContactDuplicate.countDocuments({});
 
   return counts;
@@ -1686,14 +1704,15 @@ const getAllContacts = async (query) => {
       ),
     ];
     const members = locals.length
-      ? await Member.find({ mobile: { $in: locals }, mobileStatus: "valid" })
-          .select("name mobile")
-          .lean()
+      ? await Member.find({ mobile: { $in: locals }, mobileStatus: "valid" }).lean()
       : [];
     const byMobile = new Map(members.map((m) => [m.mobile, m]));
+    const { needsMerge } = require("./contactMerge.service");
     rows.forEach((r) => {
       const m = byMobile.get((normalizeMobileNumber(r.whatsappNumber) || "").slice(2));
-      r.memberMatch = m ? { _id: m._id, name: m.name } : null;
+      // "Merge & Sync" is offered only while the two rows still differ; once
+      // merged (both identical) it disappears.
+      r.memberMatch = m && needsMerge(r, m) ? { _id: m._id, name: m.name } : null;
     });
   } catch (error) {
     console.error("Could not check Contact Book matches:", error.message);
@@ -2229,6 +2248,15 @@ const hardDeleteContacts = async (contacts) => {
   await ContactEventHistory.deleteMany({ contactId: { $in: ids } });
 
   const result = await Contact.deleteMany({ _id: { $in: ids } });
+
+  // Form submissions parked in the Duplicate tab for these guests come back
+  // into the Guest List as normal guests (same status). Never allowed to
+  // fail the delete itself.
+  try {
+    await require("./contactDuplicate.service").promoteDuplicatesForContacts(contacts);
+  } catch (error) {
+    console.error("Could not restore duplicates after guest delete:", error.message);
+  }
 
   // The deleted guests must show as "Not in Guest List" again on Member List.
   // Never allowed to fail the delete itself.

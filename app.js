@@ -17,6 +17,7 @@ const roleRoutes = require("./routes/role.routes");
 const publicRegistrationRoutes = require("./routes/publicRegistration.routes");
 const publicInvitationRoutes = require("./routes/publicInvitation.routes");
 const publicContactRoutes = require("./routes/publicContact.routes");
+const publicRsvpRoutes = require("./routes/publicRsvp.routes");
 const contactRoutes = require("./routes/contact.routes");
 const memberRoutes = require("./routes/member.routes");
 const contactEventHistoryRoutes = require("./routes/contactEventHistory.routes");
@@ -85,6 +86,8 @@ app.use("/api/public/registration", publicRegistrationRoutes);
 app.use("/api/public/invitation", publicInvitationRoutes);
 // Public contact form (/city-lifestyle) - no login, rate-limited
 app.use("/api/public/contact", publicContactRoutes);
+// Attendance reminder Yes / No pages (/rsvp/yes/:token, /rsvp/no/:token) - no login
+app.use("/api/public/rsvp", publicRsvpRoutes);
 // contacts (was previously missing here — routes/contact.routes.js
 // already implements Reference Summary plus create/list/get/update/
 // delete, it just was never mounted, hence every /api/contacts/...

@@ -145,10 +145,119 @@ const captureIfDuplicate = async (data, files, options) => {
   return saveDuplicate(existing, data, files, options);
 };
 
+// ================= WHEN THE GUEST IS DELETED =================
+// A Duplicate row only makes sense while the guest with that number exists.
+// When that guest is deleted from the Guest List, the person who filled the
+// form is NOT lost: the submission is turned into a normal guest again (it
+// shows in "All" with the status the deleted guest had; Pending when unknown)
+// and leaves the Duplicate tab.
+const promoteDuplicateToGuest = async (duplicate, { status = "pending", source = null } = {}) => {
+  // Someone already added this number again meanwhile: stay a duplicate of
+  // that guest instead of creating a second row with the same number.
+  const current = await findGuestByNumber(duplicate.whatsappNumber);
+  if (current) {
+    await ContactDuplicate.updateOne({ _id: duplicate._id }, { contactId: current._id });
+    return null;
+  }
+
+  const isCouple = duplicate.relationship === "Couple";
+
+  const guest = await Contact.create({
+    fullName: duplicate.fullName,
+    whatsappNumber: duplicate.whatsappNumber,
+    companyName: duplicate.companyName,
+    designation: duplicate.designation,
+    address: duplicate.address,
+    area: duplicate.area,
+    instagramId: duplicate.instagramId,
+    email: duplicate.email,
+    relationship: duplicate.relationship || "Single",
+    spouseName: isCouple ? duplicate.spouseName : "",
+    spouseMobile: isCouple ? duplicate.spouseMobile : "",
+    spouseInstagramId: isCouple ? duplicate.spouseInstagramId : "",
+    references: duplicate.references || [],
+    companyCategory: duplicate.companyCategory || null,
+    professionCategory: isCouple ? duplicate.professionCategory || null : null,
+    // The photo files move over to the new guest (nothing is deleted).
+    profileImage: duplicate.profileImage,
+    profileImagePublicId: duplicate.profileImagePublicId,
+    spouseProfileImage: isCouple ? duplicate.spouseProfileImage : "",
+    spouseProfileImagePublicId: isCouple ? duplicate.spouseProfileImagePublicId : "",
+    editionEventId: source?.editionEventId || null,
+    editionName: source?.editionName || "",
+    memberId: source?.memberId || null,
+    approvalStatus: status,
+    approvalUpdatedAt: new Date(),
+    createdBy: source?.createdBy || null,
+  });
+
+  await ContactDuplicate.deleteOne({ _id: duplicate._id });
+  return guest;
+};
+
+// Called right after guests are deleted. `contacts` = the deleted documents.
+const promoteDuplicatesForContacts = async (contacts = []) => {
+  let promoted = 0;
+  for (const contact of contacts) {
+    const rows = await ContactDuplicate.find({ contactId: contact._id });
+    for (const row of rows) {
+      try {
+        const guest = await promoteDuplicateToGuest(row, {
+          status: contact.approvalStatus || "pending",
+          source: contact,
+        });
+        if (guest) promoted += 1;
+      } catch (error) {
+        console.error("Could not turn duplicate into a guest:", error.message);
+      }
+    }
+  }
+  return promoted;
+};
+
+// Rows whose guest was deleted earlier (before the rule above existed) or is
+// now only a history record. Deleted guests -> the submission becomes a
+// Pending guest; history-only ones cannot hold a second row, so they are dropped.
+const purgeOrphanDuplicates = async () => {
+  const contactIds = await ContactDuplicate.distinct("contactId");
+  if (!contactIds.length) return 0;
+
+  const existing = await Contact.find({ _id: { $in: contactIds } })
+    .select("_id isDeleted historyOnly")
+    .lean();
+  const byId = new Map(existing.map((c) => [String(c._id), c]));
+
+  let fixed = 0;
+  for (const id of contactIds) {
+    const guest = byId.get(String(id));
+    if (guest && !guest.isDeleted && !guest.historyOnly) continue; // still a real duplicate
+
+    const rows = await ContactDuplicate.find({ contactId: id });
+    for (const row of rows) {
+      try {
+        if (guest) {
+          // history-only / soft-deleted record: nothing to merge into
+          await ContactDuplicate.deleteOne({ _id: row._id });
+        } else {
+          await promoteDuplicateToGuest(row, { status: "pending" });
+        }
+        fixed += 1;
+      } catch (error) {
+        console.error("Could not clean orphan duplicate:", error.message);
+      }
+    }
+  }
+  return fixed;
+};
+
 // ================= LIST =================
-const getDuplicateCount = () => ContactDuplicate.countDocuments({});
+const getDuplicateCount = async () => {
+  await purgeOrphanDuplicates();
+  return ContactDuplicate.countDocuments({});
+};
 
 const listDuplicates = async (query = {}) => {
+  await purgeOrphanDuplicates();
   const page = Math.max(1, parseInt(query.page, 10) || 1);
   const limit = Math.min(100, Math.max(1, parseInt(query.limit, 10) || 10));
   const search = clean(query.search);
@@ -457,6 +566,8 @@ module.exports = {
   saveDuplicate,
   captureIfDuplicate,
   getDuplicateCount,
+  promoteDuplicatesForContacts,
+  purgeOrphanDuplicates,
   listDuplicates,
   getDuplicatePreview,
   fixDuplicate,

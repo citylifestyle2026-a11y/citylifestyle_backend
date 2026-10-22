@@ -266,9 +266,46 @@ const mergeContactWithMember = async (contactId, choices = {}) => {
   };
 };
 
+// ---- does this Guest List row + Contact Book row still need "Merge & Sync"? ----
+// After a merge both rows hold the same values, so the button is hidden until
+// something differs again (a field changed on one side, a new reference, a
+// photo on one side only, or the guest is not linked / marked "In <edition>").
+// `contact` needs companyCategory / professionCategory populated ({ name }).
+const needsMerge = (contact, member) => {
+  const isCouple = contact.relationship === "Couple" || member.relationship === "Couple";
+
+  for (const f of FIELDS) {
+    if (f.spouse && !isCouple) continue;
+    const c = clean(f.c(contact));
+    const m = clean(f.m(member));
+    if (c.toLowerCase() !== m.toLowerCase()) return true;
+  }
+
+  const refKey = (list) =>
+    [...new Set((list || []).map((r) => clean(r).toLowerCase()).filter(Boolean))].sort().join("|");
+  if (refKey(contact.references) !== refKey(member.references)) return true;
+
+  if (!!clean(contact.profileImage) !== !!clean(member.profileImage)) return true;
+  if (isCouple && !!clean(contact.spouseProfileImage) !== !!clean(member.spouseProfileImage)) {
+    return true;
+  }
+
+  if (String(contact.memberId || "") !== String(member._id)) return true;
+
+  if (contact.editionEventId) {
+    const marked = (member.movedTo || []).some(
+      (x) => String(x.eventId) === String(contact.editionEventId)
+    );
+    if (!marked) return true;
+  }
+
+  return false;
+};
+
 module.exports = {
   mergeContactWithMember,
   getMergePreview,
   findMemberForContact,
+  needsMerge,
   MERGE_FIELD_KEYS: FIELDS.map((f) => f.key),
 };

@@ -2,6 +2,7 @@ const Event = require("../models/event.model.js");
 const Booking = require("../models/booking.model.js");
 const BookingTicket = require("../models/bookingTicket.model.js");
 const TicketType = require("../models/ticketType.model.js");
+const { getRsvpSummary } = require("./rsvp.service");
 
 // Get Active Event
 // An event is "currently running" while isActive === true AND its
@@ -276,6 +277,7 @@ const getDashboardCounts = async (eventId) => {
             pendingRegistrations: 0,
             scannedEntries: 0,
             registeredNotScanned: 0,
+            rsvp: { reminderSent: 0, yes: 0, no: 0, noResponse: 0 },
         };
     }
 
@@ -427,6 +429,8 @@ const getDashboardCounts = async (eventId) => {
     // Scoped to this single resolved/selected event only — see
     // getDashboardCounts above.
     const dashboardCounts = await getDashboardCounts(activeEvent._id);
+    // Attendance reminder answers (Yes / No / No response) for this event.
+    const rsvp = await getRsvpSummary(activeEvent._id);
 
     const todayBooking = await getTodayBooking(activeEvent._id);
     const todayPassResult = await getTodayPassBooking(activeEvent._id);
@@ -454,6 +458,7 @@ const getDashboardCounts = async (eventId) => {
         passBookingCounts: totalPassResult.passBookingCounts,
         bookingCounts,
         totalBookingDetails,
+        rsvp,
         ...dashboardCounts,
     };
 };

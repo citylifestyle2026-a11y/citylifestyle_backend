@@ -25,7 +25,13 @@ const resolveTicketNumber = async (qrValue) => {
     const booking = await Booking.findOne({ invitationId: value }).select("_id");
 
     if (!booking) {
-      throw new AppError("Invalid or expired QR code.", 401);
+      // Valid-looking Invitation ID, but this server has no pass with it
+      // (deleted pass, or the pass was sent from a different server /
+      // database than the one this scanner is connected to).
+      throw new AppError(
+        `Pass not found for Invitation ID ${value}. It may be deleted, or sent from a different server.`,
+        404
+      );
     }
 
     const primaryTicket = await BookingTicket.findOne({ bookingId: booking._id })

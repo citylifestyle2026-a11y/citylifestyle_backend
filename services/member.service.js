@@ -198,10 +198,23 @@ const readWorksheet = async (buffer, fileName = "") => {
     return workbook.worksheets[0];
   }
 
-  return workbook.csv.read(
-    Readable.from(buffer.toString("utf-8").replace(/^\uFEFF/, "")),
-    { map: (value) => value }
-  );
+  const text = buffer.toString("utf-8").replace(/^\uFEFF/, "");
+
+  // Excel in some regions saves CSV with ";" (or tab) instead of ",".
+  // The separator is read from the header line (outside quotes).
+  const counts = { ",": 0, ";": 0, "\t": 0 };
+  let inQuotes = false;
+  for (const ch of text.split(/\r?\n/, 1)[0] || "") {
+    if (ch === '"') inQuotes = !inQuotes;
+    else if (!inQuotes && ch in counts) counts[ch] += 1;
+  }
+  const best = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+  const delimiter = best[1] > 0 ? best[0] : ",";
+
+  return workbook.csv.read(Readable.from(text), {
+    map: (value) => value,
+    parserOptions: { delimiter },
+  });
 };
 
 const parseMembersFile = async (buffer, fileName) => {

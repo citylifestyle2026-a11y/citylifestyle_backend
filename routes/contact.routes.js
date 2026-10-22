@@ -108,6 +108,14 @@ router.post(
   contactController.resendPass
 );
 
+// Send the attendance reminder (WhatsApp template with Yes / No buttons) to
+// approved guests. Body: { ids: [...], eventId?, includeResponded? }.
+router.post(
+  "/send-reminder",
+  protect,
+  contactController.sendReminder
+);
+
 // Cancel the pass of approved guest(s): QR stops working, the guest moves
 // to Rejected and gets a "your pass has been cancelled" WhatsApp message.
 // Body: { ids: [...] }.

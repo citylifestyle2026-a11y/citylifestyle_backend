@@ -276,6 +276,19 @@ const resendPass = async (req, res, next) => {
   }
 };
 
+// ================= SEND ATTENDANCE REMINDER (YES / NO) =================
+const sendReminder = async (req, res, next) => {
+  try {
+    const result = await require("../services/rsvp.service").sendRemindersToContacts(
+      req.body || {}
+    );
+
+    return res.status(result.success ? 200 : 400).json(result);
+  } catch (error) {
+    next(error);
+  }
+};
+
 // ================= DELETE BOOKING (PASS) =================
 const deleteBooking = async (req, res, next) => {
   try {
@@ -362,6 +375,7 @@ module.exports = {
   cancelPass,
   sendPass,
   resendPass,
+  sendReminder,
   deleteBooking,
   getContactPass,
   updateContactPass,

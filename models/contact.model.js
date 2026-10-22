@@ -315,6 +315,47 @@ const contactSchema = new mongoose.Schema(
       default: null,
     },
 
+    // ================= ATTENDANCE REMINDER / RSVP =================
+    // "Send Reminder" (Guest List -> Approved) sends the WhatsApp template
+    // with Yes / No buttons. Each button opens a public page on the
+    // website (/rsvp/yes/:token, /rsvp/no/:token) which saves the answer
+    // here. See services/rsvp.service.js.
+    //   none = reminder sent / not answered yet, yes = coming, no = not coming
+    rsvpToken: {
+      type: String,
+      trim: true,
+      default: undefined,
+    },
+
+    rsvpStatus: {
+      type: String,
+      enum: ["none", "yes", "no"],
+      default: "none",
+    },
+
+    // Event the reminder / answer is for.
+    rsvpEventId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Event",
+      default: null,
+    },
+
+    rsvpReminderSentAt: {
+      type: Date,
+      default: null,
+    },
+
+    rsvpReminderCount: {
+      type: Number,
+      default: 0,
+    },
+
+    // Last time the guest tapped Yes / No (updated again if they change it).
+    rsvpRespondedAt: {
+      type: Date,
+      default: null,
+    },
+
     // Soft-delete fields, same pattern already used on Event/Booking
     // (isDeleted / deletedAt / deletedBy) — deleting a contact never
     // hard-removes the document.
@@ -404,6 +445,9 @@ contactSchema.pre("findOneAndUpdate", function (next) {
 contactSchema.index({ isDeleted: 1, status: 1 });
 contactSchema.index({ approvalStatus: 1 });
 contactSchema.index({ editionEventId: 1 });
+contactSchema.index({ rsvpEventId: 1, rsvpStatus: 1 });
+// Sparse unique: only contacts that were sent a reminder have a token.
+contactSchema.index({ rsvpToken: 1 }, { unique: true, sparse: true });
 
 // Lookup/search by name.
 contactSchema.index({ fullName: 1 });

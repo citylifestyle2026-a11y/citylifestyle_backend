@@ -42,14 +42,11 @@ const HEADER_ALIASES = {
   references: ["references", "reference"],
 };
 
+// Only these two COLUMNS are needed in the file (same as the row rules below
+// and the text shown in the Import popup). Every other column is optional.
 const REQUIRED_FIELDS = [
-  ["fullName", "fullName"],
-  ["whatsappNumber", "whatsappNumber"],
-  ["companyName", "companyName"],
-  ["designation", "designation"],
-  ["companyCategory", "companyCategory"],
-  ["area", "area"],
-  ["references", "references"],
+  ["fullName", "Full Name"],
+  ["whatsappNumber", "WhatsApp Number"],
 ];
 
 const EMPTY_PLACEHOLDERS = new Set(["", "-", "--", "n/a", "na", "null", "nil"]);
@@ -57,17 +54,34 @@ const EMPTY_PLACEHOLDERS = new Set(["", "-", "--", "n/a", "na", "null", "nil"]);
 const headerKey = (text) =>
   String(text || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 
+// Excel in some regions saves CSV with ";" (or tab) instead of ",". The
+// separator is read from the header line (outside quotes).
+const detectDelimiter = (text) => {
+  const header = String(text).split(/\r?\n/, 1)[0] || "";
+  const counts = { ",": 0, ";": 0, "\t": 0 };
+  let inQuotes = false;
+  for (const ch of header) {
+    if (ch === '"') inQuotes = !inQuotes;
+    else if (!inQuotes && ch in counts) counts[ch] += 1;
+  }
+  return Object.entries(counts).sort((a, b) => b[1] - a[1])[0][1] > 0
+    ? Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0]
+    : ",";
+};
+
 const parseCsvBuffer = async (buffer) => {
   const ExcelJS = require("exceljs");
   const { Readable } = require("stream");
 
+  const text = buffer.toString("utf-8").replace(/^\uFEFF/, "");
+
   const workbook = new ExcelJS.Workbook();
   // `map` keeps every cell as exact text so a number like 9.87654E+09 is
   // never silently turned into a valid-looking mobile number.
-  const worksheet = await workbook.csv.read(
-    Readable.from(buffer.toString("utf-8").replace(/^\uFEFF/, "")),
-    { map: (value) => value }
-  );
+  const worksheet = await workbook.csv.read(Readable.from(text), {
+    map: (value) => value,
+    parserOptions: { delimiter: detectDelimiter(text) },
+  });
 
   const rows = [];
   let columnOf = null;

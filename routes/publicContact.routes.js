@@ -108,6 +108,10 @@ router.post(
             await contactService.createContact(req.body, null, req.files, {
               approvalStatus: "pending",
             });
+
+            // Also save in the Contact Book (Member List) - only if this
+            // number is not already there. Never blocks the submit.
+            await formLinkService.addToContactBookIfMissing(req.body, null, req.files);
           } catch (error) {
             // Two forms with the SAME new number sent at the same moment: the
             // second one lost the race. It is a duplicate now, so park it in

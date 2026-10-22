@@ -265,10 +265,14 @@ const saveAsMember = async (data, link, files = null) => {
       spouseMobile: isCouple ? data.spouseMobile : "",
       spouseInstagramId: isCouple ? data.spouseInstagramId : "",
       spouseProfession: isCouple ? await categoryName(data.professionCategory) : "",
-      references: [link.name],
-      source: "Form Link",
+      references: link
+        ? [link.name]
+        : Array.isArray(data.references)
+        ? data.references
+        : [],
+      source: link ? "Form Link" : "Public Form",
     },
-    link.createdBy || null,
+    (link && link.createdBy) || null,
     files
   );
 };
@@ -332,6 +336,13 @@ const submitThroughLink = async (link, data, files) => {
   }
 
   // Contact Book: only when the number is not there yet; never fails the submit.
+  await addToContactBookIfMissing(data, link, files);
+};
+
+// Contact Book (Member): adds the person only when the number is NOT already
+// there. Never throws - a Contact Book problem must not stop the Guest List
+// entry. `link` is null for the plain public form (/city-lifestyle).
+const addToContactBookIfMissing = async (data, link = null, files = null) => {
   try {
     const local = (normalizeMobileNumber(data.whatsappNumber) || "").slice(2);
     const inContactBook = local
@@ -342,7 +353,7 @@ const submitThroughLink = async (link, data, files) => {
       await saveAsMember(data, link, files);
     }
   } catch (error) {
-    console.error("Form link: could not add to Contact Book:", error.message);
+    console.error("Public form: could not add to Contact Book:", error.message);
   }
 };
 
@@ -354,4 +365,5 @@ module.exports = {
   getPublicInfo,
   attachLink,
   submitThroughLink,
+  addToContactBookIfMissing,
 };

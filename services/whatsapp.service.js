@@ -241,6 +241,11 @@ const sendTemplateMessage = async ({
   languageCode,
   bodyParams = [],
   buttonParam,
+  // Extra: several dynamic-URL buttons, e.g. [{ index: 0, param: "abc" },
+  // { index: 1, param: "abc" }] (used by the attendance reminder template
+  // that has a Yes and a No button). Ignored when empty, so every
+  // existing caller (which only uses buttonParam) behaves exactly as before.
+  buttonParams = [],
 }) => {
   if (!phone || !String(phone).trim()) {
     throw new AppError("WhatsApp template message requires a recipient phone number.", 400);
@@ -277,6 +282,24 @@ const sendTemplateMessage = async ({
       ],
     });
   }
+
+  (Array.isArray(buttonParams) ? buttonParams : []).forEach((button) => {
+    if (
+      !button ||
+      button.param === undefined ||
+      button.param === null ||
+      String(button.param).trim() === ""
+    ) {
+      return;
+    }
+
+    components.push({
+      type: "button",
+      sub_type: "url",
+      index: String(button.index ?? 0),
+      parameters: [{ type: "text", text: String(button.param).trim() }],
+    });
+  });
 
   const payload = {
     messaging_product: "whatsapp",
