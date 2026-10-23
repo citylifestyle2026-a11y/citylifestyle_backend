@@ -24,6 +24,54 @@ const Contact = require("../models/contact.model");
 const Member = require("../models/member.model");
 const ContactEventHistory = require("../models/contactEventHistory.model");
 
+// Turns Guest List contacts into hidden `historyOnly` contacts: the person
+// (name, number, spouse) stays so Event History keeps showing them, but all
+// Guest List state (edition, approval, pass, attendance reminder / RSVP) is
+// cleared and the contact no longer shows in Guest List.
+//
+// Used when a guest is deleted from Guest List (contact.service.js
+// hardDeleteContacts) and when an Event is deleted (below) - one place, so
+// both paths behave the same.
+//
+// rsvpToken is $unset (not set to null): the unique sparse index only skips a
+// MISSING field, so two nulls would clash - and an old WhatsApp Yes / No link
+// of a deleted guest must stop working.
+const hideContactsAsHistoryOnly = async (contactIds = [], opts = {}) => {
+  if (!contactIds.length) return 0;
+
+  const result = await Contact.updateMany(
+    { _id: { $in: contactIds } },
+    {
+      $set: {
+        historyOnly: true,
+        editionEventId: null,
+        editionName: "",
+        memberId: null,
+        approvalStatus: "approved",
+        approvalUpdatedAt: null,
+        approvalUpdatedBy: null,
+        passSentAt: null,
+        passEventId: null,
+        passBookingId: null,
+        rejectionMessageSentAt: null,
+        passCancelledAt: null,
+        passCancelMessageSentAt: null,
+        passCancelledBookingId: null,
+        passCancelledEventId: null,
+        rsvpStatus: "none",
+        rsvpEventId: null,
+        rsvpReminderSentAt: null,
+        rsvpReminderCount: 0,
+        rsvpRespondedAt: null,
+      },
+      $unset: { rsvpToken: "" },
+    },
+    opts
+  );
+
+  return result.modifiedCount ?? contactIds.length;
+};
+
 const cleanupAfterEventDelete = async ({ eventIds = [], clearUnassigned = true, session } = {}) => {
   const opts = session ? { session } : {};
   const result = {
@@ -62,29 +110,7 @@ const cleanupAfterEventDelete = async ({ eventIds = [], clearUnassigned = true, 
     const deleteList = contacts.filter((c) => !withHistory.has(String(c._id)));
 
     if (hideIds.length) {
-      await Contact.updateMany(
-        { _id: { $in: hideIds } },
-        {
-          $set: {
-            historyOnly: true,
-            editionEventId: null,
-            editionName: "",
-            memberId: null,
-            approvalStatus: "approved",
-            approvalUpdatedAt: null,
-            approvalUpdatedBy: null,
-            passSentAt: null,
-            passEventId: null,
-            passBookingId: null,
-            rejectionMessageSentAt: null,
-            passCancelledAt: null,
-            passCancelMessageSentAt: null,
-            passCancelledBookingId: null,
-            passCancelledEventId: null,
-          },
-        },
-        opts
-      );
+      await hideContactsAsHistoryOnly(hideIds, opts);
       result.contactsHidden = hideIds.length;
     }
 
@@ -113,4 +139,4 @@ const cleanupAfterEventDelete = async ({ eventIds = [], clearUnassigned = true, 
   return result;
 };
 
-module.exports = { cleanupAfterEventDelete };
+module.exports = { cleanupAfterEventDelete, hideContactsAsHistoryOnly };

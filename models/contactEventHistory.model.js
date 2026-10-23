@@ -63,6 +63,17 @@ const contactEventHistorySchema = new mongoose.Schema(
       default: "manual",
     },
 
+    // Copy of the PERSON's details ({ fullName, whatsappNumber, spouseName,
+    // spouseMobile }), written only at the moment those details would be
+    // lost from the Contact - e.g. a Couple contact is switched to Single or
+    // the spouse is cleared (services/contact.service.js updateContact).
+    // Event History shows it whenever the live Contact has the field blank,
+    // so a spouse row keeps its person's name.
+    contactSnapshot: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+    },
+
     // Copy of the event's details, written when the Event is deleted
     // (services/event.service.js deleteEvent) so this row keeps showing
     // the event's title/edition/dates after the Event document is gone.

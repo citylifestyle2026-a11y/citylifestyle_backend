@@ -180,6 +180,9 @@ const getAllEventHistory = async (query = {}) => {
     return {
       _id: `${g._id.contactId}:${g._id.isSpouse ? "spouse" : "main"}`,
       contactId: first?.contactId || null,
+      // Saved copy of the person (see model) - used when the live Contact
+      // no longer has these details.
+      contactSnapshot: groupEntries.find((e) => e.contactSnapshot)?.contactSnapshot || null,
       isSpouse: g._id.isSpouse,
       createdAt: g.latest,
       entries: groupEntries.map((e) => ({

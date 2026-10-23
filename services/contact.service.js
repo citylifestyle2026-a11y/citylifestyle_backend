@@ -2055,18 +2055,54 @@ const updateContact = async (id, data, files = {}) => {
     if (publicId) await deleteImage(publicId);
   }
 
+  // Event History keeps the spouse: when the spouse's name is about to
+  // disappear from the Contact (switched to Single, or spouse cleared), the
+  // spouse's history rows get a copy of who the person was.
+  const spouseCleared =
+    !!String(contact.spouseName || "").trim() &&
+    ((data.relationship && data.relationship !== "Couple") ||
+      (data.spouseName !== undefined && !String(data.spouseName || "").trim()));
+
+  if (spouseCleared && updatedContact) {
+    try {
+      const ContactEventHistory = require("../models/contactEventHistory.model");
+      await ContactEventHistory.updateMany(
+        { contactId: id, isSpouse: true, contactSnapshot: null },
+        {
+          $set: {
+            contactSnapshot: {
+              fullName: contact.fullName,
+              whatsappNumber: contact.whatsappNumber,
+              spouseName: contact.spouseName,
+              spouseMobile: contact.spouseMobile || "",
+            },
+          },
+        }
+      );
+    } catch (error) {
+      // Never fail the contact update because of history bookkeeping.
+      console.error("Could not save spouse details on Event History:", error.message);
+    }
+  }
+
   return updatedContact;
 };
 
-// ================= DELETE CONTACT (SOFT DELETE) =================
-// Same soft-delete pattern as bookingService.deleteBooking: sets
-// isDeleted/deletedAt/deletedBy rather than removing the document.
+// ================= DELETE CONTACT =================
+// Removes the guest from the Guest List - see hardDeleteContacts below for
+// what is removed and what is KEPT (Event History is kept).
 const deleteContact = async (id, adminId) => {
   if (!mongoose.Types.ObjectId.isValid(id)) {
     throw new AppError("Invalid Contact ID", 400);
   }
 
-  const contact = await Contact.findById(id);
+  // A hidden history-only record is not a Guest List guest, so it can't be
+  // deleted from here (its Event History rows are managed on that page).
+  const contact = await Contact.findOne({
+    _id: id,
+    isDeleted: { $ne: true },
+    historyOnly: { $ne: true },
+  });
 
   if (!contact) {
     throw new AppError("Contact not found", 404);
@@ -2232,22 +2268,49 @@ async function assertCompanyCategoryExists(companyCategoryId) {
   }
 }
 
-// ================= HARD DELETE =================
-// Permanently removes the contacts from the database (no soft-delete flag):
-//  - the contact documents themselves,
-//  - their Event History rows (they would otherwise point to a contact that
-//    no longer exists),
-//  - their profile / spouse photo files on disk.
+// ================= DELETE FROM GUEST LIST =================
+// Event History is a permanent record, so deleting a guest must NOT erase it
+// (same rule as deleting an Event - see eventCleanup.service.js):
+//  - a guest WITH Event History rows is NOT removed from the database. It is
+//    turned into a hidden `historyOnly` contact (name, number, spouse stay;
+//    edition / approval / pass / RSVP data is cleared). It disappears from
+//    Guest List but the history keeps showing the person. Adding the same
+//    number again later re-uses this record, so the history re-attaches.
+//  - a guest WITHOUT history is removed completely (photos too), as before.
 // Bookings and passes are NOT touched - use "Delete Booking" for that.
+// Returns how many guests were removed from the Guest List.
 const hardDeleteContacts = async (contacts) => {
   if (!contacts.length) return 0;
 
-  const ids = contacts.map((contact) => contact._id);
-
   const ContactEventHistory = require("../models/contactEventHistory.model");
-  await ContactEventHistory.deleteMany({ contactId: { $in: ids } });
+  const { hideContactsAsHistoryOnly } = require("./eventCleanup.service");
 
-  const result = await Contact.deleteMany({ _id: { $in: ids } });
+  const allIds = contacts.map((contact) => contact._id);
+
+  // Only LIVE history rows count (rows the admin already deleted from the
+  // Event History page are gone for good and do not keep a guest alive).
+  const withHistory = new Set(
+    (
+      await ContactEventHistory.distinct("contactId", {
+        contactId: { $in: allIds },
+        isDeleted: { $ne: true },
+      })
+    ).map(String)
+  );
+
+  const keepIds = allIds.filter((id) => withHistory.has(String(id)));
+  const removeList = contacts.filter((c) => !withHistory.has(String(c._id)));
+  const ids = removeList.map((contact) => contact._id);
+
+  if (keepIds.length) {
+    await hideContactsAsHistoryOnly(keepIds);
+  }
+
+  if (ids.length) {
+    // Rows already deleted from Event History would point to nothing.
+    await ContactEventHistory.deleteMany({ contactId: { $in: ids } });
+    await Contact.deleteMany({ _id: { $in: ids } });
+  }
 
   // Form submissions parked in the Duplicate tab for these guests come back
   // into the Guest List as normal guests (same status). Never allowed to
@@ -2274,7 +2337,9 @@ const hardDeleteContacts = async (contacts) => {
   }
 
   // Photos last and best-effort: a missing file must never fail the delete.
-  for (const contact of contacts) {
+  // Only for contacts that were really removed - a kept (hidden) contact
+  // still owns its photos.
+  for (const contact of removeList) {
     for (const publicId of [
       contact.profileImagePublicId,
       contact.spouseProfileImagePublicId,
@@ -2288,7 +2353,7 @@ const hardDeleteContacts = async (contacts) => {
     }
   }
 
-  return result.deletedCount ?? contacts.length;
+  return contacts.length;
 };
 
 // ================= BULK DELETE CONTACTS =================
@@ -2297,7 +2362,11 @@ const hardDeleteContacts = async (contacts) => {
 const bulkDeleteContacts = async ({ ids }, adminId) => {
   const contactIds = validateIdList(ids);
 
-  const contacts = await Contact.find({ _id: { $in: contactIds } });
+  const contacts = await Contact.find({
+    _id: { $in: contactIds },
+    isDeleted: { $ne: true },
+    historyOnly: { $ne: true },
+  });
   const deleted = await hardDeleteContacts(contacts);
 
   return {

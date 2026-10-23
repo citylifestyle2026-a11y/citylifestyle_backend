@@ -162,7 +162,7 @@ const promoteDuplicateToGuest = async (duplicate, { status = "pending", source =
 
   const isCouple = duplicate.relationship === "Couple";
 
-  const guest = await Contact.create({
+  const fields = {
     fullName: duplicate.fullName,
     whatsappNumber: duplicate.whatsappNumber,
     companyName: duplicate.companyName,
@@ -189,7 +189,42 @@ const promoteDuplicateToGuest = async (duplicate, { status = "pending", source =
     approvalStatus: status,
     approvalUpdatedAt: new Date(),
     createdBy: source?.createdBy || null,
-  });
+  };
+
+  // A deleted guest that has Event History stays in the database as a hidden
+  // history-only contact with the SAME number. A second contact with that
+  // number would hit the unique WhatsApp-number index, so that record is
+  // turned back into the (visible) guest instead - the history stays attached.
+  const variants = numberVariants(duplicate.whatsappNumber);
+  const hidden = variants.length
+    ? await Contact.findOne({
+        isDeleted: { $ne: true },
+        historyOnly: true,
+        whatsappNumber: { $in: variants },
+      })
+    : null;
+
+  let guest;
+  if (hidden) {
+    guest = await Contact.findOneAndUpdate(
+      { _id: hidden._id },
+      { $set: { ...fields, historyOnly: false } },
+      { new: true, runValidators: true }
+    );
+
+    // The photos of the form submission replaced the old ones - drop the old.
+    const newIds = new Set([fields.profileImagePublicId, fields.spouseProfileImagePublicId].filter(Boolean));
+    for (const publicId of [hidden.profileImagePublicId, hidden.spouseProfileImagePublicId]) {
+      if (!publicId || newIds.has(publicId)) continue;
+      try {
+        await deleteImage(publicId);
+      } catch (error) {
+        console.error("Could not delete old contact photo:", error.message);
+      }
+    }
+  } else {
+    guest = await Contact.create(fields);
+  }
 
   await ContactDuplicate.deleteOne({ _id: duplicate._id });
   return guest;
