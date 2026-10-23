@@ -315,6 +315,14 @@ const contactSchema = new mongoose.Schema(
       default: null,
     },
 
+    // ================= HAMPER =================
+    // Approved guests can be added to the Hamper tab (Guest List) and then
+    // marked as "sent" once the hamper has been handed over / dispatched.
+    inHamper: { type: Boolean, default: false },
+    hamperAddedAt: { type: Date, default: null },
+    hamperSent: { type: Boolean, default: false },
+    hamperSentAt: { type: Date, default: null },
+
     // ================= ATTENDANCE REMINDER / RSVP =================
     // "Send Reminder" (Guest List -> Approved) sends the WhatsApp template
     // with Yes / No buttons. Each button opens a public page on the

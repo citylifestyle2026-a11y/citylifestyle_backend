@@ -100,6 +100,10 @@ router.put(
   contactController.bulkUpdateStatus
 );
 
+// Hamper: add approved guests to the Hamper tab, remove them, or mark the
+// hamper sent / not sent. Body: { ids: [...], action: add|remove|sent|notSent }.
+router.post("/hamper", protect, contactController.updateHamper);
+
 // Send the WhatsApp invitation pass to one or many APPROVED contacts.
 // Body: { ids: [...], eventId, ticketTypeId }.
 router.post(

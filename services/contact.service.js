@@ -495,6 +495,18 @@ function buildContactQuery(query) {
     filter.rsvpReminderSentAt = null;
   }
 
+  // Hamper tab: hamper = all (every approved guest added to the hamper)
+  // | pending (added, not sent yet) | sent.
+  if (["all", "pending", "sent"].includes(query.hamper)) {
+    filter.$and = [
+      ...(filter.$and || []),
+      { inHamper: true },
+      { approvalStatus: { $in: ["approved", null] } },
+    ];
+    if (query.hamper === "sent") filter.hamperSent = true;
+    if (query.hamper === "pending") filter.hamperSent = { $ne: true };
+  }
+
   if (APPROVAL_STATUSES.includes(query.approvalStatus)) {
     filter.$and = [
       ...(filter.$and || []),
@@ -645,6 +657,16 @@ const getApprovalStatusCounts = async (editionEventId = null) => {
   });
   counts.rejected = Math.max(0, counts.rejected - counts.passCancelled);
   counts.all = counts.pending + counts.approved + counts.rejected + counts.passCancelled;
+  // Hamper tab: approved guests added to the hamper, and how many of them
+  // have / have not been sent yet.
+  const hamperMatch = {
+    ...match,
+    inHamper: true,
+    approvalStatus: { $in: ["approved", null] },
+  };
+  counts.hamperSent = await Contact.countDocuments({ ...hamperMatch, hamperSent: true });
+  counts.hamperPending = await Contact.countDocuments({ ...hamperMatch, hamperSent: { $ne: true } });
+  counts.hamper = counts.hamperSent + counts.hamperPending;
   // Form submissions whose number is already in the Guest List (Duplicate tab).
   // Rows of guests that were deleted meanwhile are removed first, so the
   // count matches what the Duplicate tab shows.
@@ -656,6 +678,59 @@ const getApprovalStatusCounts = async (editionEventId = null) => {
   counts.duplicate = await ContactDuplicate.countDocuments({});
 
   return counts;
+};
+
+// ================= HAMPER =================
+// body: { ids, action }
+//   add     - add approved guests to the Hamper tab
+//   remove  - take them out of the Hamper tab
+//   sent    - mark the hamper as sent
+//   notSent - mark the hamper as not sent
+const updateHamperOfContacts = async ({ ids, action }) => {
+  const list = validateIdList(ids);
+  const base = { _id: { $in: list }, isDeleted: { $ne: true } };
+  const approved = { approvalStatus: { $in: ["approved", null] } };
+  const now = new Date();
+
+  let result;
+  let message;
+
+  if (action === "add") {
+    result = await Contact.updateMany(
+      { ...base, ...approved, inHamper: { $ne: true } },
+      { $set: { inHamper: true, hamperAddedAt: now, hamperSent: false, hamperSentAt: null } }
+    );
+    message = `${result.modifiedCount} guest${result.modifiedCount === 1 ? "" : "s"} added to Hamper.`;
+    if (result.modifiedCount === 0) {
+      message = "Only approved guests that are not in the Hamper yet can be added.";
+    }
+  } else if (action === "remove") {
+    result = await Contact.updateMany(
+      { ...base, inHamper: true },
+      { $set: { inHamper: false, hamperAddedAt: null, hamperSent: false, hamperSentAt: null } }
+    );
+    message = `${result.modifiedCount} guest${result.modifiedCount === 1 ? "" : "s"} removed from Hamper.`;
+  } else if (action === "sent") {
+    result = await Contact.updateMany(
+      { ...base, inHamper: true },
+      { $set: { hamperSent: true, hamperSentAt: now } }
+    );
+    message = `Hamper marked as sent for ${result.modifiedCount} guest${result.modifiedCount === 1 ? "" : "s"}.`;
+  } else if (action === "notSent") {
+    result = await Contact.updateMany(
+      { ...base, inHamper: true },
+      { $set: { hamperSent: false, hamperSentAt: null } }
+    );
+    message = `Hamper marked as not sent for ${result.modifiedCount} guest${result.modifiedCount === 1 ? "" : "s"}.`;
+  } else {
+    throw new AppError("Invalid hamper action.", 400);
+  }
+
+  return {
+    success: true,
+    message,
+    data: { updated: result.modifiedCount },
+  };
 };
 
 const validateIdList = (ids) => {
@@ -2198,7 +2273,8 @@ const getUniqueReferences = async (query = {}) => {
     data: uniqueReferences,
   };
 };
-
+
+
 // ================= GET UNIQUE AREAS =================
 // Feeds the Guest List "All Areas" filter dropdown: every area used by a
 // visible guest, trimmed, de-duplicated case-insensitively ("Vesu" and
@@ -2449,6 +2525,7 @@ const bulkDeleteContacts = async ({ ids }, adminId) => {
 };
 
 module.exports = {
+  updateHamperOfContacts,
   cancelPassesOfContacts,
   bulkDeleteContacts,
   bulkUpdateApprovalStatus,

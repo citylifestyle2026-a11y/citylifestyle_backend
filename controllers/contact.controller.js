@@ -176,6 +176,16 @@ const bulkUpdateStatus = async (req, res, next) => {
   }
 };
 
+// ================= HAMPER (ADD / REMOVE / SENT) =================
+const updateHamper = async (req, res, next) => {
+  try {
+    const result = await contactService.updateHamperOfContacts(req.body);
+    return res.status(200).json(result);
+  } catch (error) {
+    next(error);
+  }
+};
+
 // ================= MERGE WITH CONTACT BOOK =================
 const mergeWithContactBook = async (req, res, next) => {
   try {
@@ -378,6 +388,7 @@ const importContactsCsv = async (req, res, next) => {
 };
 
 module.exports = {
+  updateHamper,
   importContactsCsv,
   bulkUpdateStatus,
   mergeWithContactBook,

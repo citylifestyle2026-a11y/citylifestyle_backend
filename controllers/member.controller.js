@@ -115,15 +115,30 @@ const bulkDeleteNeedsFix = async (req, res, next) => {
   }
 };
 
-// GET /members/export?moved=needsFix&fixType=invalid  -> .csv download
+// GET /members/export?moved=needsFix&fixType=invalid        -> .csv download
+// GET /members/export?format=xlsx&moved=inGuestList&...     -> .xlsx download
+// Any list filter (search, profession, reference, moved, fixType) works,
+// and `ids=a,b,c` exports only the ticked rows.
 const exportMembers = async (req, res, next) => {
   try {
-    const { csv } = await memberService.exportMembersCsv(req.query);
+    const moved = String(req.query.moved || "");
     const type = String(req.query.fixType || "").toLowerCase();
-    const name =
-      req.query.moved === "needsFix"
-        ? `members-needs-fix${type ? `-${type}` : ""}`
-        : "members";
+
+    if (String(req.query.format || "").toLowerCase() === "xlsx") {
+      const { buffer } = await memberService.exportMembersXlsx(req.query);
+      const tab = { needsFix: "needs-fix", inGuestList: "in-guest-list", notInGuestList: "not-in-guest-list" }[moved];
+      const parts = ["contact-book", tab, moved === "needsFix" ? type : "", new Date().toISOString().slice(0, 10)];
+      const fileName = `${parts.filter(Boolean).join("-")}.xlsx`;
+      res.setHeader(
+        "Content-Type",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      );
+      res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+      return res.status(200).send(Buffer.from(buffer));
+    }
+
+    const { csv } = await memberService.exportMembersCsv(req.query);
+    const name = moved === "needsFix" ? `members-needs-fix${type ? `-${type}` : ""}` : "members";
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="${name}.csv"`);
     return res.status(200).send(csv);

@@ -3,6 +3,7 @@
 // Member List: import members from an Excel (.xlsx) / CSV file, list &
 // filter them, and move selected members to the Guest List for an edition.
 const mongoose = require("mongoose");
+const ExcelJS = require("exceljs");
 const { Readable } = require("stream");
 const Member = require("../models/member.model");
 const Contact = require("../models/contact.model");
@@ -1171,29 +1172,38 @@ const deleteNeedsFixMembers = async (body = {}) => {
 // file can be corrected and imported again. "Problem" is the extra column.
 const csvCell = (value) => `"${String(value ?? "").replace(/"/g, '""')}"`;
 
-const exportMembersCsv = async (query = {}) => {
+const EXPORT_HEADERS = [
+  "#", "Name", "Contact", "Email", "Profession", "Company / Brand", "Objective",
+  "Area", "City", "State", "Reference", "Reference 2", "Reference 3", "Source",
+  "Remark", "Status", "Company Designation", "Address", "Instagram Link",
+  "Relationship", "Spouse Name", "Spouse Mobile", "Spouse Instagram Link",
+  "Spouse Profession", "Problem", "Problem Type",
+];
+
+// Finds the members for an export and turns each one into a row (same
+// order as EXPORT_HEADERS). Shared by the CSV and the Excel export.
+// Optional `ids` (comma separated) = export only those ticked rows, still
+// limited by the other filters.
+const buildExportRows = async (query = {}) => {
   const activeEventIds = await getActiveEventIds();
   const filter = buildMemberQuery(query, activeEventIds);
+
+  const ids = String(query.ids || "")
+    .split(",")
+    .map((id) => id.trim())
+    .filter((id) => mongoose.Types.ObjectId.isValid(id));
+  if (ids.length > 0) filter._id = { $in: ids };
+
   const members = await Member.find(filter)
     .sort({ name: 1, _id: 1 })
     .collation({ locale: "en", strength: 2 })
     .lean();
 
-  const headers = [
-    "#", "Name", "Contact", "Email", "Profession", "Company / Brand", "Objective",
-    "Area", "City", "State", "Reference", "Reference 2", "Reference 3", "Source",
-    "Remark", "Status", "Company Designation", "Address", "Instagram Link",
-    "Relationship", "Spouse Name", "Spouse Mobile", "Spouse Instagram Link",
-    "Spouse Profession", "Problem", "Problem Type",
-  ];
-
-  const lines = [headers.map(csvCell).join(",")];
-
-  members.forEach((m, index) => {
+  const rows = members.map((m, index) => {
     const refs = m.references || [];
     const typeLabel =
       m.mobileStatus === "duplicate" ? "Duplicate" : m.mobileStatus === "invalid" ? "Invalid" : "";
-    const row = [
+    return [
       index + 1,
       m.name === "(No name)" ? "" : m.name,
       m.mobile,
@@ -1223,16 +1233,68 @@ const exportMembersCsv = async (query = {}) => {
       m.importNote,
       typeLabel,
     ];
-    lines.push(row.map(csvCell).join(","));
   });
 
+  return { rows, count: rows.length };
+};
+
+const exportMembersCsv = async (query = {}) => {
+  const { rows, count } = await buildExportRows(query);
+  const lines = [EXPORT_HEADERS.map(csvCell).join(",")];
+  rows.forEach((row) => lines.push(row.map(csvCell).join(",")));
+
   // BOM so Excel reads Gujarati / Hindi names correctly.
-  return { csv: "\uFEFF" + lines.join("\r\n"), count: members.length };
+  return { csv: "\uFEFF" + lines.join("\r\n"), count };
+};
+
+// ================= EXPORT (EXCEL .xlsx) =================
+// Same filters as the list (tab, fixType, search, profession, reference) +
+// optional ticked ids. Phone numbers are written as text so Excel never
+// turns them into 9.9E+09 or drops a leading 0.
+const exportMembersXlsx = async (query = {}) => {
+  const { rows, count } = await buildExportRows(query);
+
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet("Contact Book", {
+    views: [{ state: "frozen", ySplit: 1 }],
+  });
+
+  sheet.columns = EXPORT_HEADERS.map((header) => ({
+    header,
+    key: header,
+    width: Math.min(Math.max(header.length + 4, 14), 28),
+  }));
+  sheet.getColumn(1).width = 6;
+  sheet.getColumn("Address").width = 34;
+  sheet.getColumn("Remark").width = 30;
+  sheet.getColumn("Problem").width = 34;
+
+  const textColumns = ["Contact", "Spouse Mobile"].map((h) => EXPORT_HEADERS.indexOf(h) + 1);
+  textColumns.forEach((col) => {
+    sheet.getColumn(col).numFmt = "@";
+  });
+
+  rows.forEach((row) => {
+    sheet.addRow(row.map((value, i) => (textColumns.includes(i + 1) ? String(value ?? "") : value ?? "")));
+  });
+
+  const header = sheet.getRow(1);
+  header.height = 22;
+  header.eachCell((cell) => {
+    cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF3B82C4" } };
+    cell.alignment = { vertical: "middle", horizontal: "left" };
+  });
+  sheet.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: EXPORT_HEADERS.length } };
+
+  const buffer = await workbook.xlsx.writeBuffer();
+  return { buffer, count };
 };
 
 module.exports = {
   deleteNeedsFixMembers,
   exportMembersCsv,
+  exportMembersXlsx,
   importMembers,
   getAllMembers,
   getMemberProfessions,
