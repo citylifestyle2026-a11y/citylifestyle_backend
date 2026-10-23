@@ -92,6 +92,10 @@ const discardUploadedImages = async (images) => {
 // so this query actually uses those indexes instead of a full scan.
 const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+// Area compare key: trimmed, single spaces, lower-case ("Vesu " == "vesu").
+const normalizeAreaKey = (value) =>
+  String(value ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+
 const CASE_INSENSITIVE_COLLATION = { locale: "en", strength: 2 };
 
 // Fields the List API is allowed to sort by — kept to an explicit
@@ -564,6 +568,34 @@ function buildContactQuery(query) {
         $or: referenceKeys.map((key) => ({
           references: {
             $regex: `^\\s*${escapeRegex(key)}\\s*$`,
+            $options: "i",
+          },
+        })),
+      },
+    ];
+  }
+
+  // ================= AREA FILTER =================
+  // Works like the reference filter: `area` can be one value or several
+  // (?area=Vesu&area=Adajan) and a contact matches when its area is ANY of
+  // them. Whole-value, case-insensitive match, so "Vesu", "vesu" and " Vesu "
+  // are one area. Used by BOTH the list and the Excel export.
+  const areaKeys = [
+    ...new Set(
+      (Array.isArray(query.area) ? query.area : query.area ? [query.area] : [])
+        .map(normalizeAreaKey)
+        .filter(Boolean)
+    ),
+  ];
+
+  if (areaKeys.length) {
+    filter.$and = [
+      ...(filter.$and || []),
+      {
+        $or: areaKeys.map((key) => ({
+          area: {
+            // spaces inside an area may be stored as 1 or more spaces
+            $regex: `^\\s*${escapeRegex(key).replace(/ /g, "\\s+")}\\s*$`,
             $options: "i",
           },
         })),
@@ -2166,6 +2198,43 @@ const getUniqueReferences = async (query = {}) => {
     data: uniqueReferences,
   };
 };
+
+// ================= GET UNIQUE AREAS =================
+// Feeds the Guest List "All Areas" filter dropdown: every area used by a
+// visible guest, trimmed, de-duplicated case-insensitively ("Vesu" and
+// "vesu " count once) and sorted A-Z. Same base filter as the Guest List
+// itself (history-only records are never listed).
+const getUniqueAreas = async () => {
+  const contacts = await Contact.find(
+    { isDeleted: { $ne: true }, historyOnly: { $ne: true } },
+    { area: 1 }
+  ).lean();
+
+  const seen = new Set();
+  const areas = [];
+
+  for (const contact of contacts) {
+    if (typeof contact.area !== "string") continue;
+
+    const trimmed = contact.area.trim().replace(/\s+/g, " ");
+    if (!trimmed) continue;
+
+    const key = normalizeAreaKey(trimmed);
+    if (seen.has(key)) continue;
+
+    seen.add(key);
+    areas.push(trimmed);
+  }
+
+  areas.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+
+  return {
+    success: true,
+    message: "Unique areas fetched successfully",
+    data: areas,
+  };
+};
+
 
 // ================= GET REFERENCE SUMMARY =================
 // Groups every reference value across ALL active (non-soft-deleted)
@@ -2395,5 +2464,6 @@ module.exports = {
   updateContact,
   deleteContact,
   getUniqueReferences,
+  getUniqueAreas,
   getReferenceSummary,
 };

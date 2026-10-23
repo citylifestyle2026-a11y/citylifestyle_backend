@@ -56,6 +56,14 @@ router.get(
   contactController.getUniqueReferences
 );
 
+// Get Unique Areas — also BEFORE "/:id". Powers the Guest List "All Areas"
+// filter dropdown.
+router.get(
+  "/unique-areas",
+  protect,
+  contactController.getUniqueAreas
+);
+
 // Get Reference Summary — must be registered BEFORE the "/:id" route
 // below, otherwise Express would match "reference-summary" as an :id
 // param and route it to getContactById instead.

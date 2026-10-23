@@ -76,6 +76,22 @@ const getUniqueReferences = async (req, res, next) => {
   }
 };
 
+// ================= GET UNIQUE AREAS =================
+// GET /api/contacts/unique-areas — feeds the Guest List "All Areas" filter.
+const getUniqueAreas = async (req, res, next) => {
+  try {
+    const result = await contactService.getUniqueAreas();
+
+    return res.status(200).json({
+      success: true,
+      message: result.message,
+      data: result.data,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 // ================= GET REFERENCE SUMMARY =================
 // GET /api/contacts/reference-summary — no query params; returns every
 // unique reference across all active contacts grouped with the list of
@@ -383,6 +399,7 @@ module.exports = {
   getAllContacts,
   exportContacts,
   getUniqueReferences,
+  getUniqueAreas,
   getReferenceSummary,
   getContactById,
   updateContact,
