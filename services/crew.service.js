@@ -108,11 +108,15 @@ const createCrew = async (data, adminId) => {
   const whatsappNumber = normalizeNumberOrThrow(data.whatsappNumber);
   await assertNumberFree(whatsappNumber);
 
+  // Crew Category is compulsory.
+  const category = await resolveCategory(data.crewCategory);
+  if (!category) throw new AppError("Crew category is required", 400);
+
   const crew = await Crew.create({
     fullName: text(data.fullName),
     whatsappNumber,
     email: text(data.email),
-    crewCategory: (await resolveCategory(data.crewCategory)) || null,
+    crewCategory: category,
     designation: text(data.designation),
     area: text(data.area),
     address: text(data.address),
@@ -201,7 +205,11 @@ const updateCrew = async (id, data) => {
     if (data[key] !== undefined) crew[key] = text(data[key]);
   });
 
-  if (data.crewCategory !== undefined) crew.crewCategory = await resolveCategory(data.crewCategory);
+  if (data.crewCategory !== undefined) {
+    const category = await resolveCategory(data.crewCategory);
+    if (!category) throw new AppError("Crew category is required", 400);
+    crew.crewCategory = category;
+  }
 
   await crew.save();
   return crew.populate(POPULATE);
@@ -406,9 +414,13 @@ const importCrew = async (buffer, fileName, adminId, { dryRun = false } = {}) =>
       problems.push({ row: row.rowNumber, name, reason: "WhatsApp number already exists" });
       continue;
     }
-    seen.add(number);
 
     const categoryName = text(row.category);
+    if (!categoryName) {
+      problems.push({ row: row.rowNumber, name, reason: "Crew Category is empty" });
+      continue;
+    }
+    seen.add(number);
     if (categoryName && !categoryByName.has(categoryName.toLowerCase())) {
       newCategories.add(categoryName);
     }
@@ -720,7 +732,9 @@ const restorePassForCrew = async (member) => {
 // POST /crew/cancel-pass { ids }
 // Approved crew with a pass: pass cancelled (QR dead, seat back to stock),
 // crew moves to Rejected / "Pass Cancelled" and gets a WhatsApp message.
-const cancelPassesOfCrew = async ({ ids }, adminId) => {
+// notify (default true): send the "pass cancelled" WhatsApp message. The Cancel Pass
+// button notifies the crew; Reject (bulkUpdateCrewStatus) passes notify: false.
+const cancelPassesOfCrew = async ({ ids }, adminId, { notify = true } = {}) => {
   const Event = require("../models/event.model");
   const { sendPassCancelledMessage } = require("./contactNotification.service");
 
@@ -749,7 +763,7 @@ const cancelPassesOfCrew = async ({ ids }, adminId) => {
     try {
       // Read the event name BEFORE the cancel (it clears passEventId).
       let editionName = "";
-      if (member.passEventId) {
+      if (notify && member.passEventId) {
         const event = await Event.findById(member.passEventId).select("title edition").lean();
         if (event) editionName = event.edition || event.title || "";
       }
@@ -782,22 +796,26 @@ const cancelPassesOfCrew = async ({ ids }, adminId) => {
 
       let messageSent = false;
       let messageError = "";
-      try {
-        await sendPassCancelledMessage(member, editionName);
-        await Crew.updateOne({ _id: member._id }, { $set: { passCancelMessageSentAt: new Date() } });
-        messageSent = true;
-      } catch (error) {
-        messageError = String(error?.message || "Unknown WhatsApp error");
-        console.error(`Pass-cancelled WhatsApp failed for crew ${member._id}:`, messageError);
+      if (notify) {
+        try {
+          await sendPassCancelledMessage(member, editionName);
+          await Crew.updateOne({ _id: member._id }, { $set: { passCancelMessageSentAt: new Date() } });
+          messageSent = true;
+        } catch (error) {
+          messageError = String(error?.message || "Unknown WhatsApp error");
+          console.error(`Pass-cancelled WhatsApp failed for crew ${member._id}:`, messageError);
+        }
       }
 
       results.push({
         ...base,
         status: "cancelled",
         messageSent,
-        message: messageSent
-          ? "Pass cancelled and WhatsApp message sent."
-          : `Pass cancelled, but the WhatsApp message could not be sent (${messageError}).`,
+        message: !notify
+          ? "Pass cancelled."
+          : messageSent
+            ? "Pass cancelled and WhatsApp message sent."
+            : `Pass cancelled, but the WhatsApp message could not be sent (${messageError}).`,
       });
     } catch (error) {
       results.push({ ...base, status: "failed", message: error.message || "Failed to cancel the pass." });
@@ -806,7 +824,7 @@ const cancelPassesOfCrew = async ({ ids }, adminId) => {
 
   const cancelled = results.filter((r) => r.status === "cancelled").length;
   const messageSent = results.filter((r) => r.messageSent).length;
-  const messageFailed = cancelled - messageSent;
+  const messageFailed = notify ? cancelled - messageSent : 0;
   const failed = results.length - cancelled;
   const firstFailure = results.find((r) => r.status === "failed");
   const firstMessageError = results.find((r) => r.status === "cancelled" && !r.messageSent);
@@ -825,7 +843,7 @@ const cancelPassesOfCrew = async ({ ids }, adminId) => {
       messageSent,
       messageFailed,
       failedReason: firstFailure ? firstFailure.message : "",
-      messageError: firstMessageError ? firstMessageError.message : "",
+      messageError: notify && firstMessageError ? firstMessageError.message : "",
       usedTemplate: Boolean(String(process.env.CHATBOX_PASS_CANCEL_TEMPLATE_NAME || "").trim()),
       results,
     },
@@ -857,7 +875,7 @@ const bulkUpdateCrewStatus = async ({ ids, status }, adminId) => {
 
     if (withPass.length) {
       const handled = new Set(withPass.map((c) => String(c._id)));
-      cancelResult = await cancelPassesOfCrew({ ids: [...handled] }, adminId);
+      cancelResult = await cancelPassesOfCrew({ ids: [...handled] }, adminId, { notify: false }); // Reject = no WhatsApp message
       crewIds = crewIds.filter((id) => !handled.has(String(id)));
       if (crewIds.length === 0) return cancelResult;
     }

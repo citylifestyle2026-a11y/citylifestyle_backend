@@ -3,6 +3,7 @@ const { body, validationResult } = require("express-validator");
 const createCrewValidation = [
   body("fullName").trim().notEmpty().withMessage("Full name is required"),
   body("whatsappNumber").trim().notEmpty().withMessage("WhatsApp number is required"),
+  body("crewCategory").trim().notEmpty().withMessage("Crew category is required"),
   body("email")
     .optional({ values: "falsy" })
     .trim()
@@ -13,6 +14,7 @@ const createCrewValidation = [
 const updateCrewValidation = [
   body("fullName").optional().trim().notEmpty().withMessage("Full name is required"),
   body("whatsappNumber").optional().trim().notEmpty().withMessage("WhatsApp number is required"),
+  body("crewCategory").optional().trim().notEmpty().withMessage("Crew category is required"),
   body("email")
     .optional({ values: "falsy" })
     .trim()
