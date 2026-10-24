@@ -109,16 +109,18 @@ const contactSchema = new mongoose.Schema(
     // spouseName/spouseMobile are required FOR a given contact depends
     // on this value, but that conditional cross-field rule is Step 2's
     // job (the request-layer validator), not this schema's.
+    // Comes from the Contact Book (and the old spouse form). Contacts created
+    // from the new form only have `entryType`, so this can be empty.
     relationship: {
       type: String,
-      enum: ["Single", "Couple"],
-      required: true,
+      enum: ["Single", "Couple", ""],
+      default: "",
     },
 
     // Entry Type (Single = 1 entry, Couple = 2 entry) - the field the form asks
-    // for while the Relationship / spouse section is switched off. When the form
-    // does not send `relationship`, it is filled from this value. Old contacts
-    // have none: use `entryType || relationship`.
+    // for while the Relationship / spouse section is switched off. Shown in its
+    // own "Entry Type" column; Contact Book contacts have it empty and show their
+    // `relationship` instead. Pass quantity uses `entryType || relationship`.
     entryType: {
       type: String,
       enum: ["Single", "Couple", ""],

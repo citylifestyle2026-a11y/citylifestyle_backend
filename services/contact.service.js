@@ -113,6 +113,7 @@ const SORTABLE_FIELDS = [
   "spouseName",
   "spouseMobile",
   "profession",
+  "entryType",
   "createdAt",
   "updatedAt",
 ];
@@ -149,9 +150,9 @@ const createContact = async (data, adminId, files = {}, options = {}) => {
     professionCategory,
   } = data;
 
-  // The form sends Entry Type only (no relationship): it then doubles as the
-  // relationship, so every Couple rule below keeps working.
-  const relationship = data.relationship || entryType;
+  // Relationship is only sent by the Contact Book / old spouse form. The new form
+  // sends Entry Type, which is kept in its own field (not copied here).
+  const relationship = data.relationship || "";
 
   assertPhotosPresent({
     hasProfile: !!firstFile(files, "profileImage"),
@@ -279,7 +280,7 @@ const createContact = async (data, adminId, files = {}, options = {}) => {
       companyCategory: companyCategory || null,
       email,
       relationship,
-      entryType: entryType || relationship,
+      entryType: entryType || "",
       spouseName,
       spouseMobile,
       profession,
@@ -1892,6 +1893,7 @@ const exportContacts = async (query, res) => {
     { header: "Area", key: "area", width: 20 },
     { header: "Instagram ID", key: "instagramId", width: 22 },
     { header: "Relationship", key: "relationship", width: 14 },
+    { header: "Entry Type", key: "entryType", width: 14 },
     { header: "Spouse Name", key: "spouseName", width: 25 },
     { header: "Spouse Mobile Number", key: "spouseMobile", width: 22 },
     { header: "Spouse Instagram ID", key: "spouseInstagramId", width: 22 },
@@ -1986,6 +1988,7 @@ const exportContacts = async (query, res) => {
       area: contact.area || "-",
       instagramId: (showOwn && contact.instagramId) || "-",
       relationship: contact.relationship || "-",
+      entryType: contact.entryType || "-",
       spouseName: (showSpouse && contact.spouseName) || "-",
       spouseMobile: (showSpouse && contact.spouseMobile) || "-",
       spouseInstagramId: (showSpouse && contact.spouseInstagramId) || "-",
@@ -2092,8 +2095,6 @@ const updateContact = async (id, data, files = {}) => {
     updateFields.companyCategory = data.companyCategory || null;
   }
   if (data.email !== undefined) updateFields.email = data.email;
-  // The form sends Entry Type only: it also becomes the relationship.
-  if (!data.relationship && data.entryType) data.relationship = data.entryType;
   if (data.entryType) updateFields.entryType = data.entryType;
   if (data.relationship) updateFields.relationship = data.relationship;
   if (data.spouseName !== undefined) updateFields.spouseName = data.spouseName;
