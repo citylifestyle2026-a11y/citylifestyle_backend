@@ -2,7 +2,21 @@ const Event = require("../models/event.model.js");
 const Booking = require("../models/booking.model.js");
 const BookingTicket = require("../models/bookingTicket.model.js");
 const TicketType = require("../models/ticketType.model.js");
+const Crew = require("../models/crew.model.js");
 const { getRsvpSummary } = require("./rsvp.service");
+
+// Passes sent from the Crew page are crew bookings (Booking.isCrew = true;
+// older ones are recognised by their remark). They are shown in their own
+// "Crew" section on the dashboard and must never be mixed into the guest
+// numbers (Booking / Entry Report / Attendance).
+const CREW_REMARK_RX = /^Pass sent from Crew/i;
+const GUEST_ONLY = {
+    isCrew: { $ne: true },
+    remark: { $not: CREW_REMARK_RX },
+};
+const CREW_ONLY = {
+    $or: [{ isCrew: true }, { remark: CREW_REMARK_RX }],
+};
 
 // Get Active Event
 // An event is "currently running" while isActive === true AND its
@@ -54,6 +68,7 @@ const getTodayBooking = async (eventId) => {
     // Cancelled bookings (e.g. a cancelled pass) are not counted either.
     return await Booking.countDocuments({
         eventId,
+        ...GUEST_ONLY,
         isDeleted: false,
         bookingStatus: { $ne: "Cancelled" },
         createdAt: {
@@ -71,7 +86,7 @@ const getTodayBooking = async (eventId) => {
 const getTotalBooking = async (eventId) => {
     const result = await Booking.aggregate([
         // A cancelled booking (e.g. a cancelled pass) is not a booking any more.
-        { $match: { eventId, isDeleted: false, bookingStatus: { $ne: "Cancelled" } } },
+        { $match: { eventId, ...GUEST_ONLY, isDeleted: false, bookingStatus: { $ne: "Cancelled" } } },
         { $group: { _id: null, qty: { $sum: "$quantity" } } },
     ]);
 
@@ -98,6 +113,7 @@ const getTotalBooking = async (eventId) => {
 const getPassBookingBreakdown = async (eventId, dateRange) => {
     const match = {
         eventId,
+        ...GUEST_ONLY,
         isDeleted: false,
         bookingStatus: "Confirmed",
     };
@@ -188,6 +204,7 @@ const getBookingCounts = async (eventId) => {
         {
             $match: {
                 eventId,
+                ...GUEST_ONLY,
                 // Deleted / cancelled bookings must not appear in the booking chart.
                 isDeleted: false,
                 bookingStatus: { $ne: "Cancelled" },
@@ -223,6 +240,7 @@ const getBookingCounts = async (eventId) => {
 const getTotalBookingDetails = async (eventId) => {
     const bookings = await Booking.find({
         eventId,
+        ...GUEST_ONLY,
         isDeleted: false,
         bookingStatus: { $ne: "Cancelled" },
     })
@@ -303,7 +321,10 @@ const getDashboardCounts = async (eventId) => {
         bookingStatus: "Cancelled",
     });
 
-    const inactiveBookingIds = [...deletedBookingIds, ...cancelledBookingIds];
+    // Crew bookings have their own section (getCrewCounts) - keep them out of guest numbers.
+    const crewBookingIds = await Booking.distinct("_id", { eventId, ...CREW_ONLY });
+
+    const inactiveBookingIds = [...deletedBookingIds, ...cancelledBookingIds, ...crewBookingIds];
 
     const liveBookingTicketScope = {
         eventId,
@@ -317,8 +338,8 @@ const getDashboardCounts = async (eventId) => {
     const checkedInScope = {
         eventId,
         status: "Used",
-        ...(deletedBookingIds.length > 0
-            ? { bookingId: { $nin: deletedBookingIds } }
+        ...(deletedBookingIds.length > 0 || crewBookingIds.length > 0
+            ? { bookingId: { $nin: [...deletedBookingIds, ...crewBookingIds] } }
             : {}),
     };
 
@@ -328,6 +349,7 @@ const getDashboardCounts = async (eventId) => {
     // cancelled counts the same as a registration here.
     const passBookingIds = await Booking.distinct("_id", {
         eventId,
+        ...GUEST_ONLY,
         isDeleted: { $ne: true },
         entryMode: "single_qr",
         bookingStatus: { $ne: "Cancelled" },
@@ -342,7 +364,7 @@ const getDashboardCounts = async (eventId) => {
     ] =
         await Promise.all([
             Booking.aggregate([
-                { $match: { eventId, isDeleted: false, bookingStatus: { $ne: "Cancelled" } } },
+                { $match: { eventId, ...GUEST_ONLY, isDeleted: false, bookingStatus: { $ne: "Cancelled" } } },
                 { $group: { _id: null, qty: { $sum: "$quantity" } } },
             ]),
             BookingTicket.countDocuments({
@@ -387,6 +409,53 @@ const getDashboardCounts = async (eventId) => {
     };
 };
 
+// ================= CREW COUNTS =================
+// Own section on the dashboard. Crew members are people (not guests):
+//  - totals by approval status come from the Crew collection (all events)
+//  - pass / check-in numbers are scoped to the selected event
+// A crew member saved before approval existed has no approvalStatus -> approved.
+const getCrewCounts = async (eventId) => {
+    const live = { isDeleted: { $ne: true } };
+
+    const [total, pending, rejected, approvedExplicit, approvedLegacy] = await Promise.all([
+        Crew.countDocuments(live),
+        Crew.countDocuments({ ...live, approvalStatus: "pending" }),
+        Crew.countDocuments({ ...live, approvalStatus: "rejected" }),
+        Crew.countDocuments({ ...live, approvalStatus: "approved" }),
+        Crew.countDocuments({ ...live, approvalStatus: { $exists: false } }),
+    ]);
+
+    const counts = {
+        total,
+        approved: approvedExplicit + approvedLegacy,
+        pending,
+        rejected,
+        passSent: 0,
+        checkedIn: 0,
+        notCheckedIn: 0,
+    };
+    if (!eventId) return counts;
+
+    const crewBookingIds = await Booking.distinct("_id", {
+        eventId,
+        isDeleted: { $ne: true },
+        bookingStatus: { $ne: "Cancelled" },
+        ...CREW_ONLY,
+    });
+
+    const [passSent, checkedIn, notCheckedIn] = await Promise.all([
+        Crew.countDocuments({ ...live, passSentAt: { $ne: null }, passEventId: eventId }),
+        BookingTicket.countDocuments({ eventId, bookingId: { $in: crewBookingIds }, status: "Used" }),
+        BookingTicket.countDocuments({
+            eventId,
+            bookingId: { $in: crewBookingIds },
+            status: { $nin: ["Used", "Cancelled"] },
+        }),
+    ]);
+
+    return { ...counts, passSent, checkedIn, notCheckedIn };
+};
+
 // Dashboard Summary
 // `requestedEventId` (optional): lets the dashboard's own Event selector
 // show any ONE non-deleted event on demand — active or inactive/expired —
@@ -423,6 +492,7 @@ const getDashboardCounts = async (eventId) => {
             pendingRegistrations: 0,
             scannedEntries: 0,
             registeredNotScanned: 0,
+            crew: await getCrewCounts(null),
         };
     }
 
@@ -431,6 +501,7 @@ const getDashboardCounts = async (eventId) => {
     const dashboardCounts = await getDashboardCounts(activeEvent._id);
     // Attendance reminder answers (Yes / No / No response) for this event.
     const rsvp = await getRsvpSummary(activeEvent._id);
+    const crew = await getCrewCounts(activeEvent._id);
 
     const todayBooking = await getTodayBooking(activeEvent._id);
     const todayPassResult = await getTodayPassBooking(activeEvent._id);
@@ -459,6 +530,7 @@ const getDashboardCounts = async (eventId) => {
         bookingCounts,
         totalBookingDetails,
         rsvp,
+        crew,
         ...dashboardCounts,
     };
 };

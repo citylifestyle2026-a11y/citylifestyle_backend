@@ -17,6 +17,12 @@ const getAllEntryReportValidation = [
     .isInt({ min: 1, max: 100 })
     .withMessage("Limit must be between 1 and 100"),
 
+  // Guest / Crew tab of the Entry Report.
+  query("type")
+    .optional({ checkFalsy: true })
+    .isIn(["guest", "crew"])
+    .withMessage("Type must be guest or crew"),
+
   query("bookingId")
     .optional()
     .trim(),

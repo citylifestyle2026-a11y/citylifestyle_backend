@@ -84,7 +84,9 @@ const buildCrewQuery = (query = {}) => {
   //  notSent   - no pass sent, none cancelled
   //  rejected  - rejected crew (a cancelled pass lives in its own tab)
   //  cancelled - pass was cancelled and not brought back yet
-  if (query.passStatus === "sent") {
+  if (query.passStatus === "pending") {
+    filter.approvalStatus = "pending";
+  } else if (query.passStatus === "sent") {
     filter.passSentAt = { $ne: null };
   } else if (query.passStatus === "notSent") {
     filter.passSentAt = null;
@@ -115,6 +117,8 @@ const createCrew = async (data, adminId) => {
     area: text(data.area),
     address: text(data.address),
     remark: text(data.remark),
+    // New crew always starts as Pending; an admin approves them later.
+    approvalStatus: "pending",
     createdBy: adminId,
   });
 
@@ -141,7 +145,7 @@ const getAllCrew = async (query = {}) => {
 
   // Tab counts follow the search + category filter, not the pass tab itself.
   const base = buildCrewQuery({ ...query, passStatus: undefined });
-  const [all, passSent, passNotSent, passCancelled, rejectedAll] = await Promise.all([
+  const [all, passSent, passNotSent, passCancelled, rejectedAll, pending] = await Promise.all([
     Crew.countDocuments(base),
     Crew.countDocuments({ ...base, passSentAt: { $ne: null } }),
     Crew.countDocuments({ ...base, passSentAt: null, passCancelledAt: null }),
@@ -152,6 +156,7 @@ const getAllCrew = async (query = {}) => {
       passCancelledAt: { $ne: null },
     }),
     Crew.countDocuments({ ...base, approvalStatus: "rejected" }),
+    Crew.countDocuments({ ...base, approvalStatus: "pending" }),
   ]);
 
   return {
@@ -163,6 +168,7 @@ const getAllCrew = async (query = {}) => {
       passSent,
       passNotSent,
       passCancelled,
+      pending,
       rejected: Math.max(0, rejectedAll - passCancelled),
     },
     pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
@@ -448,6 +454,7 @@ const importCrew = async (buffer, fileName, adminId, { dryRun = false } = {}) =>
   const docs = toInsert.map(({ categoryName, ...rest }) => ({
     ...rest,
     crewCategory: categoryName ? categoryByName.get(categoryName.toLowerCase()) || null : null,
+    approvalStatus: "pending", // imported crew also start as Pending
     createdBy: adminId,
   }));
 

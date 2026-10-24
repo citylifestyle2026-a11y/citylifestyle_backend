@@ -1023,6 +1023,7 @@ const getAllBookings = async (query) => {
     fromDate,
     toDate,
     search,
+    type,
   } = query;
 
   // ================= CONVERT PAGINATION VALUES =================
@@ -1116,6 +1117,20 @@ const getAllBookings = async (query) => {
         },
       },
     ];
+  }
+
+  // ================= GUEST / CREW TAB =================
+  // Passes sent from the Crew page are crew bookings (Booking.isCrew, or the
+  // remark of older ones). type=crew lists only those, every other request
+  // (default "guest") lists everything else - same split as the Entry Report.
+  const crewBookingCondition = [
+    { isCrew: true },
+    { remark: { $regex: "^Pass sent from Crew", $options: "i" } },
+  ];
+  if (type === "crew") {
+    filter.$and = [...(filter.$and || []), { $or: crewBookingCondition }];
+  } else {
+    filter.$nor = crewBookingCondition;
   }
 
   // ================= DATE FILTER =================
@@ -1236,6 +1251,7 @@ const exportBookings = async (query, res) => {
     fromDate,
     toDate,
     search,
+    type,
   } = query;
 
   // ================= RESOLVE EVENT(S) =================
@@ -1317,6 +1333,20 @@ const exportBookings = async (query, res) => {
         },
       },
     ];
+  }
+
+  // ================= GUEST / CREW TAB =================
+  // Passes sent from the Crew page are crew bookings (Booking.isCrew, or the
+  // remark of older ones). type=crew lists only those, every other request
+  // (default "guest") lists everything else - same split as the Entry Report.
+  const crewBookingCondition = [
+    { isCrew: true },
+    { remark: { $regex: "^Pass sent from Crew", $options: "i" } },
+  ];
+  if (type === "crew") {
+    filter.$and = [...(filter.$and || []), { $or: crewBookingCondition }];
+  } else {
+    filter.$nor = crewBookingCondition;
   }
 
   // ================= DATE FILTER =================

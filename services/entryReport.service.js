@@ -182,6 +182,7 @@ const buildEntryReportFilter = async (params, eventIds, currentUser) => {
     search,
     startDate,
     endDate,
+    type,
   } = params;
 
   // `match`     = conditions on the BookingTicket itself (run first).
@@ -202,6 +203,16 @@ const buildEntryReportFilter = async (params, eventIds, currentUser) => {
   }
 
   const postMatch = [];
+
+  // Guest / Crew tabs: crew passes (sent from the Crew page) are listed only
+  // under type=crew, every other entry only under type=guest (the default).
+  const crewCondition = {
+    $or: [
+      { "booking.isCrew": true },
+      { "booking.remark": { $regex: "^Pass sent from Crew", $options: "i" } },
+    ],
+  };
+  postMatch.push(type === "crew" ? crewCondition : { $nor: crewCondition.$or });
 
   if (bookingId) {
     postMatch.push({
@@ -516,6 +527,7 @@ const getAllEntryReports = async (query, currentUser) => {
     search = "",
     startDate,
     endDate,
+    type = "guest",
     eventId: requestedEventId,
   } = query;
 
@@ -558,6 +570,7 @@ const getAllEntryReports = async (query, currentUser) => {
       search,
       startDate,
       endDate,
+      type,
     },
     eventIds,
     currentUser
@@ -671,6 +684,7 @@ const exportEntryReport = async (query, res, currentUser) => {
     search = "",
     startDate,
     endDate,
+    type = "guest",
     eventId: requestedEventId,
   } = query;
 
@@ -700,6 +714,7 @@ const exportEntryReport = async (query, res, currentUser) => {
       search,
       startDate,
       endDate,
+      type,
     },
     eventIds,
     currentUser
