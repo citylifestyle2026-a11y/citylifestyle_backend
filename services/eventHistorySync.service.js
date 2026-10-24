@@ -87,10 +87,13 @@ const loadEventPeople = async (eventId) => {
 
   const bookingIds = [...new Set(tickets.map((t) => String(t.bookingId)))];
 
+  // Crew passes (Crew page) are staff, not guests: never part of history.
   const bookings = await Booking.find({
     _id: { $in: bookingIds },
     isDeleted: { $ne: true },
     bookingStatus: { $ne: "Cancelled" },
+    isCrew: { $ne: true },
+    remark: { $not: /^Pass sent from Crew/i },
   })
     .select("name mobileNumber entryMode")
     .lean();

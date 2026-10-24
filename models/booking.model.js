@@ -90,6 +90,13 @@ const bookingSchema = new mongoose.Schema(
       default: "per_ticket",
     },
 
+    // true = pass sent from the Crew page. Crew is never added to Event
+    // History (see services/eventHistorySync.service.js).
+    isCrew: {
+      type: Boolean,
+      default: false,
+    },
+
     bookingStatus: {
       type: String,
       enum: ["Confirmed", "Cancelled"],
