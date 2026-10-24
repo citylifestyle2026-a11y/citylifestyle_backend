@@ -285,13 +285,20 @@ const sendOne = async (guest, template) => {
     );
   }
 
-  await whatsappService.sendMediaTemplateMessage({
-    phone: guest.mobileNumber,
-    templateName: template.name,
-    languageCode: template.language,
-    imageUrl: saved.url,
-    bodyParams: buildBodyParams(guest),
-  });
+  try {
+    await whatsappService.sendMediaTemplateMessage({
+      phone: guest.mobileNumber,
+      templateName: template.name,
+      languageCode: template.language,
+      imageUrl: saved.url,
+      bodyParams: buildBodyParams(guest),
+    });
+  } catch (err) {
+    // Keep the card URL on the error so the admin can open it and see
+    // exactly what WhatsApp tried to download.
+    err.cardUrl = saved.url;
+    throw err;
+  }
 
   return saved;
 };
@@ -309,7 +316,9 @@ const processOne = async (id, template) => {
     guest.cardPublicId = saved.public_id;
   } catch (err) {
     guest.status = "failed";
-    guest.error = String(err?.message || "Failed to send").slice(0, 300);
+    const base = String(err?.message || "Failed to send").slice(0, 200);
+    guest.error = err?.cardUrl ? `${base} | Card URL: ${err.cardUrl}` : base;
+    if (err?.cardUrl) guest.cardUrl = err.cardUrl;
   }
 
   guest.attempts += 1;
