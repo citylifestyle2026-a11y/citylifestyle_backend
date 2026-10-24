@@ -34,7 +34,7 @@ const HEADER_ALIASES = {
   address: ["address"],
   instagramId: ["instagramid", "instagram", "instagramlink"],
   email: ["email"],
-  relationship: ["relationship"],
+  relationship: ["relationship", "entrytype"],
   spouseName: ["spousename"],
   spouseMobile: ["spousemobile", "spousemobilenumber"],
   spouseInstagramId: ["spouseinstagramid", "spouseinstagram", "spouseinstagramlink"],

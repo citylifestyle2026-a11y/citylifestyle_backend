@@ -247,7 +247,7 @@ const saveAsMember = async (data, link, files = null) => {
     return category?.name || "";
   };
 
-  const isCouple = data.relationship === "Couple";
+  const isCouple = (data.relationship || data.entryType) === "Couple";
 
   return memberService.createMember(
     {
@@ -260,7 +260,7 @@ const saveAsMember = async (data, link, files = null) => {
       address: data.address,
       area: data.area,
       instagramId: data.instagramId,
-      relationship: data.relationship,
+      relationship: data.relationship || data.entryType,
       spouseName: isCouple ? data.spouseName : "",
       spouseMobile: isCouple ? data.spouseMobile : "",
       spouseInstagramId: isCouple ? data.spouseInstagramId : "",

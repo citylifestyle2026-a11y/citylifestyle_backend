@@ -808,6 +808,8 @@ const moveMembersToGuestList = async (body, adminId) => {
           references: member.references || [],
           companyCategory,
           relationship: member.relationship === "Couple" ? "Couple" : "Single",
+          // Entry Type is filled from the Contact Book relationship too.
+          entryType: member.relationship === "Couple" ? "Couple" : "Single",
           spouseName: member.relationship === "Couple" ? member.spouseName || "" : "",
           spouseMobile: member.relationship === "Couple" ? member.spouseMobile || "" : "",
           spouseInstagramId: member.relationship === "Couple" ? member.spouseInstagramId || "" : "",

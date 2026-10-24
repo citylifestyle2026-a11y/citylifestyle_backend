@@ -144,13 +144,26 @@ const createContactValidation = [
   // Single / Couple — required outright, independent of every
   // conditional rule below. No gender is inferred from this value
   // anywhere in this validator or the service.
+  // The form now sends `entryType` (Single / Couple); `relationship` is only sent
+  // by clients that still use the spouse section. One of the two is required.
   body("relationship")
+    .optional({ values: "falsy" })
     .trim()
-    .notEmpty()
-    .withMessage("Relationship is required")
-    .bail()
     .isIn(["Single", "Couple"])
     .withMessage('Relationship must be "Single" or "Couple"'),
+
+  body("entryType")
+    .trim()
+    .custom((value, { req }) => {
+      const v = String(value || "").trim();
+      if (!v && !String(req.body.relationship || "").trim()) {
+        throw new Error("Entry Type is required");
+      }
+      if (v && !["Single", "Couple"].includes(v)) {
+        throw new Error('Entry Type must be "Single" or "Couple"');
+      }
+      return true;
+    }),
 
   // ================= CONDITIONAL: COUPLE-ONLY REQUIRED FIELDS =================
   // spouseName / spouseMobile / profession are each only required when
@@ -269,6 +282,12 @@ const updateContactValidation = [
     .trim()
     .isIn(["Single", "Couple"])
     .withMessage('Relationship must be "Single" or "Couple"'),
+
+  body("entryType")
+    .optional({ values: "falsy" })
+    .trim()
+    .isIn(["Single", "Couple"])
+    .withMessage('Entry Type must be "Single" or "Couple"'),
 
   body("spouseName").optional({ values: "falsy" }).trim(),
 

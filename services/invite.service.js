@@ -199,26 +199,63 @@ const list = async ({ page = 1, limit = 10, search = "", status = "" }) => {
 };
 
 // ---------------- sending ----------------
+// TWO modes:
+//  1) TEXT mode  (CHATBOX_INVITE_TEXT_TEMPLATE_NAME is set)
+//     Plain Utility template, NO image. Body has ONE variable: {{1}} = guest name.
+//  2) CARD mode  (CHATBOX_INVITE_CARD_TEMPLATE_NAME)
+//     Image header (the uploaded card with the name on it) + {{1}} = guest name.
+// If both are set, TEXT mode wins. Remove the text variable to go back to cards.
+const isTextMode = () => Boolean(String(process.env.CHATBOX_INVITE_TEXT_TEMPLATE_NAME || "").trim());
+
 const getTemplate = () => {
+  const textName = String(process.env.CHATBOX_INVITE_TEXT_TEMPLATE_NAME || "").trim();
+  if (textName) {
+    return {
+      name: textName,
+      language: String(process.env.CHATBOX_INVITE_TEXT_TEMPLATE_LANGUAGE || "en").trim(),
+      textOnly: true,
+    };
+  }
+
   const name = String(process.env.CHATBOX_INVITE_CARD_TEMPLATE_NAME || "").trim();
   if (!name) {
     throw new AppError(
-      "CHATBOX_INVITE_CARD_TEMPLATE_NAME is not set in the backend .env. Create the WhatsApp template (image header + 1 variable for the name), get it approved, then put its name in .env.",
+      "Set CHATBOX_INVITE_TEXT_TEMPLATE_NAME (text invitation) or CHATBOX_INVITE_CARD_TEMPLATE_NAME (image card) in the backend .env, with an approved WhatsApp template.",
       500
     );
   }
   return {
     name,
     language: String(process.env.CHATBOX_INVITE_CARD_TEMPLATE_LANGUAGE || "en").trim(),
+    textOnly: false,
   };
 };
 
-// The card image already carries the event details, so the WhatsApp template
-// body is a plain message with ONE variable:  {{1}} = guest name.
-const buildBodyParams = (guest) => [guest.name];
+// WhatsApp rejects a body variable that is empty, has newlines/tabs, or has
+// 4+ consecutive spaces. Always send a clean, non-empty name.
+const cleanTemplateName = (name) =>
+  String(name || "")
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim()
+    .slice(0, 60) || "Guest";
+
+// {{1}} = guest name (same for both modes).
+const buildBodyParams = (guest) => [cleanTemplateName(guest.name)];
 
 const sendOne = async (guest, template) => {
-  // The admin's uploaded design with this guest's name written on it (JPG).
+  // TEXT mode: no card, no image upload - just the approved text template.
+  if (template.textOnly) {
+    await whatsappService.sendTemplateMessage({
+      phone: guest.mobileNumber,
+      templateName: template.name,
+      languageCode: template.language,
+      bodyParams: buildBodyParams(guest),
+    });
+    return { url: "", public_id: "" };
+  }
+
+  // CARD mode: the admin's uploaded design with this guest's name on it (JPG).
   const jpg = await generateCard(guest.name);
 
   const saved = await uploadToLocal(jpg, "event-management/invite-cards", "image", {
@@ -331,7 +368,10 @@ module.exports = {
   resetStuck,
   remove,
   generateCard,
-  designInfo: cardService.designInfo,
+  designInfo: async (...args) => ({
+    ...(await cardService.designInfo(...args)),
+    textMode: isTextMode(),
+  }),
   saveDesign: cardService.saveDesign,
   saveNameStyle: cardService.saveNameStyle,
   removeDesign: cardService.removeDesign,

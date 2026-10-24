@@ -142,12 +142,16 @@ const createContact = async (data, adminId, files = {}, options = {}) => {
     references,
     companyCategory,
     email,
-    relationship,
+    entryType,
     spouseName,
     spouseMobile,
     profession,
     professionCategory,
   } = data;
+
+  // The form sends Entry Type only (no relationship): it then doubles as the
+  // relationship, so every Couple rule below keeps working.
+  const relationship = data.relationship || entryType;
 
   assertPhotosPresent({
     hasProfile: !!firstFile(files, "profileImage"),
@@ -186,6 +190,7 @@ const createContact = async (data, adminId, files = {}, options = {}) => {
       companyCategory,
       email,
       relationship,
+      entryType,
       spouseName,
       spouseMobile,
       profession,
@@ -274,6 +279,7 @@ const createContact = async (data, adminId, files = {}, options = {}) => {
       companyCategory: companyCategory || null,
       email,
       relationship,
+      entryType: entryType || relationship,
       spouseName,
       spouseMobile,
       profession,
@@ -321,6 +327,7 @@ async function mergeIntoExistingContact(existingContact, incoming, files = {}) {
     companyCategory,
     email,
     relationship,
+    entryType,
     spouseName,
     spouseMobile,
     profession,
@@ -367,6 +374,9 @@ async function mergeIntoExistingContact(existingContact, incoming, files = {}) {
 
   if (relationship && !existingContact.relationship) {
     updateFields.relationship = relationship;
+  }
+  if (entryType && !existingContact.entryType) {
+    updateFields.entryType = entryType;
   }
 
   if (spouseName && !existingContact.spouseName) {
@@ -1648,7 +1658,8 @@ const resolvePassQuantity = (contact, quantities) => {
     return Math.min(requested, MAX_PASS_GUESTS);
   }
 
-  return contact.relationship === "Couple" ? 2 : 1;
+  // Entry Type decides it; old contacts only have the relationship.
+  return (contact.entryType || contact.relationship) === "Couple" ? 2 : 1;
 };
 
 const sendPassToContacts = async ({ ids, eventId, ticketTypeId, quantities }, adminId) => {
@@ -2081,6 +2092,9 @@ const updateContact = async (id, data, files = {}) => {
     updateFields.companyCategory = data.companyCategory || null;
   }
   if (data.email !== undefined) updateFields.email = data.email;
+  // The form sends Entry Type only: it also becomes the relationship.
+  if (!data.relationship && data.entryType) data.relationship = data.entryType;
+  if (data.entryType) updateFields.entryType = data.entryType;
   if (data.relationship) updateFields.relationship = data.relationship;
   if (data.spouseName !== undefined) updateFields.spouseName = data.spouseName;
   if (data.spouseMobile !== undefined) updateFields.spouseMobile = data.spouseMobile;

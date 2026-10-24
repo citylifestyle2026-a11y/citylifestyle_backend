@@ -115,6 +115,16 @@ const contactSchema = new mongoose.Schema(
       required: true,
     },
 
+    // Entry Type (Single = 1 entry, Couple = 2 entry) - the field the form asks
+    // for while the Relationship / spouse section is switched off. When the form
+    // does not send `relationship`, it is filled from this value. Old contacts
+    // have none: use `entryType || relationship`.
+    entryType: {
+      type: String,
+      enum: ["Single", "Couple", ""],
+      default: "",
+    },
+
     // Only meaningful when relationship is "Couple" — left optional
     // here on purpose; Step 2 adds the conditional-required check.
     spouseName: {
