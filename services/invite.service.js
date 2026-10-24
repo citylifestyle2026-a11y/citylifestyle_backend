@@ -258,32 +258,27 @@ const sendOne = async (guest, template) => {
   // CARD mode: the admin's uploaded design with this guest's name on it (JPG).
   const fullJpg = await generateCard(guest.name);
 
-  // WhatsApp rejects/cannot fetch big header images (limit 5 MB, and slow
-  // downloads fail as "received UNKNOWN"). Shrink to <= 1600px, ~1 MB.
+  // Send the card the SAME way the working QR-code template sends its image:
+  // a PNG, saved under the "qr-codes" folder (that folder/format is already
+  // known to be fetched fine by WhatsApp). Kept <= 1080px and < ~4 MB
+  // (WhatsApp limit is 5 MB).
   const sharp = require("sharp");
-  const jpg = await sharp(fullJpg)
-    .resize({ width: 1600, height: 1600, fit: "inside", withoutEnlargement: true })
-    .jpeg({ quality: 82, mozjpeg: true })
-    .toBuffer();
-
-  const saved = await uploadToLocal(jpg, "event-management/invite-cards", "image", {
-    format: "jpg",
-    public_id: `invite-${guest._id}-${Date.now()}`,
+  const base = sharp(fullJpg).resize({
+    width: 1080,
+    height: 1080,
+    fit: "inside",
+    withoutEnlargement: true,
   });
 
-  // Make sure the PUBLIC url really serves an image before asking WhatsApp
-  // to download it. Gives a clear error instead of "received UNKNOWN".
-  try {
-    const check = await fetch(saved.url, { method: "GET" });
-    const type = String(check.headers.get("content-type") || "");
-    if (!check.ok || !type.startsWith("image/")) {
-      throw new Error(`status ${check.status}, content-type "${type || "none"}"`);
-    }
-  } catch (e) {
-    throw new Error(
-      `Card image is not publicly reachable at ${saved.url} (${e.message}). Check PUBLIC_API_URL and that /uploads is served.`
-    );
+  let png = await base.clone().png({ compressionLevel: 9 }).toBuffer();
+  if (png.length > 4 * 1024 * 1024) {
+    png = await base.clone().png({ palette: true, quality: 90, compressionLevel: 9 }).toBuffer();
   }
+
+  const saved = await uploadToLocal(png, "event-management/qr-codes", "image", {
+    format: "png",
+    public_id: `invite-${guest._id}-${Date.now()}`,
+  });
 
   try {
     await whatsappService.sendMediaTemplateMessage({
