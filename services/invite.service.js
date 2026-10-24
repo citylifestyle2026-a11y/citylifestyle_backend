@@ -256,12 +256,34 @@ const sendOne = async (guest, template) => {
   }
 
   // CARD mode: the admin's uploaded design with this guest's name on it (JPG).
-  const jpg = await generateCard(guest.name);
+  const fullJpg = await generateCard(guest.name);
+
+  // WhatsApp rejects/cannot fetch big header images (limit 5 MB, and slow
+  // downloads fail as "received UNKNOWN"). Shrink to <= 1600px, ~1 MB.
+  const sharp = require("sharp");
+  const jpg = await sharp(fullJpg)
+    .resize({ width: 1600, height: 1600, fit: "inside", withoutEnlargement: true })
+    .jpeg({ quality: 82, mozjpeg: true })
+    .toBuffer();
 
   const saved = await uploadToLocal(jpg, "event-management/invite-cards", "image", {
     format: "jpg",
     public_id: `invite-${guest._id}-${Date.now()}`,
   });
+
+  // Make sure the PUBLIC url really serves an image before asking WhatsApp
+  // to download it. Gives a clear error instead of "received UNKNOWN".
+  try {
+    const check = await fetch(saved.url, { method: "GET" });
+    const type = String(check.headers.get("content-type") || "");
+    if (!check.ok || !type.startsWith("image/")) {
+      throw new Error(`status ${check.status}, content-type "${type || "none"}"`);
+    }
+  } catch (e) {
+    throw new Error(
+      `Card image is not publicly reachable at ${saved.url} (${e.message}). Check PUBLIC_API_URL and that /uploads is served.`
+    );
+  }
 
   await whatsappService.sendMediaTemplateMessage({
     phone: guest.mobileNumber,
