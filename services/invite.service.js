@@ -316,8 +316,8 @@ const processOne = async (id, template) => {
     guest.cardPublicId = saved.public_id;
   } catch (err) {
     guest.status = "failed";
-    const base = String(err?.message || "Failed to send").slice(0, 200);
-    guest.error = err?.cardUrl ? `${base} | Card URL: ${err.cardUrl}` : base;
+    const base = String(err?.message || "Failed to send").slice(0, 150);
+    guest.error = err?.cardUrl ? `Card URL: ${err.cardUrl} | ${base}` : base;
     if (err?.cardUrl) guest.cardUrl = err.cardUrl;
   }
 
