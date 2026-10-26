@@ -36,33 +36,49 @@ const cleanName = (value) =>
     .slice(0, 60) || "Guest";
 
 const sendRegistrationAck = async ({ name, phone }) => {
+  let key = "";
   try {
     const templateName = String(process.env.CHATBOX_REGISTRATION_TEMPLATE_NAME || "").trim();
     const reviewDate = String(process.env.FORM_REVIEW_DATE || "").trim();
 
-    if (!templateName || !reviewDate) {
+    if (!templateName) {
       console.warn(
-        "Registration WhatsApp not sent: set CHATBOX_REGISTRATION_TEMPLATE_NAME and FORM_REVIEW_DATE in .env."
+        "[RegistrationAck] NOT SENT: set CHATBOX_REGISTRATION_TEMPLATE_NAME in the server environment, then redeploy/restart."
       );
       return false;
     }
-    if (!phone || !String(phone).trim()) return false;
+    if (!phone || !String(phone).trim()) {
+      console.warn("[RegistrationAck] NOT SENT: no WhatsApp number in the form.");
+      return false;
+    }
 
-    const key = String(phone).replace(/\D/g, "").slice(-10);
+    key = String(phone).replace(/\D/g, "").slice(-10);
     const now = Date.now();
     for (const [k, t] of recentlySent) if (now - t > WINDOW_MS) recentlySent.delete(k);
-    if (recentlySent.has(key)) return false;
+    if (recentlySent.has(key)) {
+      console.warn(
+        `[RegistrationAck] SKIPPED: ${key} already got this message in the last 10 minutes (anti-spam).`
+      );
+      return false;
+    }
     recentlySent.set(key, now);
 
     await whatsappService.sendTemplateMessage({
       phone,
       templateName,
       languageCode: String(process.env.CHATBOX_REGISTRATION_TEMPLATE_LANGUAGE || "en").trim(),
-      bodyParams: [cleanName(name), reviewDate],
+      // The number of values MUST equal the number of {{variables}} in the
+      // approved template, or WhatsApp rejects it (error 132000).
+      //   FORM_REVIEW_DATE set   -> template has {{1}} name + {{2}} date
+      //   FORM_REVIEW_DATE empty -> template has only {{1}} name
+      bodyParams: reviewDate ? [cleanName(name), reviewDate] : [cleanName(name)],
     });
+    console.log(`[RegistrationAck] SENT to ${key} using template "${templateName}".`);
     return true;
   } catch (error) {
-    console.error("Registration WhatsApp failed:", error.message);
+    // A failed send must NOT block the number: let it retry straight away.
+    if (key) recentlySent.delete(key);
+    console.error("[RegistrationAck] FAILED:", error?.message || error);
     return false;
   }
 };
