@@ -172,6 +172,22 @@ const renderName = async (text, color, fontSize, { width, wrap = "none" } = {}) 
   }
 };
 
+// ---------- auto font size by name length ----------
+// Slider = size for a name of up to NAME_LEN_NORMAL characters.
+//   (15 chars)
+//   shorter name -> a bit bigger (max NAME_BOOST_MAX x)
+//   longer name  -> smaller, in proportion (never below NAME_SCALE_MIN x)
+const NAME_LEN_NORMAL = 15;
+const NAME_BOOST_MAX = 1.15;
+const NAME_SCALE_MIN = 0.65;
+
+const nameLengthScale = (name) => {
+  const len = Array.from(String(name || "").trim()).length; // counts Gujarati/Hindi letters correctly
+  if (!len) return 1;
+  // square root = gentle shrink, so long names stay readable
+  return Math.min(NAME_BOOST_MAX, Math.max(NAME_SCALE_MIN, Math.sqrt(NAME_LEN_NORMAL / len)));
+};
+
 // Returns a JPEG buffer (WhatsApp image headers accept JPG/PNG, not WebP).
 //
 // The name is ALWAYS centred on the spot the admin chose (style.centerXPct).
@@ -186,7 +202,10 @@ const generateCard = async (rawName, styleOverride = {}) => {
   const style = resolveStyle(saved, styleOverride);
   const n = cfg.NAME;
 
-  const baseSize = Math.max(8, Math.round((W * style.fontSizePct) / 100));
+  const baseSize = Math.max(
+    8,
+    Math.round(((W * style.fontSizePct) / 100) * nameLengthScale(name))
+  );
   const maxWidth = Math.round((W * n.maxWidthPct) / 100);
 
   let text = await renderName(name, style.color, baseSize);
@@ -217,7 +236,10 @@ const generateCard = async (rawName, styleOverride = {}) => {
 
   // The admin's spot is the CENTRE of the name: horizontally on centerXPct,
   // vertically in the middle of a normal one-line box that starts at topPct.
-  const idealBoxHeight = baseSize * 1.5;
+  // Use the UNSCALED size here: the admin clicked the centre using the slider
+  // size, so the centre must stay put however much the name was scaled.
+  const sliderSize = Math.max(8, Math.round((W * style.fontSizePct) / 100));
+  const idealBoxHeight = sliderSize * 1.5;
   const left = Math.min(
     Math.max(0, W - text.width),
     Math.max(0, Math.round((W * style.centerXPct) / 100 - text.width / 2))

@@ -21,14 +21,16 @@ module.exports = {
   FONT_FAMILY: "Poppins SemiBold",
 
   // Everything in % of the design size, so any design size works.
+  // Defaults are set for the "Parv 6.0" card: the name sits in the gap
+  // between "6:30 PM ONWARDS" and the location pin.
   NAME: {
     centerXPct: 50, // horizontal centre of the name
-    topPct: 48, // top edge of the name box
+    topPct: 33.5, // top edge of the name box
     maxWidthPct: 80, // name wraps / shrinks to stay inside this width
-    fontSizePct: 5.2, // font size as % of design WIDTH
-    minFontSizePct: 2.6, // never smaller than this
-    color: "#C9A24B",
+    fontSizePct: 4.2, // font size (for a name up to 15 chars) as % of design WIDTH
+    minFontSizePct: 2, // never smaller than this
+    color: "#FFFFFF",
     // Names longer than this start shrinking
-    shrinkAfterChars: 16,
+    shrinkAfterChars: 15,
   },
 };
