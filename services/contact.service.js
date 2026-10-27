@@ -2230,7 +2230,7 @@ const deleteContact = async (id, adminId) => {
     throw new AppError("Contact not found", 404);
   }
 
-  await hardDeleteContacts([contact]);
+  await hardDeleteContacts([contact], adminId);
 
   return contact;
 };
@@ -2437,15 +2437,26 @@ async function assertCompanyCategoryExists(companyCategoryId) {
 //    Guest List but the history keeps showing the person. Adding the same
 //    number again later re-uses this record, so the history re-attaches.
 //  - a guest WITHOUT history is removed completely (photos too), as before.
-// Bookings and passes are NOT touched - use "Delete Booking" for that.
+// The guest's booking (the pass made by Send Pass) is deleted too, so it
+// disappears from Manual Booking as well: QR killed, seats given back to the
+// ticket stock. A pass whose guests already ENTERED (scanned) is kept, so the
+// Entry Report stays correct - the guest is still removed from the Guest List.
 // Returns how many guests were removed from the Guest List.
-const hardDeleteContacts = async (contacts) => {
+const hardDeleteContacts = async (contacts, adminId = null) => {
   if (!contacts.length) return 0;
 
   const ContactEventHistory = require("../models/contactEventHistory.model");
   const { hideContactsAsHistoryOnly } = require("./eventCleanup.service");
 
   const allIds = contacts.map((contact) => contact._id);
+
+  // Delete the guests' bookings FIRST (it looks the contacts up, so it must
+  // run before they are removed). Never allowed to fail the guest delete.
+  try {
+    await deleteBookingsOfContacts({ ids: allIds.map(String) }, adminId);
+  } catch (error) {
+    console.error("Could not delete bookings after guest delete:", error.message);
+  }
 
   // Only LIVE history rows count (rows the admin already deleted from the
   // Event History page are gone for good and do not keep a guest alive).
@@ -2527,7 +2538,7 @@ const bulkDeleteContacts = async ({ ids }, adminId) => {
     isDeleted: { $ne: true },
     historyOnly: { $ne: true },
   });
-  const deleted = await hardDeleteContacts(contacts);
+  const deleted = await hardDeleteContacts(contacts, adminId);
 
   return {
     success: deleted > 0,
