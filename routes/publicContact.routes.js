@@ -133,6 +133,8 @@ router.post(
       sendRegistrationAck({
         name: req.body.fullName,
         phone: req.body.whatsappNumber,
+        // Link form: the link's name (set by attachLink). Normal form: what they typed.
+        references: req.body.references,
       });
 
       return res.status(201).json({

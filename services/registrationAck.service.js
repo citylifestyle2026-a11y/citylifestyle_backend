@@ -1,25 +1,31 @@
 const whatsappService = require("./whatsapp.service");
+const { toReferenceList } = require("../utils/splitReferences");
 
 // "Registration received" WhatsApp message, sent right after someone submits
-// the public form (Share Form Link / city-lifestyle form).
+// the public form - both the normal form (/city-lifestyle) and a
+// "Share Form Link" form.
 //
 // WhatsApp template body (category: Utility, language: English):
 //
 //   Dear {{1}},
 //
-//   Thank you for registering for *Parv by City Toppers*. We have received your details successfully.
+//   Your registration for PARV 6.0 by City Toppers has been successfully received.
 //
-//   Our team will review your submission and confirm your participation by *{{2}}*. You will receive the update on this WhatsApp number.
+//   Invited By: {{2}}
+//
+//   Your Entry QR Code will be shared with you shortly on this WhatsApp number.
 //
 //   Regards,
-//   City Toppers
+//   Team City Toppers
 //
-//   {{1}} = the person's name      {{2}} = FORM_REVIEW_DATE from .env
+//   {{1}} = the person's name
+//   {{2}} = the person's Reference (who invited them). On a Share Form Link
+//           this is the link's name; on the normal form it is what the
+//           person typed. Several references are joined with ", ".
 //
 // .env:
 //   CHATBOX_REGISTRATION_TEMPLATE_NAME=<approved template name>
 //   CHATBOX_REGISTRATION_TEMPLATE_LANGUAGE=en
-//   FORM_REVIEW_DATE=25 October 2026
 //
 // This is a courtesy message: it NEVER blocks or fails the form submit.
 
@@ -35,11 +41,23 @@ const cleanName = (value) =>
     .trim()
     .slice(0, 60) || "Guest";
 
-const sendRegistrationAck = async ({ name, phone }) => {
+// {{2}} "Invited By". WhatsApp rejects empty variables, so fall back to "-".
+const cleanInvitedBy = (references) => {
+  const list = toReferenceList(Array.isArray(references) ? references : [references]);
+  return (
+    list
+      .join(", ")
+      .replace(/[\r\n\t]+/g, " ")
+      .replace(/\s{2,}/g, " ")
+      .trim()
+      .slice(0, 100) || "-"
+  );
+};
+
+const sendRegistrationAck = async ({ name, phone, references }) => {
   let key = "";
   try {
     const templateName = String(process.env.CHATBOX_REGISTRATION_TEMPLATE_NAME || "").trim();
-    const reviewDate = String(process.env.FORM_REVIEW_DATE || "").trim();
 
     if (!templateName) {
       console.warn(
@@ -69,9 +87,8 @@ const sendRegistrationAck = async ({ name, phone }) => {
       languageCode: String(process.env.CHATBOX_REGISTRATION_TEMPLATE_LANGUAGE || "en").trim(),
       // The number of values MUST equal the number of {{variables}} in the
       // approved template, or WhatsApp rejects it (error 132000).
-      //   FORM_REVIEW_DATE set   -> template has {{1}} name + {{2}} date
-      //   FORM_REVIEW_DATE empty -> template has only {{1}} name
-      bodyParams: reviewDate ? [cleanName(name), reviewDate] : [cleanName(name)],
+      //   {{1}} name      {{2}} invited by (reference)
+      bodyParams: [cleanName(name), cleanInvitedBy(references)],
     });
     console.log(`[RegistrationAck] SENT to ${key} using template "${templateName}".`);
     return true;
