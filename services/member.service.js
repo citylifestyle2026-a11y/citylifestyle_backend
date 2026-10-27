@@ -1023,10 +1023,7 @@ const createMember = async (body = {}, adminId = null, files = null) => {
   }
 
   const companyName = text(body.companyName);
-  if (!companyName) throw new AppError("Company Name is required", 400);
-
   const profession = text(body.profession);
-  if (!profession) throw new AppError("Company Category is required", 400);
 
   const email = text(body.email);
   if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {

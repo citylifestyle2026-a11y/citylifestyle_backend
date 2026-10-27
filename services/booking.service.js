@@ -152,15 +152,6 @@ const createBooking = async (data, createdBy) => {
       throw new AppError(MOBILE_ERROR_MESSAGE, 400);
     }
 
-    // ================= COMPANY / BRAND (COMPULSORY) =================
-    // Same reasoning as the mobile number above: the create route's
-    // validator already enforces this, but the CSV import calls
-    // createBooking directly, so a row without a company is rejected here
-    // too (it shows up as that row's error in the import result).
-    if (!String(companyName || "").trim()) {
-      throw new AppError("Company / Brand is required", 400);
-    }
-
     // ================= DUPLICATE BOOKING WARNING (SAME MOBILE NUMBER) =================
     // The SAME mobile number already has a booking for this event +
     // ticket type -> stop here (409) before any ticket is deducted or any

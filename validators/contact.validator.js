@@ -96,15 +96,10 @@ const createContactValidation = [
     )
     .customSanitizer(toLocalMobileSanitizer),
 
-  body("companyName")
-    .trim()
-    .notEmpty()
-    .withMessage("Company Name is required"),
+  // Company Name, Designation and Company Category are optional.
+  body("companyName").optional({ values: "falsy" }).trim(),
 
-  body("designation")
-    .trim()
-    .notEmpty()
-    .withMessage("Designation is required"),
+  body("designation").optional({ values: "falsy" }).trim(),
 
   // Address is the one field that's allowed to be blank.
   body("address")
@@ -126,8 +121,7 @@ const createContactValidation = [
     .withMessage("Reference cannot be empty"),
 
   body("companyCategory")
-    .notEmpty()
-    .withMessage("Company Category is required")
+    .optional({ values: "falsy" })
     .isMongoId()
     .withMessage("Invalid Company Category"),
 
