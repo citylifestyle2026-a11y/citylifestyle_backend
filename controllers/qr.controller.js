@@ -25,6 +25,7 @@ const checkInQr = async (req, res, next) => {
       qrToken: req.body.qrToken,
       scannedBy: req.user._id,
       guests: req.body.guests,
+      askGuests: req.body.askGuests === true || req.body.askGuests === "true",
     });
 
     return res.status(200).json({

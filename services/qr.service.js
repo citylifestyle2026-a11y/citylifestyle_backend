@@ -179,9 +179,13 @@ const verifyQr = async ({ qrToken }) => {
 //  - pass with 1 guest left            -> that guest is checked in, no question
 //  - pass with 2+ guests left, no count -> NOTHING is checked in; the response
 //    has needsGuestCount:true so the scanner can ask "how many came?"
+//    (ONLY when the scanner sends askGuests:true. An OLD scanner app that does
+//    not know about the question keeps the old behaviour: all remaining guests
+//    are admitted in one scan, instead of showing a false green with nobody
+//    checked in.)
 //  - pass with 2+ guests left, count given -> exactly that many are checked in;
 //    the rest stay "Active", so the SAME QR works again later for them.
-const checkInQr = async ({ qrToken, scannedBy, guests }) => {
+const checkInQr = async ({ qrToken, scannedBy, guests, askGuests }) => {
   // 1. Verify QR (Invitation ID or signed token)
   const payload = { ticketNumber: await resolveTicketNumber(qrToken) };
 
@@ -279,7 +283,7 @@ const checkInQr = async ({ qrToken, scannedBy, guests }) => {
     const hasCount = Number.isInteger(requested) && requested >= 1;
 
     // 2+ guests still to enter and nobody said how many -> ask, change nothing.
-    if (activeCount > 1 && !hasCount) {
+    if (activeCount > 1 && !hasCount && askGuests) {
       return {
         needsGuestCount: true,
         isGroupEntry: true,
@@ -298,7 +302,7 @@ const checkInQr = async ({ qrToken, scannedBy, guests }) => {
     }
 
     // Only one guest left -> that one guest is checked in, no question.
-    const toCheckIn = activeCount === 1 ? 1 : requested;
+    const toCheckIn = activeCount === 1 ? 1 : hasCount ? requested : activeCount;
 
     if (!Number.isInteger(toCheckIn) || toCheckIn < 1 || toCheckIn > activeCount) {
       throw new AppError(

@@ -78,8 +78,23 @@ const linkLimit = publicRateLimit({
 const rateLimit = (req, res, next) =>
   (req.query.link ? linkLimit : normalLimit)(req, res, next);
 
+// The plain public form (no ?link=<token>) is CLOSED. Only "Share Form Link"
+// submissions are accepted. To open it again, set PUBLIC_FORM_OPEN=true in .env.
+const plainFormOpen = () =>
+  String(process.env.PUBLIC_FORM_OPEN || "").trim().toLowerCase() === "true";
+
+const requireLinkWhileClosed = (req, res, next) => {
+  if (req.query.link || plainFormOpen()) return next();
+  return res.status(410).json({
+    success: false,
+    message:
+      "Registrations are full, and we are no longer able to accept new bookings. Thank you for your interest in Parv.",
+  });
+};
+
 router.post(
   "/",
+  requireLinkWhileClosed,
   rateLimit,
   contactUpload,
   honeypot,
