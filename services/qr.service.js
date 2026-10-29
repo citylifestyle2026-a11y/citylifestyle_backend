@@ -102,7 +102,19 @@ const verifyQr = async ({ qrToken }) => {
   }
 
   if (ticket.status === "Used") {
-    throw new AppError("This ticket has already been used.", 400);
+    // Single-QR pass: the first ticket may be "Used" (some guests already
+    // entered) while other guests are still to come - that is still valid.
+    const guestsLeft =
+      ticket.bookingId.entryMode === "single_qr"
+        ? await BookingTicket.countDocuments({
+            bookingId: ticket.bookingId._id,
+            status: "Active",
+          })
+        : 0;
+
+    if (guestsLeft === 0) {
+      throw new AppError("This ticket has already been used.", 400);
+    }
   }
 
   // ==========================
@@ -163,7 +175,13 @@ const verifyQr = async ({ qrToken }) => {
   };
 };
 // ================= CHECK-IN QR =================
-const checkInQr = async ({ qrToken, scannedBy }) => {
+// `guests` (optional): how many people are entering NOW on a single-QR pass.
+//  - pass with 1 guest left            -> that guest is checked in, no question
+//  - pass with 2+ guests left, no count -> NOTHING is checked in; the response
+//    has needsGuestCount:true so the scanner can ask "how many came?"
+//  - pass with 2+ guests left, count given -> exactly that many are checked in;
+//    the rest stay "Active", so the SAME QR works again later for them.
+const checkInQr = async ({ qrToken, scannedBy, guests }) => {
   // 1. Verify QR (Invitation ID or signed token)
   const payload = { ticketNumber: await resolveTicketNumber(qrToken) };
 
@@ -207,12 +225,34 @@ const checkInQr = async ({ qrToken, scannedBy }) => {
     throw new AppError("This booking has been cancelled.", 400);
   }
 
-  if (ticket.status === "Used") {
-    throw new AppError("This ticket has already been checked in.", 400);
-  }
+  const isGroupEntry = ticket.bookingId?.entryMode === "single_qr";
+  let activeCount = 0;
+  let usedCount = 0;
 
-  if (ticket.status === "Cancelled") {
-    throw new AppError("This ticket has been cancelled.", 400);
+  if (isGroupEntry) {
+    // Single-QR pass: the pass is valid as long as ANY guest is still
+    // "Active" - the QR's own (first) ticket may already be "Used".
+    [activeCount, usedCount] = await Promise.all([
+      BookingTicket.countDocuments({ bookingId: ticket.bookingId._id, status: "Active" }),
+      BookingTicket.countDocuments({ bookingId: ticket.bookingId._id, status: "Used" }),
+    ]);
+
+    if (activeCount === 0) {
+      throw new AppError(
+        usedCount > 0
+          ? `This ticket has already been checked in. All ${usedCount} guest${usedCount === 1 ? "" : "s"} have entered.`
+          : "This ticket has been cancelled.",
+        400
+      );
+    }
+  } else {
+    if (ticket.status === "Used") {
+      throw new AppError("This ticket has already been checked in.", 400);
+    }
+
+    if (ticket.status === "Cancelled") {
+      throw new AppError("This ticket has been cancelled.", 400);
+    }
   }
 
   if (!ticket.eventId) {
@@ -229,26 +269,65 @@ const checkInQr = async ({ qrToken, scannedBy }) => {
   }
 
   // 4. Update Ticket(s)
-  const isGroupEntry = ticket.bookingId?.entryMode === "single_qr";
   let guestsCheckedIn = 1;
+  let guestsLeft = 0;
 
   if (isGroupEntry) {
-    // NEW single-QR flow: ONE scan = every guest of this booking is
-    // marked as entered (quantity 2 -> 2 guests, 5 -> 5 guests, ...).
-    // The filter on status "Active" makes this safe against a double scan:
-    // a second scan updates 0 tickets and is rejected below.
-    const scannedAt = new Date();
-    const result = await BookingTicket.updateMany(
-      { bookingId: ticket.bookingId._id, status: "Active" },
-      { $set: { status: "Used", scannedAt, scannedBy } }
-    );
+    // Single-QR flow with PARTIAL entry: the scanner says how many people
+    // are entering now (`guests`); only that many tickets become "Used".
+    const requested = Number(guests);
+    const hasCount = Number.isInteger(requested) && requested >= 1;
 
-    if (result.modifiedCount === 0) {
+    // 2+ guests still to enter and nobody said how many -> ask, change nothing.
+    if (activeCount > 1 && !hasCount) {
+      return {
+        needsGuestCount: true,
+        isGroupEntry: true,
+        remaining: activeCount,
+        alreadyEntered: usedCount,
+        totalGuests: activeCount + usedCount,
+        guests: 0,
+        booking: {
+          name: ticket.bookingId.name,
+          mobileNumber: ticket.bookingId.mobileNumber,
+          invitationId: ticket.bookingId.invitationId || null,
+          quantity: ticket.bookingId.quantity,
+        },
+        attendee: ticket.attendee,
+      };
+    }
+
+    // Only one guest left -> that one guest is checked in, no question.
+    const toCheckIn = activeCount === 1 ? 1 : requested;
+
+    if (!Number.isInteger(toCheckIn) || toCheckIn < 1 || toCheckIn > activeCount) {
+      throw new AppError(
+        `Only ${activeCount} guest${activeCount === 1 ? " is" : "s are"} left on this pass. Choose between 1 and ${activeCount}.`,
+        400
+      );
+    }
+
+    // One atomic update per guest, so two phones scanning the same pass at
+    // the same moment can never admit more people than the pass has.
+    const scannedAt = new Date();
+    let done = 0;
+    for (let i = 0; i < toCheckIn; i += 1) {
+      const marked = await BookingTicket.findOneAndUpdate(
+        { bookingId: ticket.bookingId._id, status: "Active" },
+        { $set: { status: "Used", scannedAt, scannedBy } },
+        { sort: { createdAt: 1, _id: 1 } }
+      );
+      if (!marked) break;
+      done += 1;
+    }
+
+    if (done === 0) {
       throw new AppError("This ticket has already been checked in.", 400);
     }
 
-    guestsCheckedIn = result.modifiedCount;
-    ticket.status = "Used";
+    guestsCheckedIn = done;
+    guestsLeft = Math.max(activeCount - done, 0);
+    ticket.status = guestsLeft === 0 ? "Used" : "Active";
     ticket.scannedAt = scannedAt;
     ticket.scannedBy = scannedBy;
   } else {
@@ -276,6 +355,10 @@ const checkInQr = async ({ qrToken, scannedBy }) => {
     attendee: ticket.attendee,
     isGroupEntry,
     guests: isGroupEntry ? guestsCheckedIn : 1,
+    // Single-QR pass: how many are still to come on this same QR.
+    remaining: isGroupEntry ? guestsLeft : 0,
+    alreadyEntered: isGroupEntry ? usedCount : 0,
+    totalGuests: isGroupEntry ? activeCount + usedCount : 1,
 
     booking: ticket.bookingId
       ? {

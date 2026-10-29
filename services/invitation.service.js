@@ -128,13 +128,15 @@ const getPublicInvitation = async (invitationId) => {
     throw new AppError("Invitation not found.", 404);
   }
 
-  const [event, ticketType, primaryTicket, usedCount, references] = await Promise.all([
-    Event.findById(booking.eventId),
-    TicketType.findById(booking.ticketTypeId),
-    BookingTicket.findOne({ bookingId: booking._id }).sort({ createdAt: 1, _id: 1 }),
-    BookingTicket.countDocuments({ bookingId: booking._id, status: "Used" }),
-    findReferencesForBooking(booking),
-  ]);
+  const [event, ticketType, primaryTicket, usedCount, activeCount, references] =
+    await Promise.all([
+      Event.findById(booking.eventId),
+      TicketType.findById(booking.ticketTypeId),
+      BookingTicket.findOne({ bookingId: booking._id }).sort({ createdAt: 1, _id: 1 }),
+      BookingTicket.countDocuments({ bookingId: booking._id, status: "Used" }),
+      BookingTicket.countDocuments({ bookingId: booking._id, status: "Active" }),
+      findReferencesForBooking(booking),
+    ]);
 
   if (!event || !primaryTicket) {
     throw new AppError("Invitation not found.", 404);
@@ -169,8 +171,13 @@ const getPublicInvitation = async (invitationId) => {
     // Who invited this guest (the guest's Reference name(s)). [] if none.
     references,
     qrImage,
-    isUsed: primaryTicket.status === "Used" || usedCount > 0,
-    isCancelled: primaryTicket.status === "Cancelled",
+    // Partial entry: some guests may have entered while others are still to
+    // come. The pass counts as "used" only when NO guest is left.
+    enteredGuests: usedCount,
+    remainingGuests: activeCount,
+    isPartiallyUsed: usedCount > 0 && activeCount > 0,
+    isUsed: usedCount > 0 && activeCount === 0,
+    isCancelled: usedCount === 0 && activeCount === 0 && primaryTicket.status === "Cancelled",
     ticketName: ticketType?.ticketName || "",
     event: {
       title: event.title,

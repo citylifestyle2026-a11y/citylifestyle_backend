@@ -24,11 +24,14 @@ const checkInQr = async (req, res, next) => {
     const result = await qrService.checkInQr({
       qrToken: req.body.qrToken,
       scannedBy: req.user._id,
+      guests: req.body.guests,
     });
 
     return res.status(200).json({
       success: true,
-      message: "Ticket checked in successfully.",
+      message: result.needsGuestCount
+        ? "Choose how many guests are entering."
+        : "Ticket checked in successfully.",
       data: result,
     });
   } catch (error) {

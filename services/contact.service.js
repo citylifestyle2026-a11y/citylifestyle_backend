@@ -793,6 +793,39 @@ const findActivePassBookings = async (contact) => {
   });
 };
 
+// ================= KEEP THE PASS IN SYNC WITH THE CONTACT =================
+// The pass (/ticket?qr=...) reads name / company / mobile from the BOOKING
+// that Send Pass created (a copy taken at send time). So when the contact is
+// edited in the Guest List, the booking is updated too - otherwise the pass
+// keeps showing the old details. `before` is the contact as it was BEFORE the
+// edit (needed to find the booking), `after` is the saved contact.
+// Never throws: a sync problem must not fail the contact edit.
+const syncPassDetailsFromContact = async (before, after) => {
+  try {
+    if (!before || !after) return;
+    if (!before.passSentAt && !before.passBookingId) return;
+
+    const { normalizeMobileNumber } = require("../utils/normalizeMobileNumber");
+    const Booking = require("../models/booking.model");
+
+    const bookings = await findActivePassBookings(before);
+    if (!bookings.length) return;
+
+    const set = {
+      name: String(after.fullName || "").trim(),
+      email: after.email || "",
+      companyName: String(after.companyName || "").trim() || "N/A",
+    };
+    const mobile = normalizeMobileNumber(after.whatsappNumber);
+    if (mobile) set.mobileNumber = mobile;
+    if (!set.name) delete set.name;
+
+    await Booking.updateMany({ _id: { $in: bookings.map((b) => b._id) } }, { $set: set });
+  } catch (error) {
+    console.error("Could not sync pass details from contact:", error.message);
+  }
+};
+
 // Invalidates the contact's pass(es) so the QR can no longer be used, gives
 // the seats back to the ticket stock and clears the "Pass sent" mark.
 // A pass whose guests already entered (a ticket is "Used") is left alone.
@@ -2176,6 +2209,9 @@ const updateContact = async (id, data, files = {}) => {
   for (const publicId of staleImageIds) {
     if (publicId) await deleteImage(publicId);
   }
+
+  // Pass already sent? Push the edited name / company / mobile into it.
+  await syncPassDetailsFromContact(contact, updatedContact);
 
   // Event History keeps the spouse: when the spouse's name is about to
   // disappear from the Contact (switched to Single, or spouse cleared), the

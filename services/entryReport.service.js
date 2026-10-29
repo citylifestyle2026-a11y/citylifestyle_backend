@@ -323,9 +323,11 @@ const buildEntryReportPipeline = ({ match, postMatch }) => [
         ],
       },
       doc: { $first: "$$ROOT" },
+      // scanned (Used) tickets of the group = guests who actually entered
+      enteredGuests: { $sum: 1 },
     },
   },
-  { $replaceRoot: { newRoot: "$doc" } },
+  { $replaceRoot: { newRoot: { $mergeObjects: ["$doc", { enteredGuests: "$enteredGuests" }] } } },
   {
     $project: {
       bookingNumber: 1,
@@ -336,6 +338,7 @@ const buildEntryReportPipeline = ({ match, postMatch }) => [
       passDate: 1,
       ticketTypeId: 1,
       attendee: 1,
+      enteredGuests: 1,
       "booking.name": 1,
       "booking.mobileNumber": 1,
       "booking.companyName": 1,
@@ -640,7 +643,7 @@ const getAllEntryReports = async (query, currentUser) => {
       "-",
 
     // How many people this one scan admitted.
-    guests: isSingleQrBooking(ticket) ? ticket.booking.quantity || 1 : 1,
+    guests: isSingleQrBooking(ticket) ? ticket.enteredGuests || ticket.booking.quantity || 1 : 1,
 
     // Kept for backward compatibility (the ticket's own stored date).
     passDate: ticket.passDate || null,
@@ -839,7 +842,7 @@ const exportEntryReport = async (query, res, currentUser) => {
         toTenDigitMobile(item.booking?.mobileNumber) ||
         "-",
 
-      guests: isSingleQrBooking(item) ? item.booking.quantity || 1 : 1,
+      guests: isSingleQrBooking(item) ? item.enteredGuests || item.booking.quantity || 1 : 1,
 
       passDate: passDates || "-",
 

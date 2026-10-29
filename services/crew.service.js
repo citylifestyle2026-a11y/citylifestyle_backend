@@ -212,7 +212,13 @@ const updateCrew = async (id, data) => {
   }
 
   await crew.save();
-  return crew.populate(POPULATE);
+  await crew.populate(POPULATE);
+
+  // Pass already sent? Push the edited name / mobile / email / category into
+  // the booking, because the pass page reads those from the booking.
+  await syncPassDetailsFromCrew(crew);
+
+  return crew;
 };
 
 // ================= DELETE (SOFT) =================
@@ -599,6 +605,32 @@ const sendPassToCrew = async ({ ids, eventId, ticketTypeId, quantities }, adminI
 // ================= CANCEL / RESTORE PASS (same as Guest List) =================
 const APPROVAL_STATUSES = ["pending", "approved", "rejected"];
 const PASS_CANCELLED_REMARK = " | Pass cancelled (crew status changed)";
+
+// Keeps an already-sent pass in sync after the crew member is edited.
+// Never throws: a sync problem must not fail the edit.
+const syncPassDetailsFromCrew = async (member) => {
+  try {
+    if (!member?.passBookingId) return;
+    const Booking = require("../models/booking.model");
+    const { normalizeMobileNumber } = require("../utils/normalizeMobileNumber");
+
+    const set = {
+      email: member.email || "",
+      companyName: member.crewCategory?.name || "N/A",
+    };
+    const name = String(member.fullName || "").trim();
+    if (name) set.name = name;
+    const mobile = normalizeMobileNumber(member.whatsappNumber);
+    if (mobile) set.mobileNumber = mobile;
+
+    await Booking.updateOne(
+      { _id: member.passBookingId, isDeleted: { $ne: true }, bookingStatus: { $ne: "Cancelled" } },
+      { $set: set }
+    );
+  } catch (error) {
+    console.error("Could not sync pass details from crew:", error.message);
+  }
+};
 
 // Live (not cancelled / deleted) pass booking of a crew member.
 const findActivePassBookings = async (member) => {
