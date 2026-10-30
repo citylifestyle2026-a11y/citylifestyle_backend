@@ -189,6 +189,9 @@ const promoteDuplicateToGuest = async (duplicate, { status = "pending", source =
     approvalStatus: status,
     approvalUpdatedAt: new Date(),
     createdBy: source?.createdBy || null,
+    // Keeps the link on the new guest, so deleting this guest later also
+    // lowers that Form Link's progress.
+    formLinkId: duplicate.formLinkId || null,
   };
 
   // A deleted guest that has Event History stays in the database as a hidden
@@ -525,6 +528,16 @@ const ignoreDuplicate = async (duplicateId) => {
 
   if (duplicate.profileImagePublicId) await deleteImage(duplicate.profileImagePublicId);
   if (duplicate.spouseProfileImagePublicId) await deleteImage(duplicate.spouseProfileImagePublicId);
+
+  // A submission that came through a Form Link used one place on it; removing
+  // it from the Duplicate tab gives that place back.
+  if (duplicate.formLinkId) {
+    try {
+      await require("./formLink.service").releaseSlot(duplicate.formLinkId);
+    } catch (error) {
+      console.error("Could not update Form Link progress after duplicate removal:", error.message);
+    }
+  }
 
   return { success: true, message: "Duplicate removed." };
 };

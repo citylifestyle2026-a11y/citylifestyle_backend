@@ -101,20 +101,21 @@ const verifyQr = async ({ qrToken }) => {
     throw new AppError("This ticket has been cancelled.", 400);
   }
 
-  if (ticket.status === "Used") {
-    // Single-QR pass: the first ticket may be "Used" (some guests already
-    // entered) while other guests are still to come - that is still valid.
-    const guestsLeft =
-      ticket.bookingId.entryMode === "single_qr"
-        ? await BookingTicket.countDocuments({
-            bookingId: ticket.bookingId._id,
-            status: "Active",
-          })
-        : 0;
+  // Single-QR pass: the first ticket may be "Used" (some guests already
+  // entered) while other guests are still to come - that is still valid.
+  const isGroupPass = ticket.bookingId.entryMode === "single_qr";
+  let guestsLeft = 0;
+  let guestsEntered = 0;
 
-    if (guestsLeft === 0) {
-      throw new AppError("This ticket has already been used.", 400);
-    }
+  if (isGroupPass) {
+    [guestsLeft, guestsEntered] = await Promise.all([
+      BookingTicket.countDocuments({ bookingId: ticket.bookingId._id, status: "Active" }),
+      BookingTicket.countDocuments({ bookingId: ticket.bookingId._id, status: "Used" }),
+    ]);
+  }
+
+  if (ticket.status === "Used" && guestsLeft === 0) {
+    throw new AppError("This ticket has already been used.", 400);
   }
 
   // ==========================
@@ -140,7 +141,9 @@ const verifyQr = async ({ qrToken }) => {
     bookingNumber: ticket.bookingNumber,
     ticketId: ticket._id,
     ticketNumber: ticket.ticketNumber,
-    status: ticket.status,
+    // Group pass with guests still to come is "Active" even if its first
+    // ticket was already used by an earlier partial entry.
+    status: isGroupPass && guestsLeft > 0 ? "Active" : ticket.status,
     isRegistered: ticket.isRegistered,
      qrToken: ticket.qrToken, 
     attendee: ticket.attendee,
@@ -148,6 +151,10 @@ const verifyQr = async ({ qrToken }) => {
     // NEW single-QR flow: this one QR admits the WHOLE booking.
     isGroupEntry: ticket.bookingId.entryMode === "single_qr",
     guests: ticket.bookingId.quantity,
+    // Partial entry: guests still to enter / already entered on this pass.
+    remaining: isGroupPass ? guestsLeft : 1,
+    alreadyEntered: isGroupPass ? guestsEntered : 0,
+    totalGuests: isGroupPass ? guestsLeft + guestsEntered : 1,
 
     booking: {
       name: ticket.bookingId.name,
@@ -240,6 +247,13 @@ const checkInQr = async ({ qrToken, scannedBy, guests, askGuests }) => {
       BookingTicket.countDocuments({ bookingId: ticket.bookingId._id, status: "Active" }),
       BookingTicket.countDocuments({ bookingId: ticket.bookingId._id, status: "Used" }),
     ]);
+
+    // Shows in the server log whether the scanner app is the NEW one (it sends
+    // askGuests:true). If this says askGuests=false, the phone still has the old APK.
+    console.log(
+      `[check-in] pass ${ticket.bookingId.invitationId || ticket.bookingNumber}: ` +
+        `active=${activeCount} used=${usedCount} askGuests=${!!askGuests} guests=${guests ?? "-"}`
+    );
 
     if (activeCount === 0) {
       throw new AppError(
@@ -335,12 +349,23 @@ const checkInQr = async ({ qrToken, scannedBy, guests, askGuests }) => {
     ticket.scannedAt = scannedAt;
     ticket.scannedBy = scannedBy;
   } else {
-    // OLD flow (one ticket = one QR = one scan) -- unchanged.
-    ticket.status = "Used";
-    ticket.scannedAt = new Date();
-    ticket.scannedBy = scannedBy;
+    // OLD flow (one ticket = one QR = one scan).
+    // One ATOMIC update (only while the ticket is not yet Used / Cancelled), so two
+    // phones scanning the same QR at the same moment can never both be let in:
+    // the second one finds nothing to update and is told it was already used.
+    const scannedAt = new Date();
+    const marked = await BookingTicket.findOneAndUpdate(
+      { _id: ticket._id, status: { $nin: ["Used", "Cancelled"] } },
+      { $set: { status: "Used", scannedAt, scannedBy } }
+    );
 
-    await ticket.save();
+    if (!marked) {
+      throw new AppError("This ticket has already been checked in.", 400);
+    }
+
+    ticket.status = "Used";
+    ticket.scannedAt = scannedAt;
+    ticket.scannedBy = scannedBy;
   }
 
   // 5. Return Response DTO
@@ -395,7 +420,91 @@ const checkInQr = async ({ qrToken, scannedBy, guests, askGuests }) => {
       : null,
   };
 };
+
+// ================= UNDO / EDIT CHECK-IN =================
+// Staff tapped the wrong number (e.g. allowed 2 guests instead of 1).
+// This puts the most recently checked-in guest(s) of the pass back to
+// "Active" so the SAME QR can be scanned again with the correct count.
+// Safety: only entries scanned within the last QR_UNDO_WINDOW_MINUTES
+// (default 15) can be reverted, so old entries cannot be tampered with.
+const UNDO_WINDOW_MS =
+  (Number(process.env.QR_UNDO_WINDOW_MINUTES) || 15) * 60 * 1000;
+
+const undoCheckInQr = async ({ qrToken, guests }) => {
+  const ticketNumber = await resolveTicketNumber(qrToken);
+
+  const ticket = await BookingTicket.findOne({ ticketNumber }).populate({
+    path: "bookingId",
+    select: "entryMode isDeleted invitationId bookingNumber",
+  });
+
+  if (!ticket || !ticket.bookingId) {
+    throw new AppError("Ticket not found.", 404);
+  }
+
+  if (ticket.bookingId.isDeleted) {
+    throw new AppError("This booking has been cancelled.", 400);
+  }
+
+  const isGroupEntry = ticket.bookingId.entryMode === "single_qr";
+  const since = new Date(Date.now() - UNDO_WINDOW_MS);
+
+  // Guests that can still be reverted (recent "Used" tickets, newest first).
+  const filter = isGroupEntry
+    ? { bookingId: ticket.bookingId._id, status: "Used", scannedAt: { $gte: since } }
+    : { _id: ticket._id, status: "Used", scannedAt: { $gte: since } };
+
+  const recent = await BookingTicket.find(filter)
+    .sort({ scannedAt: -1, _id: -1 })
+    .select("_id");
+
+  if (recent.length === 0) {
+    throw new AppError(
+      `Nothing to undo. Only entries from the last ${Math.round(UNDO_WINDOW_MS / 60000)} minutes can be edited.`,
+      400
+    );
+  }
+
+  const requested = Number(guests);
+  const toUndo = Number.isInteger(requested) && requested >= 1 ? requested : recent.length;
+
+  if (toUndo > recent.length) {
+    throw new AppError(
+      `Only ${recent.length} recent guest${recent.length === 1 ? "" : "s"} can be undone.`,
+      400
+    );
+  }
+
+  let undone = 0;
+  for (let i = 0; i < toUndo; i += 1) {
+    const reverted = await BookingTicket.findOneAndUpdate(
+      { _id: recent[i]._id, status: "Used" },
+      { $set: { status: "Active" }, $unset: { scannedAt: 1, scannedBy: 1 } }
+    );
+    if (reverted) undone += 1;
+  }
+
+  const [remaining, alreadyEntered] = await Promise.all([
+    BookingTicket.countDocuments({ bookingId: ticket.bookingId._id, status: "Active" }),
+    BookingTicket.countDocuments({ bookingId: ticket.bookingId._id, status: "Used" }),
+  ]);
+
+  console.log(
+    `[undo-check-in] pass ${ticket.bookingId.invitationId || ticket.bookingId.bookingNumber}: ` +
+      `undone=${undone} remaining=${remaining} entered=${alreadyEntered}`
+  );
+
+  return {
+    undone,
+    remaining,
+    alreadyEntered,
+    totalGuests: remaining + alreadyEntered,
+    isGroupEntry,
+  };
+};
+
 module.exports = {
   verifyQr,
   checkInQr,
+  undoCheckInQr,
 };

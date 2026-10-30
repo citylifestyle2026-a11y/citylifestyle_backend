@@ -132,7 +132,7 @@ const createCrew = async (data, adminId) => {
 // ================= LIST =================
 const getAllCrew = async (query = {}) => {
   const page = Math.max(parseInt(query.page) || 1, 1);
-  const limit = Math.min(Math.max(parseInt(query.limit) || 10, 1), 200);
+  const limit = Math.min(Math.max(parseInt(query.limit) || 10, 1), 100000);
   const sortField = SORTABLE_FIELDS.includes(query.sortBy) ? query.sortBy : "createdAt";
   const sortOrder = query.sortOrder === "asc" ? 1 : -1;
   const filter = buildCrewQuery(query);

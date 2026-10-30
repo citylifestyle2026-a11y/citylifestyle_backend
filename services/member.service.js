@@ -592,7 +592,7 @@ const buildMemberQuery = (query = {}, activeEventIds = []) => {
 
 const getAllMembers = async (query = {}) => {
   const page = Math.max(Number(query.page) || 1, 1);
-  const limit = Math.min(Math.max(Number(query.limit) || 10, 1), 200);
+  const limit = Math.min(Math.max(Number(query.limit) || 10, 1), 100000);
   const sortBy = SORTABLE.includes(query.sortBy) ? query.sortBy : "name";
   const sortOrder = query.sortOrder === "desc" ? -1 : 1;
 

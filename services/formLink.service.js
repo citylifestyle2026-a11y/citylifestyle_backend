@@ -3,6 +3,7 @@
 // "Share Form Link": the admin enters a Name and a Quantity and gets a link to the public form that accepts exactly that
 // many submissions. Each person's Reference is set to the Name automatically.
 const crypto = require("crypto");
+const mongoose = require("mongoose");
 const FormLink = require("../models/formLink.model");
 const CompanyCategory = require("../models/companycategory.model");
 const AppError = require("../utils/AppError");
@@ -12,6 +13,7 @@ const { normalizeMobileNumber } = require("../utils/normalizeMobileNumber");
 const contactService = require("./contact.service");
 const memberService = require("./member.service");
 const contactDuplicateService = require("./contactDuplicate.service");
+const ContactDuplicate = require("../models/contactDuplicate.model");
 
 const MAX_QUANTITY = 1000;
 const TARGETS = ["contact", "member"];
@@ -85,7 +87,7 @@ const listFormLinks = async ({
   limit = 10,
 } = {}) => {
   const p = Math.max(1, Number(page) || 1);
-  const l = Math.min(100, Math.max(1, Number(limit) || 10));
+  const l = Math.min(100000, Math.max(1, Number(limit) || 10));
 
   const filter = {};
   if (TARGETS.includes(target)) filter.target = target;
@@ -159,6 +161,130 @@ const updateFormLink = async (id, body = {}) => {
 const deleteFormLink = async (id) => {
   const link = await FormLink.findByIdAndDelete(id);
   if (!link) throw new AppError("Form link not found.", 404);
+};
+
+// ================= EXPORT (EXCEL) =================
+// GET /api/form-links/:id/export
+// Excel of every person who filled THIS link:
+//   - guests saved with this link's id (all new submissions), and
+//   - older guests (before the link id was stored) that carry this link's
+//     name as a Reference and were created after the link was made, and
+//   - submissions parked in the Guest List "Duplicate" tab through this link
+//     (shown with Status "Duplicate").
+const safeSheetName = (text) =>
+  String(text || "Form Link").replace(/[\\/?*[\]:]/g, " ").trim().slice(0, 31) || "Form Link";
+
+const capitalize = (text) => (text ? text.charAt(0).toUpperCase() + text.slice(1) : "");
+
+const exportFormLinkEntries = async (id, res) => {
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    throw new AppError("Invalid form link ID.", 400);
+  }
+
+  const link = await FormLink.findById(id).lean();
+  if (!link) throw new AppError("Form link not found.", 404);
+
+  const nameRegex = new RegExp(`^${escapeRegex(link.name)}$`, "i");
+
+  const [contacts, duplicates] = await Promise.all([
+    Contact.find({
+      isDeleted: { $ne: true },
+      historyOnly: { $ne: true },
+      $or: [
+        { formLinkId: link._id },
+        {
+          formLinkId: null,
+          references: nameRegex,
+          createdAt: { $gte: link.createdAt },
+        },
+      ],
+    })
+      .populate("companyCategory", "name")
+      .populate("professionCategory", "name")
+      .sort({ createdAt: 1 })
+      .lean(),
+    ContactDuplicate.find({ formLinkId: link._id })
+      .populate("companyCategory", "name")
+      .populate("professionCategory", "name")
+      .sort({ createdAt: 1 })
+      .lean(),
+  ]);
+
+  const ExcelJS = require("exceljs");
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = "Event Management CRM";
+  workbook.created = new Date();
+
+  const sheet = workbook.addWorksheet(safeSheetName(link.name));
+
+  sheet.columns = [
+    { header: "No.", key: "no", width: 6 },
+    { header: "Full Name", key: "fullName", width: 25 },
+    { header: "WhatsApp Number", key: "whatsappNumber", width: 20 },
+    { header: "Email", key: "email", width: 28 },
+    { header: "Company Name", key: "companyName", width: 25 },
+    { header: "Designation", key: "designation", width: 22 },
+    { header: "Company Category", key: "companyCategory", width: 22 },
+    { header: "Address", key: "address", width: 30 },
+    { header: "Area", key: "area", width: 20 },
+    { header: "Instagram ID", key: "instagramId", width: 22 },
+    { header: "Entry Type", key: "entryType", width: 14 },
+    { header: "Reference", key: "references", width: 30 },
+    { header: "Status", key: "status", width: 14 },
+    { header: "Submitted At", key: "createdAt", width: 22 },
+  ];
+
+  const header = sheet.getRow(1);
+  header.font = { bold: true, color: { argb: "FFFFFFFF" } };
+  header.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "1F4E78" } };
+  header.alignment = { vertical: "middle", horizontal: "center" };
+
+  const dash = (value) => (value === undefined || value === null || value === "" ? "-" : value);
+
+  const addRow = (item, status) => {
+    const refs = Array.isArray(item.references)
+      ? item.references.filter((r) => typeof r === "string" && r.trim())
+      : [];
+
+    // WhatsApp numbers are stored as text; keep them as text in Excel too so
+    // long numbers are never shown as 9.9E+11.
+    sheet.addRow({
+      no: sheet.rowCount,
+      fullName: dash(item.fullName),
+      whatsappNumber: dash(item.whatsappNumber),
+      email: dash(item.email),
+      companyName: dash(item.companyName),
+      designation: dash(item.designation),
+      companyCategory: dash(item.companyCategory?.name),
+      address: dash(item.address),
+      area: dash(item.area),
+      instagramId: dash(item.instagramId),
+      entryType: dash(item.entryType || item.relationship),
+      references: refs.length ? refs.join(", ") : "-",
+      status,
+      createdAt: item.createdAt ? new Date(item.createdAt).toLocaleString("en-GB") : "-",
+    });
+  };
+
+  contacts.forEach((contact) =>
+    addRow(contact, capitalize(contact.approvalStatus || "approved"))
+  );
+  duplicates.forEach((duplicate) => addRow(duplicate, "Duplicate"));
+
+  if (sheet.rowCount === 1) {
+    sheet.addRow({ no: "", fullName: "No one has filled this link yet." });
+  }
+
+  const fileName = `FormLink_${link.name.replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "entries"}_${Date.now()}.xlsx`;
+
+  res.setHeader(
+    "Content-Type",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  );
+  res.setHeader("Content-Disposition", `attachment; filename=${fileName}`);
+
+  await workbook.xlsx.write(res);
+  res.end();
 };
 
 // ================= PUBLIC =================
@@ -237,6 +363,30 @@ const reserveSlot = async (linkId) => {
 // Gives the place back when saving the person failed.
 const releaseSlot = async (linkId) => {
   await FormLink.updateOne({ _id: linkId, usedCount: { $gt: 0 } }, { $inc: { usedCount: -1 } });
+};
+
+// A guest that came in through a link was deleted from the Guest List: give
+// that place back so the link's progress (usedCount / remaining) goes down
+// too. `contacts` = the guest rows being removed (each may carry formLinkId).
+// Guests that did not come from a link are ignored. Never goes below 0, and a
+// "full" link opens again by itself (its state is worked out from usedCount).
+const releaseSlotsForContacts = async (contacts = [], opts = {}) => {
+  const perLink = new Map();
+  for (const contact of contacts) {
+    if (!contact || !contact.formLinkId) continue;
+    const key = String(contact.formLinkId);
+    perLink.set(key, (perLink.get(key) || 0) + 1);
+  }
+
+  for (const [linkId, count] of perLink) {
+    // Take back only what is really there, so usedCount can never be negative.
+    const link = await FormLink.findById(linkId).select("usedCount").session(opts.session || null);
+    if (!link) continue;
+    const dec = Math.min(count, link.usedCount);
+    if (dec > 0) {
+      await FormLink.updateOne({ _id: linkId }, { $inc: { usedCount: -dec } }, opts);
+    }
+  }
 };
 
 // Public-form fields -> Member fields.
@@ -329,7 +479,10 @@ const submitThroughLink = async (link, data, files) => {
 
   try {
     // Guest List first: it is the one that must succeed.
-    await contactService.createContact(data, null, files, { approvalStatus: "pending" });
+    await contactService.createContact(data, null, files, {
+      approvalStatus: "pending",
+      formLinkId: link._id,
+    });
   } catch (error) {
     await releaseSlot(link._id);
     throw error;
@@ -362,8 +515,11 @@ module.exports = {
   listFormLinks,
   updateFormLink,
   deleteFormLink,
+  exportFormLinkEntries,
   getPublicInfo,
   attachLink,
   submitThroughLink,
   addToContactBookIfMissing,
+  releaseSlotsForContacts,
+  releaseSlot,
 };

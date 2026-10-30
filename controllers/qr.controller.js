@@ -39,7 +39,25 @@ const checkInQr = async (req, res, next) => {
     next(error);
   }
 };
+// ================= UNDO CHECK-IN =================
+const undoCheckInQr = async (req, res, next) => {
+  try {
+    const result = await qrService.undoCheckInQr({
+      qrToken: req.body.qrToken,
+      guests: req.body.guests,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Entry reverted. You can scan again with the correct count.",
+      data: result,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
 module.exports = {
   verifyQr,
-   checkInQr,
+  checkInQr,
+  undoCheckInQr,
 };

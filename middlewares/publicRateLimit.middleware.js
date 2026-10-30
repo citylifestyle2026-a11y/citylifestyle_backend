@@ -2,7 +2,7 @@
 // Per IP: `max` requests per `windowMs`. Good enough for a single Render
 // instance; if the app is ever scaled to several instances, swap for a
 // shared store (e.g. express-rate-limit + Redis).
-const publicRateLimit = ({ windowMs = 60 * 60 * 1000, max = 10 } = {}) => {
+const publicRateLimit = ({ windowMs = 60 * 60 * 1000, max = 10, keyGenerator } = {}) => {
   // Each limiter keeps its own counters, so the normal form limit and the
   // (higher) form-link limit never count against each other.
   const hits = new Map();
@@ -20,11 +20,14 @@ const publicRateLimit = ({ windowMs = 60 * 60 * 1000, max = 10 } = {}) => {
       String(req.headers["x-forwarded-for"] || "").split(",")[0].trim() ||
       req.ip ||
       "unknown";
+    // optional custom key (e.g. per RSVP token) so many guests sharing one
+    // IP (mobile CGNAT, venue wifi, office) do not block each other
+    const key = keyGenerator ? keyGenerator(req, ip) : ip;
     const now = Date.now();
-    const entry = hits.get(ip);
+    const entry = hits.get(key);
 
     if (!entry || entry.resetAt <= now) {
-      hits.set(ip, { count: 1, resetAt: now + windowMs });
+      hits.set(key, { count: 1, resetAt: now + windowMs });
       return next();
     }
 

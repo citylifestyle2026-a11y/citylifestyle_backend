@@ -44,6 +44,8 @@ const hideContactsAsHistoryOnly = async (contactIds = [], opts = {}) => {
     {
       $set: {
         historyOnly: true,
+        // No longer a Guest List guest, so it no longer belongs to a Form Link.
+        formLinkId: null,
         editionEventId: null,
         editionName: "",
         memberId: null,
@@ -94,11 +96,14 @@ const cleanupAfterEventDelete = async ({ eventIds = [], clearUnassigned = true, 
       };
 
   const contacts = await Contact.find(contactFilter)
-    .select("profileImagePublicId spouseProfileImagePublicId")
+    .select("profileImagePublicId spouseProfileImagePublicId formLinkId")
     .session(session || null)
     .lean();
 
   if (contacts.length) {
+    // Every guest removed from the Guest List gives its Form Link place back.
+    await require("./formLink.service").releaseSlotsForContacts(contacts, opts);
+
     const ids = contacts.map((c) => c._id);
 
     // Contacts that still have Event History rows must stay (hidden).

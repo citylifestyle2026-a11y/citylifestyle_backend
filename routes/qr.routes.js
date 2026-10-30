@@ -31,4 +31,13 @@ router.post(
   validate,
   qrController.checkInQr
 );
+// undo check-in (fix a wrong guest count)
+router.post(
+  "/undo-check-in",
+  protect,
+  authorize("admin", "checker", { permission: "QR Pass" }),
+  checkInQrValidation,
+  validate,
+  qrController.undoCheckInQr
+);
 module.exports = router;

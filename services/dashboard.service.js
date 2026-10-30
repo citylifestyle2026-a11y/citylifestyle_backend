@@ -236,6 +236,42 @@ const getBookingCounts = async (eventId) => {
     }));
 };
 
+// ================= QUANTITY-WISE BOOKINGS =================
+// "1 qty ni ketli booking, 2 qty ni ketli booking ..." - bookings grouped by
+// their own quantity value. Nothing is hard-coded: whatever quantities exist
+// in the data are returned, so the moment someone makes a booking with a new
+// quantity (e.g. 7) it shows up here (and on the dashboard) automatically.
+//   quantity : the qty value of the booking (1, 2, 3 ...)
+//   bookings : how many bookings were made with exactly that qty
+//   tickets  : bookings x quantity (total tickets in those bookings)
+// Same rules as the other guest numbers: crew, deleted and cancelled
+// bookings are left out.
+const getQuantityWiseBookings = async (eventId) => {
+    const grouped = await Booking.aggregate([
+        {
+            $match: {
+                eventId,
+                ...GUEST_ONLY,
+                isDeleted: false,
+                bookingStatus: { $ne: "Cancelled" },
+            },
+        },
+        {
+            $group: {
+                _id: "$quantity",
+                bookings: { $sum: 1 },
+            },
+        },
+        { $sort: { _id: 1 } },
+    ]);
+
+    return grouped.map((g) => ({
+        quantity: g._id,
+        bookings: g.bookings,
+        tickets: g._id * g.bookings,
+    }));
+};
+
 // Total Booking Details (Day Wise)
 const getTotalBookingDetails = async (eventId) => {
     const bookings = await Booking.find({
@@ -487,6 +523,7 @@ const getCrewCounts = async (eventId) => {
             passBookingCounts: [],
             bookingCounts: [],
             totalBookingDetails: [],
+            quantityWiseBookings: [],
             totalBookings: 0,
             registeredTickets: 0,
             pendingRegistrations: 0,
@@ -511,6 +548,7 @@ const getCrewCounts = async (eventId) => {
     const totalBookingDetails = await getTotalBookingDetails(
         activeEvent._id
     );
+    const quantityWiseBookings = await getQuantityWiseBookings(activeEvent._id);
 
     return {
         activeEvent,
@@ -529,6 +567,8 @@ const getCrewCounts = async (eventId) => {
         passBookingCounts: totalPassResult.passBookingCounts,
         bookingCounts,
         totalBookingDetails,
+        // Quantity-wise: [{ quantity, bookings, tickets }] - dynamic, no fixed list.
+        quantityWiseBookings,
         rsvp,
         crew,
         ...dashboardCounts,

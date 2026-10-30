@@ -23,6 +23,14 @@ router.post(
   })
 );
 
+// Excel of everyone who filled this link.
+router.get(
+  "/:id/export",
+  asyncHandler(async (req, res) => {
+    await formLinkService.exportFormLinkEntries(req.params.id, res);
+  })
+);
+
 router.put(
   "/:id",
   asyncHandler(async (req, res) => {
