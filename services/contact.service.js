@@ -239,6 +239,7 @@ const createContact = async (data, adminId, files = {}, options = {}) => {
           ...(options.approvalStatus
             ? { approvalStatus: options.approvalStatus }
             : {}),
+          ...(options.formLinkId ? { formLinkId: options.formLinkId } : {}),
           createdBy: adminId || historyOnlyContact.createdBy,
           ...imageFields(promoteImages),
         },
@@ -293,6 +294,7 @@ const createContact = async (data, adminId, files = {}, options = {}) => {
       ...(options.approvalStatus
         ? { approvalStatus: options.approvalStatus }
         : {}),
+      ...(options.formLinkId ? { formLinkId: options.formLinkId } : {}),
       createdBy: adminId,
       ...imageFields(images),
     });
@@ -2517,6 +2519,14 @@ const hardDeleteContacts = async (contacts, adminId = null) => {
     // Rows already deleted from Event History would point to nothing.
     await ContactEventHistory.deleteMany({ contactId: { $in: ids } });
     await Contact.deleteMany({ _id: { $in: ids } });
+  }
+
+  // Guests that came in through a "Form Link" give their place back, so that
+  // link's progress goes down as well. Never allowed to fail the delete itself.
+  try {
+    await require("./formLink.service").releaseSlotsForContacts(contacts);
+  } catch (error) {
+    console.error("Could not update Form Link progress after guest delete:", error.message);
   }
 
   // Form submissions parked in the Duplicate tab for these guests come back
