@@ -320,7 +320,19 @@ const getRsvpSummary = async (eventId) => {
         historyOnly: { $ne: true },
       },
     },
-    { $group: { _id: { $ifNull: ["$rsvpStatus", "none"] }, count: { $sum: 1 } } },
+    // Newest answer first, so a guest's latest Yes / No is the one counted.
+    { $sort: { rsvpRespondedAt: -1 } },
+    // ONE count per person: the same WhatsApp number listed twice in the
+    // Guest List (duplicate rows) is still one guest. A guest who got the
+    // reminder 2-3 times and tapped Yes every time is also one Yes, because
+    // the answer is a single value on the guest (never a counter).
+    {
+      $group: {
+        _id: { $ifNull: ["$whatsappNumber", "$_id"] },
+        status: { $first: { $ifNull: ["$rsvpStatus", "none"] } },
+      },
+    },
+    { $group: { _id: "$status", count: { $sum: 1 } } },
   ]);
 
   const summary = { ...empty };
