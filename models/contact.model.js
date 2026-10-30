@@ -269,6 +269,16 @@ const contactSchema = new mongoose.Schema(
       default: null,
     },
 
+    // Set when the guest came in through a "Form Links" link. Lets the link
+    // export exactly the people who filled THAT link (even if the link is
+    // renamed later). Older guests have none - the export falls back to the
+    // Reference name for them.
+    formLinkId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "FormLink",
+      default: null,
+    },
+
     // Last time an invitation pass was sent to this contact over WhatsApp
     // (see sendPassToContacts in services/contact.service.js).
     passSentAt: {
@@ -464,6 +474,7 @@ contactSchema.pre("findOneAndUpdate", function (next) {
 // Common "list active, non-deleted contacts" query.
 contactSchema.index({ isDeleted: 1, status: 1 });
 contactSchema.index({ approvalStatus: 1 });
+contactSchema.index({ formLinkId: 1 });
 contactSchema.index({ editionEventId: 1 });
 contactSchema.index({ rsvpEventId: 1, rsvpStatus: 1 });
 // Sparse unique: only contacts that were sent a reminder have a token.
