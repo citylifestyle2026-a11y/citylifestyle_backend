@@ -18,6 +18,7 @@ const AppError = require("../utils/AppError");
 const uploadImage = require("../utils/localUpload.util");
 const deleteImage = require("../utils/deleteLocalFile");
 const { normalizeMobileNumber } = require("../utils/normalizeMobileNumber");
+const { personsOf } = require("../utils/persons");
 const { toReferenceList } = require("../utils/splitReferences");
 const contactMerge = require("./contactMerge.service");
 
@@ -75,6 +76,12 @@ const saveDuplicate = async (existing, data, files = {}, { source = "form", form
       instagramId: data.instagramId,
       email: data.email,
       relationship: data.relationship || "Single",
+      entryType: ["Single", "Couple", "Manual"].includes(data.entryType) ? data.entryType : "",
+      persons: personsOf({
+        entryType: data.entryType,
+        relationship: data.relationship,
+        persons: data.persons,
+      }),
       spouseName: isCouple ? data.spouseName : "",
       spouseMobile: isCouple ? data.spouseMobile : "",
       spouseInstagramId: isCouple ? data.spouseInstagramId : "",
@@ -106,6 +113,12 @@ const saveDuplicate = async (existing, data, files = {}, { source = "form", form
       }
       previous.whatsappNumber = payload.whatsappNumber || previous.whatsappNumber;
       previous.relationship = payload.relationship || previous.relationship;
+      // Every link submission reserved its persons on the link, so the row
+      // keeps the running total: removing the row later gives all of it back.
+      if (formLinkId) {
+        previous.persons = personsOf(previous) + payload.persons;
+        previous.entryType = payload.entryType || previous.entryType;
+      }
       previous.companyCategory = payload.companyCategory || previous.companyCategory;
       previous.professionCategory = payload.professionCategory || previous.professionCategory;
       previous.references = joinReferences(previous.references, payload.references);
@@ -172,6 +185,8 @@ const promoteDuplicateToGuest = async (duplicate, { status = "pending", source =
     instagramId: duplicate.instagramId,
     email: duplicate.email,
     relationship: duplicate.relationship || "Single",
+    entryType: duplicate.entryType || "",
+    persons: personsOf(duplicate),
     spouseName: isCouple ? duplicate.spouseName : "",
     spouseMobile: isCouple ? duplicate.spouseMobile : "",
     spouseInstagramId: isCouple ? duplicate.spouseInstagramId : "",
@@ -533,7 +548,7 @@ const ignoreDuplicate = async (duplicateId) => {
   // it from the Duplicate tab gives that place back.
   if (duplicate.formLinkId) {
     try {
-      await require("./formLink.service").releaseSlot(duplicate.formLinkId);
+      await require("./formLink.service").releaseSlot(duplicate.formLinkId, personsOf(duplicate));
     } catch (error) {
       console.error("Could not update Form Link progress after duplicate removal:", error.message);
     }

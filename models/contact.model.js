@@ -123,8 +123,18 @@ const contactSchema = new mongoose.Schema(
     // `relationship` instead. Pass quantity uses `entryType || relationship`.
     entryType: {
       type: String,
-      enum: ["Single", "Couple", ""],
+      enum: ["Single", "Couple", "Manual", ""],
       default: "",
+    },
+
+    // How many PERSONS this entry stands for: Single = 1, Couple = 2,
+    // Manual = the number the admin typed. Form Link progress and the default
+    // pass guests count this. 0 = not saved (older guests) -> worked out from
+    // entryType / relationship (see utils/persons.js).
+    persons: {
+      type: Number,
+      min: 0,
+      default: 0,
     },
 
     // Only meaningful when relationship is "Couple" — left optional

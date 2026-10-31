@@ -96,7 +96,7 @@ const cleanupAfterEventDelete = async ({ eventIds = [], clearUnassigned = true, 
       };
 
   const contacts = await Contact.find(contactFilter)
-    .select("profileImagePublicId spouseProfileImagePublicId formLinkId")
+    .select("profileImagePublicId spouseProfileImagePublicId formLinkId entryType relationship persons")
     .session(session || null)
     .lean();
 

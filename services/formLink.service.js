@@ -10,6 +10,7 @@ const AppError = require("../utils/AppError");
 const Contact = require("../models/contact.model");
 const Member = require("../models/member.model");
 const { normalizeMobileNumber } = require("../utils/normalizeMobileNumber");
+const { personsOf } = require("../utils/persons");
 const contactService = require("./contact.service");
 const memberService = require("./member.service");
 const contactDuplicateService = require("./contactDuplicate.service");
@@ -229,6 +230,7 @@ const exportFormLinkEntries = async (id, res) => {
     { header: "Area", key: "area", width: 20 },
     { header: "Instagram ID", key: "instagramId", width: 22 },
     { header: "Entry Type", key: "entryType", width: 14 },
+    { header: "Persons", key: "persons", width: 10 },
     { header: "Reference", key: "references", width: 30 },
     { header: "Status", key: "status", width: 14 },
     { header: "Submitted At", key: "createdAt", width: 22 },
@@ -260,6 +262,7 @@ const exportFormLinkEntries = async (id, res) => {
       area: dash(item.area),
       instagramId: dash(item.instagramId),
       entryType: dash(item.entryType || item.relationship),
+      persons: personsOf(item),
       references: refs.length ? refs.join(", ") : "-",
       status,
       createdAt: item.createdAt ? new Date(item.createdAt).toLocaleString("en-GB") : "-",
@@ -270,6 +273,12 @@ const exportFormLinkEntries = async (id, res) => {
     addRow(contact, capitalize(contact.approvalStatus || "approved"))
   );
   duplicates.forEach((duplicate) => addRow(duplicate, "Duplicate"));
+
+  const totalPersons = [...contacts, ...duplicates].reduce((sum, item) => sum + personsOf(item), 0);
+  if (sheet.rowCount > 1) {
+    const totalRow = sheet.addRow({ fullName: "Total persons", persons: totalPersons });
+    totalRow.font = { bold: true };
+  }
 
   if (sheet.rowCount === 1) {
     sheet.addRow({ no: "", fullName: "No one has filled this link yet." });
@@ -298,10 +307,14 @@ const findByToken = async (token) => {
   return link;
 };
 
+const notEnoughMessage = (left, needed) =>
+  `Only ${left} place${left === 1 ? "" : "s"} left on this link, but this entry needs ${needed} ` +
+  `(Single = 1, Couple = 2, Manual = typed number).`;
+
 const unavailableMessage = (link) =>
   link.status === "closed"
     ? "This form link is closed."
-    : `All ${link.quantity} entries for this link are already filled.`;
+    : `All ${link.quantity} places for this link are already filled.`;
 
 // Used by the public page to decide: show the form, or a "closed / full" note.
 const getPublicInfo = async (token) => {
@@ -334,6 +347,16 @@ const attachLink = async (req, res, next) => {
     );
     req.body.references = [link.name, ...rest];
 
+    // Quantity counts PERSONS: Single = 1, Couple = 2. Refuse early when what
+    // is left is not enough for this entry (e.g. a Couple with 1 place left).
+    const persons = personsOf({
+      entryType: req.body.entryType,
+      relationship: req.body.relationship,
+      persons: req.body.persons,
+    });
+    const left = Math.max(0, link.quantity - link.usedCount);
+    if (persons > left) throw new AppError(notEnoughMessage(left, persons), 410);
+
     req.formLink = link;
     return next();
   } catch (error) {
@@ -343,26 +366,66 @@ const attachLink = async (req, res, next) => {
 
 // Atomically takes one place on the link. Two people submitting at the same
 // moment can never push it past the quantity.
-const reserveSlot = async (linkId) => {
+const reserveSlot = async (linkId, persons = 1) => {
+  const need = Math.max(1, Number(persons) || 1);
   const link = await FormLink.findOneAndUpdate(
     {
       _id: linkId,
       status: "active",
-      $expr: { $lt: ["$usedCount", "$quantity"] },
+      $expr: { $lte: [{ $add: ["$usedCount", need] }, "$quantity"] },
     },
-    { $inc: { usedCount: 1 } },
+    { $inc: { usedCount: need } },
     { new: true }
   );
   if (!link) {
     const current = await FormLink.findById(linkId);
-    throw new AppError(current ? unavailableMessage(current) : "This form link is not valid.", 410);
+    if (!current) throw new AppError("This form link is not valid.", 410);
+    if (current.status === "active" && current.usedCount < current.quantity) {
+      throw new AppError(notEnoughMessage(current.quantity - current.usedCount, need), 410);
+    }
+    throw new AppError(unavailableMessage(current), 410);
   }
   return link;
 };
 
-// Gives the place back when saving the person failed.
-const releaseSlot = async (linkId) => {
-  await FormLink.updateOne({ _id: linkId, usedCount: { $gt: 0 } }, { $inc: { usedCount: -1 } });
+// Gives the persons back when saving the entry failed / it was removed.
+const releaseSlot = async (linkId, persons = 1) => {
+  const give = Math.max(1, Number(persons) || 1);
+  const link = await FormLink.findById(linkId).select("usedCount").lean();
+  if (!link) return;
+  const dec = Math.min(give, link.usedCount);
+  if (dec > 0) await FormLink.updateOne({ _id: linkId }, { $inc: { usedCount: -dec } });
+};
+
+// Admin raises / lowers the persons of a guest that came through a link
+// (edit guest, or a bigger pass). Raising needs room on the link: otherwise
+// the admin must first edit the Form Link and increase its quantity.
+// `from` / `to` = persons before / after. Returns nothing; throws AppError.
+const changePersons = async (linkId, from, to) => {
+  const delta = Number(to) - Number(from);
+  if (!linkId || !delta) return;
+
+  if (delta < 0) {
+    await releaseSlot(linkId, -delta);
+    return;
+  }
+
+  const link = await FormLink.findOneAndUpdate(
+    { _id: linkId, $expr: { $lte: [{ $add: ["$usedCount", delta] }, "$quantity"] } },
+    { $inc: { usedCount: delta } },
+    { new: true }
+  );
+  if (link) return;
+
+  const current = await FormLink.findById(linkId).lean();
+  if (!current) return; // link was deleted: nothing to count against
+  const left = Math.max(0, current.quantity - current.usedCount);
+  throw new AppError(
+    `Form link "${current.name}" has only ${left} place${left === 1 ? "" : "s"} left, ` +
+      `but ${delta} more ${delta === 1 ? "is" : "are"} needed. ` +
+      `First edit the form link and increase its quantity, then add it here.`,
+    400
+  );
 };
 
 // A guest that came in through a link was deleted from the Guest List: give
@@ -375,7 +438,7 @@ const releaseSlotsForContacts = async (contacts = [], opts = {}) => {
   for (const contact of contacts) {
     if (!contact || !contact.formLinkId) continue;
     const key = String(contact.formLinkId);
-    perLink.set(key, (perLink.get(key) || 0) + 1);
+    perLink.set(key, (perLink.get(key) || 0) + personsOf(contact));
   }
 
   for (const [linkId, count] of perLink) {
@@ -410,7 +473,8 @@ const saveAsMember = async (data, link, files = null) => {
       address: data.address,
       area: data.area,
       instagramId: data.instagramId,
-      relationship: data.relationship || data.entryType,
+      relationship:
+        data.relationship || (data.entryType === "Manual" ? "Single" : data.entryType),
       spouseName: isCouple ? data.spouseName : "",
       spouseMobile: isCouple ? data.spouseMobile : "",
       spouseInstagramId: isCouple ? data.spouseInstagramId : "",
@@ -462,7 +526,14 @@ const submitThroughLink = async (link, data, files) => {
         .lean()
     : null;
 
-  await reserveSlot(link._id);
+  // Single = 1 person, Couple = 2: the link's quantity counts persons.
+  const persons = personsOf({
+    entryType: data.entryType,
+    relationship: data.relationship,
+    persons: data.persons,
+  });
+
+  await reserveSlot(link._id, persons);
 
   if (alreadyGuest) {
     try {
@@ -471,7 +542,7 @@ const submitThroughLink = async (link, data, files) => {
         formLinkId: link._id,
       });
     } catch (error) {
-      await releaseSlot(link._id);
+      await releaseSlot(link._id, persons);
       throw error;
     }
     return;
@@ -484,7 +555,7 @@ const submitThroughLink = async (link, data, files) => {
       formLinkId: link._id,
     });
   } catch (error) {
-    await releaseSlot(link._id);
+    await releaseSlot(link._id, persons);
     throw error;
   }
 
@@ -522,4 +593,5 @@ module.exports = {
   addToContactBookIfMissing,
   releaseSlotsForContacts,
   releaseSlot,
+  changePersons,
 };

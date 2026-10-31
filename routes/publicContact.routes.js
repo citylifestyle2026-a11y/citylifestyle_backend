@@ -99,6 +99,12 @@ router.post(
   contactUpload,
   honeypot,
   parseContactFormData,
+  // `persons` only means something for Manual (validated 1 - 10 by the
+  // validator); for Single / Couple it is ignored.
+  (req, res, next) => {
+    if (req.body && req.body.entryType !== "Manual") delete req.body.persons;
+    next();
+  },
   formLinkService.attachLink, // ?link=<token>: forces the link's name as Reference
   createContactValidation,
   validate,

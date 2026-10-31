@@ -153,11 +153,29 @@ const createContactValidation = [
       if (!v && !String(req.body.relationship || "").trim()) {
         throw new Error("Entry Type is required");
       }
-      if (v && !["Single", "Couple"].includes(v)) {
-        throw new Error('Entry Type must be "Single" or "Couple"');
+      if (v && !["Single", "Couple", "Manual"].includes(v)) {
+        throw new Error('Entry Type must be "Single", "Couple" or "Manual"');
       }
       return true;
     }),
+
+  // Manual entry: the admin types how many persons (1 - 1000).
+  body("persons")
+    .optional({ values: "falsy" })
+    .custom((value, { req }) => {
+      if (String(req.body.entryType || "").trim() !== "Manual") return true;
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < 1 || n > 1000) {
+        throw new Error("Persons must be a whole number between 1 and 1000");
+      }
+      return true;
+    }),
+  body("entryType").custom((value, { req }) => {
+    if (String(value || "").trim() === "Manual" && !String(req.body.persons || "").trim()) {
+      throw new Error("Persons is required for a Manual entry");
+    }
+    return true;
+  }),
 
   // ================= CONDITIONAL: COUPLE-ONLY REQUIRED FIELDS =================
   // spouseName / spouseMobile / profession are each only required when
@@ -280,8 +298,18 @@ const updateContactValidation = [
   body("entryType")
     .optional({ values: "falsy" })
     .trim()
-    .isIn(["Single", "Couple"])
-    .withMessage('Entry Type must be "Single" or "Couple"'),
+    .isIn(["Single", "Couple", "Manual"])
+    .withMessage('Entry Type must be "Single", "Couple" or "Manual"'),
+
+  body("persons")
+    .optional({ values: "falsy" })
+    .custom((value) => {
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < 1 || n > 1000) {
+        throw new Error("Persons must be a whole number between 1 and 1000");
+      }
+      return true;
+    }),
 
   body("spouseName").optional({ values: "falsy" }).trim(),
 

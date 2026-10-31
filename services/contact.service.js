@@ -6,6 +6,7 @@ const AppError = require("../utils/AppError");
 const { normalizeMobileSearchTerm } = require("../utils/normalizeMobileNumber");
 const uploadImage = require("../utils/localUpload.util");
 const deleteImage = require("../utils/deleteLocalFile");
+const { personsOf, resolvePersons, MAX_PERSONS } = require("../utils/persons");
 
 // ================= CONTACT IMAGE HELPERS =================
 // Profile photo + spouse profile photo arrive as multer files
@@ -154,6 +155,14 @@ const createContact = async (data, adminId, files = {}, options = {}) => {
   // sends Entry Type, which is kept in its own field (not copied here).
   const relationship = data.relationship || "";
 
+  // Single = 1, Couple = 2, Manual = the typed number (1 - 1000).
+  let persons;
+  try {
+    persons = resolvePersons(data).persons;
+  } catch (error) {
+    throw new AppError(error.message, 400);
+  }
+
   assertPhotosPresent({
     hasProfile: !!firstFile(files, "profileImage"),
     hasSpouse: !!firstFile(files, "spouseProfileImage"),
@@ -231,6 +240,8 @@ const createContact = async (data, adminId, files = {}, options = {}) => {
           companyCategory: companyCategory || null,
           email,
           relationship,
+          entryType: entryType || "",
+          persons,
           spouseName,
           spouseMobile,
           profession,
@@ -282,6 +293,7 @@ const createContact = async (data, adminId, files = {}, options = {}) => {
       email,
       relationship,
       entryType: entryType || "",
+      persons,
       spouseName,
       spouseMobile,
       profession,
@@ -1392,7 +1404,7 @@ const getContactPass = async (contactId) => {
 
 const updateContactPass = async (contactId, { quantity, resendInvitation }) => {
   const bookingService = require("./booking.service");
-  const { booking } = await getActivePassOfContact(contactId);
+  const { contact, booking } = await getActivePassOfContact(contactId);
 
   if (!booking) {
     throw new AppError("This contact has no active pass.", 400);
@@ -1403,10 +1415,19 @@ const updateContactPass = async (contactId, { quantity, resendInvitation }) => {
     throw new AppError(`Guests must be between 1 and ${MAX_PASS_GUESTS}.`, 400);
   }
 
-  const result = await bookingService.updateBooking(booking._id, {
-    quantity: guests,
-    resendInvitation: resendInvitation === true || resendInvitation === "true",
-  });
+  // More guests than the form link holds for this guest -> edit the link first.
+  const undoPersons = await raisePersonsForPass(contact, guests);
+
+  let result;
+  try {
+    result = await bookingService.updateBooking(booking._id, {
+      quantity: guests,
+      resendInvitation: resendInvitation === true || resendInvitation === "true",
+    });
+  } catch (error) {
+    await undoPersons();
+    throw error;
+  }
 
   return {
     success: true,
@@ -1683,7 +1704,7 @@ const resendPassToContacts = async ({ ids }) => {
 // contacts can never race for the same ticket stock, and one failure
 // never stops the rest. Returns a per-contact result for the UI.
 // Most guests one pass can admit (guards against typos like 100).
-const MAX_PASS_GUESTS = 10;
+const MAX_PASS_GUESTS = MAX_PERSONS;
 
 // Admin-chosen guest count for a pass; falls back to the old rule
 // (Single = 1, Couple = 2) when nothing valid was sent.
@@ -1694,8 +1715,34 @@ const resolvePassQuantity = (contact, quantities) => {
     return Math.min(requested, MAX_PASS_GUESTS);
   }
 
-  // Entry Type decides it; old contacts only have the relationship.
-  return (contact.entryType || contact.relationship) === "Couple" ? 2 : 1;
+  // Persons decide it (Single 1, Couple 2, Manual = typed number); old
+  // contacts fall back to Entry Type / Relationship.
+  return Math.min(personsOf(contact), MAX_PASS_GUESTS);
+};
+
+// Pass guests != the guest's persons: the guest's persons become the pass
+// guests, and a guest that came through a Form Link moves that link's
+// progress the same way (fewer guests = places given back; more guests must
+// fit on the link, otherwise the admin first edits the Form Link and
+// increases its quantity). Returns a function that undoes it (used when the
+// pass itself fails afterwards).
+const raisePersonsForPass = async (contact, guests) => {
+  const current = personsOf(contact);
+  if (guests === current) return async () => {};
+
+  if (contact.formLinkId) {
+    await require("./formLink.service").changePersons(contact.formLinkId, current, guests);
+  }
+  await Contact.updateOne({ _id: contact._id }, { $set: { persons: guests } });
+
+  return async () => {
+    await Contact.updateOne({ _id: contact._id }, { $set: { persons: current } });
+    if (contact.formLinkId) {
+      await require("./formLink.service")
+        .changePersons(contact.formLinkId, guests, current)
+        .catch(() => {});
+    }
+  };
 };
 
 const sendPassToContacts = async ({ ids, eventId, ticketTypeId, quantities }, adminId) => {
@@ -1762,6 +1809,14 @@ const sendPassToContacts = async ({ ids, eventId, ticketTypeId, quantities }, ad
 
     const quantity = resolvePassQuantity(contact, quantities);
 
+    let undoPersons = async () => {};
+    try {
+      undoPersons = await raisePersonsForPass(contact, quantity);
+    } catch (error) {
+      results.push({ ...base, status: "failed", message: error.message });
+      continue;
+    }
+
     try {
       const { booking } = await bookingService.createBooking(
         {
@@ -1798,6 +1853,7 @@ const sendPassToContacts = async ({ ids, eventId, ticketTypeId, quantities }, ad
         message: `Pass sent (${quantity} guest${quantity === 1 ? "" : "s"}) - ${booking.bookingNumber}`,
       });
     } catch (error) {
+      await undoPersons();
       results.push({
         ...base,
         status: "failed",
@@ -2130,7 +2186,14 @@ const updateContact = async (id, data, files = {}) => {
     updateFields.companyCategory = data.companyCategory || null;
   }
   if (data.email !== undefined) updateFields.email = data.email;
-  if (data.entryType) updateFields.entryType = data.entryType;
+  if (data.entryType) {
+    updateFields.entryType = data.entryType;
+    try {
+      updateFields.persons = resolvePersons(data).persons;
+    } catch (error) {
+      throw new AppError(error.message, 400);
+    }
+  }
   if (data.relationship) updateFields.relationship = data.relationship;
   if (data.spouseName !== undefined) updateFields.spouseName = data.spouseName;
   if (data.spouseMobile !== undefined) updateFields.spouseMobile = data.spouseMobile;
@@ -2193,6 +2256,22 @@ const updateContact = async (id, data, files = {}) => {
 
   Object.assign(updateFields, imageFields(images));
 
+  // A guest that came in through a Form Link: more / fewer persons also
+  // changes that link's progress. More persons than the link has room for ->
+  // the admin must first edit the Form Link (checked BEFORE anything is saved).
+  const oldPersons = personsOf(contact);
+  const newPersons = updateFields.persons ?? oldPersons;
+  const linkTouched = Boolean(contact.formLinkId) && newPersons !== oldPersons;
+
+  if (linkTouched) {
+    try {
+      await require("./formLink.service").changePersons(contact.formLinkId, oldPersons, newPersons);
+    } catch (error) {
+      await discardUploadedImages(images);
+      throw error;
+    }
+  }
+
   let updatedContact;
   try {
     updatedContact = await Contact.findOneAndUpdate(
@@ -2205,6 +2284,11 @@ const updateContact = async (id, data, files = {}) => {
       .populate("createdBy", "name");
   } catch (error) {
     await discardUploadedImages(images);
+    if (linkTouched) {
+      await require("./formLink.service")
+        .changePersons(contact.formLinkId, newPersons, oldPersons)
+        .catch(() => {});
+    }
     throw error;
   }
 

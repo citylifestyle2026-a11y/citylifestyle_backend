@@ -22,6 +22,10 @@ const contactDuplicateSchema = new mongoose.Schema(
     instagramId: { type: String, trim: true, default: "" },
     email: { type: String, trim: true, lowercase: true, default: "" },
     relationship: { type: String, enum: ["Single", "Couple"], default: "Single" },
+    // What the person chose on the form (Single / Couple) and how many persons
+    // that is - a Form Link counts persons.
+    entryType: { type: String, enum: ["Single", "Couple", "Manual", ""], default: "" },
+    persons: { type: Number, min: 0, default: 0 },
     spouseName: { type: String, trim: true, default: "" },
     spouseMobile: { type: String, trim: true, default: "" },
     spouseInstagramId: { type: String, trim: true, default: "" },
