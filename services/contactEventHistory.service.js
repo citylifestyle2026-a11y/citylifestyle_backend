@@ -276,12 +276,6 @@ const markAttendance = async (id, attended, adminId) => {
     history.markedBy = adminId || null;
     history.markedAt = new Date();
   } else {
-    if (!history.markedManually) {
-      throw new AppError(
-        "Only an entry marked manually can be changed back to Not Attended",
-        400
-      );
-    }
     history.status = "Not Attended";
     history.markedManually = false;
     history.markedBy = adminId || null;

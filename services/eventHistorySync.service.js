@@ -183,12 +183,17 @@ const getSyncSummary = async (eventId) => {
 //   - ticketIds : the ticked rows of the Entry Report (scanned tickets)
 //   - selectAll : every scanned ticket of the event (the "select all N
 //                 entries" option, across all pages)
+//   - notAttendedOnly : Event History page -> "Add Not Attended". Nobody is
+//                 marked Attended; everyone of the event who registered / was
+//                 sent a pass but was never scanned is saved as Not Attended
+//                 (people who already have a row are left untouched).
 const syncFromEvent = async (data, adminId) => {
   const { eventId } = data;
   const selectAll = data.selectAll === true || data.selectAll === "true";
   const ticketIds = Array.isArray(data.ticketIds) ? data.ticketIds.map(String) : [];
+  const notAttendedOnly = data.notAttendedOnly === true || data.notAttendedOnly === "true";
 
-  if (!selectAll && ticketIds.length === 0) {
+  if (!notAttendedOnly && !selectAll && ticketIds.length === 0) {
     throw new AppError("Please select at least one entry", 400);
   }
 
@@ -206,7 +211,9 @@ const syncFromEvent = async (data, adminId) => {
     }
   };
 
-  if (selectAll) {
+  if (notAttendedOnly) {
+    // nobody is marked Attended in this mode
+  } else if (selectAll) {
     for (const person of personByTicket.values()) {
       if (person.used) addAttended(person);
     }
@@ -218,8 +225,12 @@ const syncFromEvent = async (data, adminId) => {
     }
   }
 
-  if (attended.size === 0) {
+  if (!notAttendedOnly && attended.size === 0) {
     throw new AppError("None of the selected entries could be added", 400);
+  }
+
+  if (notAttendedOnly && registered.size === 0) {
+    throw new AppError("No one has registered or been sent a pass for this event", 400);
   }
 
   // ---- who did not attend: registered, but no scanned ticket at all ----
