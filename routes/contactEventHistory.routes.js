@@ -8,6 +8,7 @@ const contactEventHistoryController = require("../controllers/contactEventHistor
 const {
   createEventHistoryValidation,
   updateEventHistoryValidation,
+  markAttendanceValidation,
   validate,
 } = require("../validators/contactEventHistory.validator");
 
@@ -51,6 +52,31 @@ router.get(
   "/get-all-event-history",
   protect,
   contactEventHistoryController.getAllEventHistory
+);
+
+// Excel download of the Event History (same ?eventId=&search= filters as the
+// list; every matching entry, not just one page).
+router.get(
+  "/export",
+  protect,
+  contactEventHistoryController.exportEventHistory
+);
+
+// Attended / Not Attended counts for the Event History page (same
+// ?eventId=&search= filters as the list).
+router.get(
+  "/stats",
+  protect,
+  contactEventHistoryController.getHistoryStats
+);
+
+// Mark a guest Attended by hand (pass never scanned but the guest came).
+router.patch(
+  "/:id/attendance",
+  protect,
+  markAttendanceValidation,
+  validate,
+  contactEventHistoryController.markAttendance
 );
 
 // Editions that have history (also those of deleted events) - filter dropdown.

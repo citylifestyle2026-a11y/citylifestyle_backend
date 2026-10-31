@@ -63,6 +63,24 @@ const contactEventHistorySchema = new mongoose.Schema(
       default: "manual",
     },
 
+    // true = an admin ticked this person as Attended by hand on the Event
+    // History page (their pass was never scanned at the gate, but they came).
+    markedManually: {
+      type: Boolean,
+      default: false,
+    },
+
+    markedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Admin",
+      default: null,
+    },
+
+    markedAt: {
+      type: Date,
+      default: null,
+    },
+
     // Copy of the PERSON's details ({ fullName, whatsappNumber, spouseName,
     // spouseMobile }), written only at the moment those details would be
     // lost from the Contact - e.g. a Couple contact is switched to Single or

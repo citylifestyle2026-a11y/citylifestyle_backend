@@ -58,6 +58,16 @@ const updateEventHistoryValidation = [
   body("notes").optional({ values: "falsy" }).trim(),
 ];
 
+// Mark Attendance (manual) Validation
+const markAttendanceValidation = [
+  body("attended")
+    .exists({ checkNull: true })
+    .withMessage("attended is required")
+    .bail()
+    .isBoolean()
+    .withMessage("attended must be true or false"),
+];
+
 // Validation Result — same shape used by every other validator in this
 // project (see validators/contact.validator.js's own `validate`).
 const validate = (req, res, next) => {
@@ -79,6 +89,7 @@ const validate = (req, res, next) => {
 module.exports = {
   createEventHistoryValidation,
   updateEventHistoryValidation,
+  markAttendanceValidation,
   validate,
   STATUS_VALUES,
 };

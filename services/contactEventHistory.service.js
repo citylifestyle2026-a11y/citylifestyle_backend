@@ -41,19 +41,9 @@ const createEventHistory = async (data, adminId) => {
   return populateHistory(history);
 };
 
-// ================= GET ALL EVENT HISTORY (ALL CONTACTS) =================
-// Powers the standalone Sidebar "Event History" page (not scoped to one
-// contact) — every entry, across every contact, with both contactId and
-// eventId populated. Supports optional ?contactId=&eventId=&status=
-// &page=&limit=&search= filters.
-//
-// `search` (case-insensitive, partial) matches the PERSON of a row and the
-// edition:
-//   - a normal row  -> the contact's fullName / whatsappNumber
-//   - a spouse row  -> the contact's spouseName / spouseMobile
-//   - any row       -> the event's edition / title (e.g. "Parv 5")
-// A full number typed with +91 / spaces ("+91 98765 43210") still matches.
-const getAllEventHistory = async (query = {}) => {
+// Builds the Mongo $match used by the list AND the counts, so both always
+// agree on which entries are "in view" (edition filter + search box).
+const buildHistoryMatch = async (query = {}) => {
   const filter = { isDeleted: { $ne: true } };
 
   if (query.contactId) {
@@ -73,9 +63,6 @@ const getAllEventHistory = async (query = {}) => {
   if (query.status) {
     filter.status = query.status;
   }
-
-  const page = parseInt(query.page) || 1;
-  const limit = parseInt(query.limit) || 10;
 
   // One ROW per person (same contact + same isSpouse flag => same mobile
   // number), carrying ALL of that person's events inside `entries`.
@@ -135,6 +122,27 @@ const getAllEventHistory = async (query = {}) => {
     ];
   }
 
+  return matchStage;
+};
+
+// ================= GET ALL EVENT HISTORY (ALL CONTACTS) =================
+// Powers the standalone Sidebar "Event History" page (not scoped to one
+// contact) — every entry, across every contact, with both contactId and
+// eventId populated. Supports optional ?contactId=&eventId=&status=
+// &page=&limit=&search= filters.
+//
+// `search` (case-insensitive, partial) matches the PERSON of a row and the
+// edition:
+//   - a normal row  -> the contact's fullName / whatsappNumber
+//   - a spouse row  -> the contact's spouseName / spouseMobile
+//   - any row       -> the event's edition / title (e.g. "Parv 5")
+// A full number typed with +91 / spaces ("+91 98765 43210") still matches.
+const getAllEventHistory = async (query = {}) => {
+  const matchStage = await buildHistoryMatch(query);
+
+  const page = parseInt(query.page) || 1;
+  const limit = parseInt(query.limit) || 10;
+
   const [agg] = await ContactEventHistory.aggregate([
     { $match: matchStage },
     {
@@ -191,6 +199,7 @@ const getAllEventHistory = async (query = {}) => {
         status: e.status,
         notes: e.notes,
         source: e.source || "manual",
+        markedManually: !!e.markedManually,
         createdAt: e.createdAt,
       })),
     };
@@ -208,6 +217,230 @@ const getAllEventHistory = async (query = {}) => {
       totalPages: Math.max(1, Math.ceil(total / limit)),
     },
   };
+};
+
+// ================= ATTENDANCE COUNTS =================
+// GET /stats — how many entries are Attended / Not Attended for the same
+// view as the table (edition filter + search). One entry = one person at one
+// edition, so a person who came to 3 editions counts 3 times.
+const getHistoryStats = async (query = {}) => {
+  const matchStage = await buildHistoryMatch({
+    eventId: query.eventId,
+    search: query.search,
+  });
+
+  const groups = await ContactEventHistory.aggregate([
+    { $match: matchStage },
+    { $group: { _id: "$status", count: { $sum: 1 } } },
+  ]);
+
+  const countOf = (status) => groups.find((g) => g._id === status)?.count || 0;
+  const total = groups.reduce((sum, g) => sum + g.count, 0);
+  const attended = countOf("Attended");
+  const notAttended = countOf("Not Attended");
+
+  return {
+    total,
+    attended,
+    notAttended,
+    other: total - attended - notAttended,
+  };
+};
+
+// ================= MARK ATTENDANCE BY HAND =================
+// For a guest whose pass was never scanned but who did come. attended=true
+// turns the entry green (Attended); attended=false puts a MANUALLY marked
+// entry back to Not Attended (an entry that really was scanned is not
+// touched by the undo).
+const markAttendance = async (id, attended, adminId) => {
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    throw new AppError("Invalid Event History ID", 400);
+  }
+
+  const history = await ContactEventHistory.findOne({
+    _id: id,
+    isDeleted: { $ne: true },
+  });
+
+  if (!history) {
+    throw new AppError("Event history entry not found", 404);
+  }
+
+  if (attended) {
+    // Already Attended (e.g. really scanned) - nothing to do, and it must not
+    // be relabelled as "manual".
+    if (history.status === "Attended") return populateHistory(history);
+
+    history.status = "Attended";
+    history.markedManually = true;
+    history.markedBy = adminId || null;
+    history.markedAt = new Date();
+  } else {
+    if (!history.markedManually) {
+      throw new AppError(
+        "Only an entry marked manually can be changed back to Not Attended",
+        400
+      );
+    }
+    history.status = "Not Attended";
+    history.markedManually = false;
+    history.markedBy = adminId || null;
+    history.markedAt = new Date();
+  }
+
+  await history.save();
+
+  return populateHistory(history);
+};
+
+// ================= EXPORT TO EXCEL =================
+// GET /export?eventId=&search=&status= - streams an .xlsx of EXACTLY what the
+// page is filtered to (edition + search), not just the current page. One row
+// per entry (person + edition), plus a "Summary" sheet with Attended / Not
+// Attended counts per edition.
+const exportEventHistory = async (query, res) => {
+  const ExcelJS = require("exceljs");
+
+  const matchStage = await buildHistoryMatch({
+    eventId: query.eventId,
+    search: query.search,
+    status: query.status,
+  });
+
+  const rawEntries = await ContactEventHistory.find(matchStage)
+    .populate("contactId", "fullName whatsappNumber spouseName spouseMobile")
+    .populate("eventId", "title edition startDateTime")
+    .sort({ createdAt: -1 });
+
+  const entries = rawEntries.map(withEventFallback);
+
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = "Event Management CRM";
+  workbook.created = new Date();
+
+  const fmt = (value) => (value ? new Date(value).toLocaleString("en-GB") : "-");
+
+  const styleHeader = (sheet) => {
+    const row = sheet.getRow(1);
+    row.font = { bold: true, color: { argb: "FFFFFFFF" } };
+    row.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "1F4E78" } };
+    row.alignment = { vertical: "middle", horizontal: "center" };
+  };
+
+  // ---------- sheet 1: every entry ----------
+  const sheet = workbook.addWorksheet("Event History");
+  sheet.columns = [
+    { header: "Name", key: "name", width: 28 },
+    { header: "WhatsApp Number", key: "mobile", width: 20 },
+    { header: "Guest Type", key: "type", width: 14 },
+    { header: "Spouse Of", key: "spouseOf", width: 26 },
+    { header: "Edition", key: "edition", width: 18 },
+    { header: "Event Date", key: "eventDate", width: 22 },
+    { header: "Status", key: "status", width: 16 },
+    { header: "Marked Manually", key: "manual", width: 16 },
+    { header: "Notes", key: "notes", width: 40 },
+    { header: "Added From", key: "source", width: 16 },
+    { header: "Added On", key: "createdAt", width: 22 },
+  ];
+  styleHeader(sheet);
+
+  const perEdition = new Map();
+
+  entries.forEach((entry) => {
+    const live = entry.contactId || {};
+    const saved = entry.contactSnapshot || {};
+    const pick = (key) => live[key] || saved[key] || "";
+    const isSpouse = entry.isSpouse === true;
+
+    const name = isSpouse ? pick("spouseName") : pick("fullName");
+    const mobile = isSpouse ? pick("spouseMobile") : pick("whatsappNumber");
+    const edition = entry.eventId?.edition || entry.eventId?.title || "-";
+    const status = entry.status || "-";
+
+    const row = sheet.addRow({
+      name: name || (entry.contactId ? "-" : "Deleted guest"),
+      mobile: mobile || "-",
+      type: isSpouse ? "Spouse" : "Guest",
+      spouseOf: isSpouse ? pick("fullName") || "-" : "-",
+      edition,
+      eventDate: fmt(entry.eventId?.startDateTime),
+      status,
+      manual: entry.markedManually ? "Yes" : "No",
+      notes: entry.notes || "-",
+      source: entry.source === "entry-report" ? "Entry Report" : "Manual",
+      createdAt: fmt(entry.createdAt),
+    });
+
+    // Green / red status cell - same colours as the page.
+    const statusCell = row.getCell("status");
+    if (status === "Attended") {
+      statusCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFD9F2E0" } };
+      statusCell.font = { bold: true, color: { argb: "FF1E7B3A" } };
+    } else if (status === "Not Attended") {
+      statusCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFBE1E1" } };
+      statusCell.font = { bold: true, color: { argb: "FFB42323" } };
+    }
+
+    const counts = perEdition.get(edition) || { attended: 0, notAttended: 0, other: 0 };
+    if (status === "Attended") counts.attended += 1;
+    else if (status === "Not Attended") counts.notAttended += 1;
+    else counts.other += 1;
+    perEdition.set(edition, counts);
+  });
+
+  sheet.views = [{ state: "frozen", ySplit: 1 }];
+  if (entries.length > 0) {
+    sheet.autoFilter = { from: "A1", to: "K1" };
+  }
+
+  // ---------- sheet 2: counts per edition ----------
+  const summary = workbook.addWorksheet("Summary");
+  summary.columns = [
+    { header: "Edition", key: "edition", width: 24 },
+    { header: "Attended", key: "attended", width: 14 },
+    { header: "Not Attended", key: "notAttended", width: 16 },
+    { header: "Other", key: "other", width: 12 },
+    { header: "Total", key: "total", width: 12 },
+  ];
+  styleHeader(summary);
+
+  const totals = { attended: 0, notAttended: 0, other: 0 };
+  [...perEdition.entries()]
+    .sort(([a], [b]) => String(a).localeCompare(String(b), undefined, { numeric: true }))
+    .forEach(([edition, c]) => {
+      summary.addRow({
+        edition,
+        attended: c.attended,
+        notAttended: c.notAttended,
+        other: c.other,
+        total: c.attended + c.notAttended + c.other,
+      });
+      totals.attended += c.attended;
+      totals.notAttended += c.notAttended;
+      totals.other += c.other;
+    });
+
+  const totalRow = summary.addRow({
+    edition: "Total",
+    attended: totals.attended,
+    notAttended: totals.notAttended,
+    other: totals.other,
+    total: totals.attended + totals.notAttended + totals.other,
+  });
+  totalRow.font = { bold: true };
+
+  // ---------- download ----------
+  res.setHeader(
+    "Content-Type",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  );
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename=EventHistory_${Date.now()}.xlsx`
+  );
+
+  await workbook.xlsx.write(res);
+  res.end();
 };
 
 // ================= EDITIONS THAT HAVE HISTORY =================
@@ -401,6 +634,9 @@ function withEventFallback(doc) {
 module.exports = {
   createEventHistory,
   getAllEventHistory,
+  getHistoryStats,
+  markAttendance,
+  exportEventHistory,
   getHistoryEditions,
   getEventHistoryByContact,
   updateEventHistory,

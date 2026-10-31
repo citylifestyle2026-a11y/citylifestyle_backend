@@ -38,6 +38,49 @@ const getAllEventHistory = async (req, res, next) => {
   }
 };
 
+// ================= ATTENDANCE COUNTS =================
+// GET /api/contact-event-history/stats?eventId=&search=
+const getHistoryStats = async (req, res, next) => {
+  try {
+    const data = await contactEventHistoryService.getHistoryStats(req.query);
+    return res.status(200).json({ success: true, message: "Stats fetched successfully", data });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ================= MARK ATTENDANCE BY HAND =================
+// PATCH /api/contact-event-history/:id/attendance   body: { attended: true|false }
+const markAttendance = async (req, res, next) => {
+  try {
+    const attended = req.body.attended === true || req.body.attended === "true";
+    const history = await contactEventHistoryService.markAttendance(
+      req.params.id,
+      attended,
+      req.user.id
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: attended ? "Marked as Attended" : "Changed back to Not Attended",
+      data: history,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ================= EXPORT TO EXCEL =================
+// GET /api/contact-event-history/export?eventId=&search=&status=
+// The service streams the .xlsx straight onto `res`.
+const exportEventHistory = async (req, res, next) => {
+  try {
+    await contactEventHistoryService.exportEventHistory(req.query, res);
+  } catch (error) {
+    next(error);
+  }
+};
+
 // ================= EDITIONS THAT HAVE HISTORY =================
 // GET /api/contact-event-history/editions - includes deleted events' editions.
 const getHistoryEditions = async (req, res, next) => {
@@ -141,6 +184,9 @@ const syncFromEvent = async (req, res, next) => {
 };
 
 module.exports = {
+  exportEventHistory,
+  getHistoryStats,
+  markAttendance,
   getSyncSummary,
   syncFromEvent,
   createEventHistory,
