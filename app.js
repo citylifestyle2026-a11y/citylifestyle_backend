@@ -122,6 +122,12 @@ app.use("/api/members", memberRoutes);
 // image 
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
+// Same folder, also reachable under /api. On the live IIS server a request for
+// /uploads/<file that exists on disk> is answered by IIS itself (empty 404) and
+// never reaches Node, while /api/* always does. The frontend uses this address
+// to show images (utilits/imageUrl.js).
+app.use("/api/uploads", express.static(path.join(__dirname, "uploads")));
+
 // ---------- 404 Handler ----------
 app.use((req, res) => {
   res.status(404).json({
