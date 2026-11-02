@@ -189,6 +189,8 @@ const list = async ({ page = 1, limit = 10, search = "", status = "" }) => {
     InviteGuest.aggregate([{ $group: { _id: "$status", count: { $sum: 1 } } }]),
   ]);
 
+  await require("./blocklist.service").attachBlockedFlag(items, (g) => [g.mobileNumber]);
+
   const counts = { all: 0, pending: 0, sending: 0, sent: 0, failed: 0 };
   grouped.forEach((g) => {
     counts[g._id] = g.count;
@@ -400,5 +402,6 @@ module.exports = {
   }),
   saveDesign: cardService.saveDesign,
   saveNameStyle: cardService.saveNameStyle,
+  savePhotoBox: cardService.savePhotoBox,
   removeDesign: cardService.removeDesign,
 };

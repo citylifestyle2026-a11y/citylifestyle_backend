@@ -108,6 +108,27 @@ router.post(
   formLinkService.attachLink, // ?link=<token>: forces the link's name as Reference
   createContactValidation,
   validate,
+  // Block List: a blocked number (or blocked spouse number) cannot register.
+  // Runs before the handler, so a share link's place is NOT used up.
+  // The reason stays private - the person only sees a generic message.
+  async (req, res, next) => {
+    try {
+      const blocked = await require("../services/blocklist.service").findBlockedByNumbers([
+        req.body.whatsappNumber,
+        req.body.spouseMobile,
+      ]);
+      if (blocked.size > 0) {
+        return res.status(403).json({
+          success: false,
+          message:
+            "This mobile number is blocked and cannot be registered. Please contact the organizer.",
+        });
+      }
+      return next();
+    } catch (error) {
+      return next(error);
+    }
+  },
   async (req, res, next) => {
     try {
       if (req.formLink) {

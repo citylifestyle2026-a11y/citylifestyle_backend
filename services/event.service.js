@@ -264,28 +264,21 @@ exports.updateEvent = async (id, data, file) => {
 };
 
 // Delete Event
-// ================= MANUAL EVENT DELETE (HARD DELETE CASCADE) =================
-// This only ever runs when an Admin explicitly deletes an Event (this
-// function is only called from eventController.deleteEvent). Everything
-// that belongs to the event goes with it:
+// ================= MANUAL EVENT DELETE (SOFT DELETE - NOTHING ELSE IS REMOVED) =================
+// Only ever called from eventController.deleteEvent (an Admin explicitly
+// deletes an Event). The Event is just hidden (isDeleted = true, same
+// convention as Contact / Booking); EVERYTHING else is left exactly as it is:
 //
-//   Database (one all-or-nothing transaction):
-//     - BookingTickets, Bookings, TicketTypes and the Event itself
-//       (hard delete)
-//     - Event History rows are KEPT. The event's details (title, edition,
-//       dates, venue) are copied onto each row first (eventSnapshot), so
-//       the history keeps showing them after the Event is gone.
-//     - Contact Book (Member) rows are KEPT, but the event is removed from
-//       their `movedTo` (so "Past: <edition>" disappears).
-//     - Form Links are KEPT untouched.
-//     - The Guest List is cleared - see services/eventCleanup.service.js.
-//   Server disk (after the transaction has committed, best-effort):
-//     - every ticket's QR image, ticket PDF and attendee/registration photo
-//     - the event's banner image
+//     - Bookings, BookingTickets and TicketTypes
+//     - Guest List (Contact) rows, their passes / approval / edition
+//     - Contact Book (Member) rows and their "Past: <edition>" tag
+//     - Event History rows
+//     - Form Links and their progress
+//     - every file (QR images, ticket PDFs, photos, event banner)
 //
-// Files are removed only AFTER the database commit, so a failed
-// transaction can never leave tickets pointing at deleted files. A file that
-// can't be removed is logged and skipped — it never fails the delete.
+// So no data is lost and nothing needs to be rebuilt. The event no longer
+// shows in the Events list / dropdowns and can no longer be picked for new
+// records.
 exports.deleteEvent = async (id, adminId) => {
   if (!mongoose.Types.ObjectId.isValid(id)) {
     throw new Error("Invalid Event ID");
@@ -297,126 +290,27 @@ exports.deleteEvent = async (id, adminId) => {
     throw new Error("Event not found");
   }
 
-  // ---- 1. collect every file this event owns (before the rows vanish) ----
-  const tickets = await BookingTicket.find({ eventId: id })
-    .select("qrImagePublicId ticketPdfPublicId attendee.profileImagePublicId")
-    .lean();
-
-  const filesToDelete = new Set();
-  const addFile = (publicId) => {
-    if (publicId && typeof publicId === "string") filesToDelete.add(publicId);
-  };
-
-  addFile(event.imagePublicId);
-  for (const ticket of tickets) {
-    addFile(ticket.qrImagePublicId);
-    addFile(ticket.ticketPdfPublicId);
-    addFile(ticket.attendee?.profileImagePublicId);
-  }
-
-  // ---- 2. database cascade, all-or-nothing ----
-  const session = await mongoose.startSession();
-  let historyRowsKept = 0;
-  let cleanup = { filesToDelete: [] };
-
-  try {
-    session.startTransaction();
-
-    await BookingTicket.deleteMany({ eventId: id }, { session });
-    await Booking.deleteMany({ eventId: id }, { session });
-    await TicketType.deleteMany({ eventId: id }, { session });
-
-    // Keep the Event History: copy the event's details onto every row of
-    // this event BEFORE the Event document is removed.
-    const historyResult = await ContactEventHistory.updateMany(
-      { eventId: id },
-      {
-        $set: {
-          eventSnapshot: {
-            _id: event._id,
-            title: event.title,
-            edition: event.edition,
-            startDateTime: event.startDateTime,
-            endDateTime: event.endDateTime,
-            venueName: event.venueName,
-            status: event.status,
-            isEventDeleted: true,
-          },
-        },
+  await Event.updateOne(
+    { _id: id },
+    {
+      $set: {
+        isDeleted: true,
+        deletedAt: new Date(),
+        deletedBy: adminId || null,
+        isActive: false,
       },
-      { session }
-    );
-    historyRowsKept = historyResult.matchedCount || 0;
-
-    await Event.deleteOne({ _id: id }, { session });
-
-    // Guest List cleared + Contact Book "Past: ..." tag removed.
-    // Contact Book, Event History and Form Links themselves are kept.
-    cleanup = await cleanupAfterEventDelete({
-      eventIds: [event._id],
-      session,
-    });
-
-    await session.commitTransaction();
-  } catch (error) {
-    if (session.inTransaction()) {
-      await session.abortTransaction();
     }
-    throw error;
-  } finally {
-    await session.endSession();
-  }
-
-  // ---- 3. the database is final — now remove the files from disk ----
-  let filesRemoved = 0;
-
-  try {
-    // Never delete a file another record still points to (safety net —
-    // normally every file belongs to exactly one ticket / event).
-    // Photos of the Guest List contacts that were removed.
-    for (const publicId of cleanup.filesToDelete) addFile(publicId);
-
-    const ids = [...filesToDelete];
-    if (ids.length > 0) {
-      const [stillUsedByTickets, stillUsedByEvents] = await Promise.all([
-        BookingTicket.find({
-          $or: [
-            { qrImagePublicId: { $in: ids } },
-            { ticketPdfPublicId: { $in: ids } },
-            { "attendee.profileImagePublicId": { $in: ids } },
-          ],
-        })
-          .select("qrImagePublicId ticketPdfPublicId attendee.profileImagePublicId")
-          .lean(),
-        Event.find({ imagePublicId: { $in: ids } }).select("imagePublicId").lean(),
-      ]);
-
-      for (const t of stillUsedByTickets) {
-        filesToDelete.delete(t.qrImagePublicId);
-        filesToDelete.delete(t.ticketPdfPublicId);
-        filesToDelete.delete(t.attendee?.profileImagePublicId);
-      }
-      for (const e of stillUsedByEvents) filesToDelete.delete(e.imagePublicId);
-    }
-
-    const results = await Promise.allSettled(
-      [...filesToDelete].map((publicId) => deleteLocalFile(publicId))
-    );
-    filesRemoved = results.filter((r) => r.status === "fulfilled").length;
-  } catch (error) {
-    // Best-effort only: the event is already deleted.
-    console.error("Event delete: file cleanup failed:", error.message);
-  }
+  );
 
   return {
     success: true,
     message: "Event deleted successfully.",
     data: {
-      filesRemoved,
-      historyRowsKept,
-      guestListRemoved: cleanup.contactsRemoved || 0,
-      guestListHidden: cleanup.contactsHidden || 0,
-      contactBookCleared: cleanup.membersCleared || 0,
+      filesRemoved: 0,
+      historyRowsKept: 0,
+      guestListRemoved: 0,
+      guestListHidden: 0,
+      contactBookCleared: 0,
     },
   };
 };

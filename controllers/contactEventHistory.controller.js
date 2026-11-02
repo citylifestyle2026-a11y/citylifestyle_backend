@@ -92,6 +92,17 @@ const getHistoryEditions = async (req, res, next) => {
   }
 };
 
+// ================= CATEGORY + REFERENCE FILTER OPTIONS =================
+// GET /api/contact-event-history/filter-options
+const getHistoryFilterOptions = async (req, res, next) => {
+  try {
+    const data = await contactEventHistoryService.getHistoryFilterOptions();
+    return res.status(200).json({ success: true, message: "Filter options fetched successfully", data });
+  } catch (error) {
+    next(error);
+  }
+};
+
 // ================= GET EVENT HISTORY BY CONTACT =================
 // GET /api/contact-event-history/contact/:contactId — supports optional
 // ?page=&limit= (see contactEventHistoryService.getEventHistoryByContact).
@@ -192,6 +203,7 @@ module.exports = {
   createEventHistory,
   getAllEventHistory,
   getHistoryEditions,
+  getHistoryFilterOptions,
   getEventHistoryByContact,
   updateEventHistory,
   deleteEventHistory,

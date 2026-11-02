@@ -90,6 +90,8 @@ app.use("/api/public/invitation", publicInvitationRoutes);
 app.use("/api/public/contact", publicContactRoutes);
 // Attendance reminder Yes / No pages (/rsvp/yes/:token, /rsvp/no/:token) - no login
 app.use("/api/public/rsvp", publicRsvpRoutes);
+// Guest card link (/guest-card): guest uploads a photo + types a name, downloads the card - no login
+app.use("/api/public/invite-card", require("./routes/publicInviteCard.routes"));
 // contacts (was previously missing here — routes/contact.routes.js
 // already implements Reference Summary plus create/list/get/update/
 // delete, it just was never mounted, hence every /api/contacts/...
@@ -110,6 +112,9 @@ app.use("/api/company-categories", companyCategoryRoutes);
 // crew (Crew List + Crew Category)
 app.use("/api/crew-categories", crewCategoryRoutes);
 app.use("/api/crew", crewRoutes);
+
+// Block List: block a person (by mobile) with a reason; flagged everywhere
+app.use("/api/blocklist", require("./routes/blocklist.routes"));
 
 // members (Member List -> import from Excel/CSV, move to Guest List)
 app.use("/api/members", memberRoutes);

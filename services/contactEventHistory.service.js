@@ -3,7 +3,36 @@ const ContactEventHistory = require("../models/contactEventHistory.model");
 const Contact = require("../models/contact.model");
 const Event = require("../models/event.model");
 const AppError = require("../utils/AppError");
+const { personsOf } = require("../utils/persons");
 const { normalizeMobileSearchTerm } = require("../utils/normalizeMobileNumber");
+
+// Contact fields the Event History page needs (person, category, qty, reference).
+const CONTACT_POPULATE = {
+  path: "contactId",
+  select:
+    "fullName whatsappNumber spouseName spouseMobile references persons entryType relationship companyCategory professionCategory",
+  populate: [
+    { path: "companyCategory", select: "name" },
+    { path: "professionCategory", select: "name" },
+  ],
+};
+
+// Merge several reference lists into one, case-insensitive de-dup (first
+// spelling wins), e.g. ["Mukund"] + ["dhaval", "Mukund"] -> ["Mukund", "dhaval"].
+const mergeReferences = (...lists) => {
+  const seen = new Set();
+  const out = [];
+  lists.flat().forEach((raw) => {
+    if (typeof raw !== "string") return;
+    const name = raw.trim();
+    if (!name) return;
+    const key = name.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(name);
+  });
+  return out;
+};
 
 const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -18,16 +47,24 @@ const createEventHistory = async (data, adminId) => {
   await assertContactExists(contactId);
   await assertEventExists(eventId);
 
+  const contact = await Contact.findById(contactId).select(
+    "relationship spouseName references"
+  );
+
   // A spouse entry is only valid for a Couple contact that actually has
   // a spouse recorded.
   if (isSpouse) {
-    const contact = await Contact.findById(contactId).select(
-      "relationship spouseName"
-    );
     if (contact.relationship !== "Couple" || !contact.spouseName) {
       throw new AppError("This contact has no spouse recorded", 400);
     }
   }
+
+  // The reference(s) of this event: the ones sent with the request, else
+  // the contact's references as they are right now.
+  const entryReferences = mergeReferences(
+    Array.isArray(data.references) ? data.references : [],
+    Array.isArray(contact.references) ? contact.references : []
+  );
 
   const history = await ContactEventHistory.create({
     contactId,
@@ -35,6 +72,7 @@ const createEventHistory = async (data, adminId) => {
     isSpouse,
     status: status || "Invited",
     notes: notes || "",
+    references: entryReferences,
     createdBy: adminId,
   });
 
@@ -73,6 +111,62 @@ const buildHistoryMatch = async (query = {}) => {
   if (matchStage.contactId) matchStage.contactId = toObjectId(matchStage.contactId);
   if (matchStage.eventId) matchStage.eventId = toObjectId(matchStage.eventId);
 
+  const andConditions = [];
+
+  // ---- category filter ----
+  // A normal row belongs to the contact's Company Category; a spouse row to
+  // the spouse's (profession) category - same idea as the Guest List.
+  if (query.category) {
+    if (!mongoose.Types.ObjectId.isValid(query.category)) {
+      throw new AppError("Invalid Category ID", 400);
+    }
+    const [mainContacts, spouseContacts] = await Promise.all([
+      Contact.find({ companyCategory: query.category }).select("_id").lean(),
+      Contact.find({ professionCategory: query.category }).select("_id").lean(),
+    ]);
+    andConditions.push({
+      $or: [
+        { contactId: { $in: mainContacts.map((c) => c._id) }, isSpouse: { $ne: true } },
+        { contactId: { $in: spouseContacts.map((c) => c._id) }, isSpouse: true },
+      ],
+    });
+  }
+
+  // ---- reference filter (several can be ticked: a person matches when
+  // they have ANY of them; whole-value, case-insensitive like Guest List) ----
+  const referenceKeys = [
+    ...new Set(
+      (Array.isArray(query.reference)
+        ? query.reference
+        : query.reference
+        ? [query.reference]
+        : []
+      )
+        .map((ref) => Contact.normalizeReferenceKey(ref))
+        .filter(Boolean)
+    ),
+  ];
+  if (referenceKeys.length) {
+    const refContacts = await Contact.find({
+      $or: referenceKeys.map((key) => ({
+        references: { $regex: `^\\s*${escapeRegex(key)}\\s*$`, $options: "i" },
+      })),
+    })
+      .select("_id")
+      .lean();
+    andConditions.push({
+      $or: [
+        { contactId: { $in: refContacts.map((c) => c._id) } },
+        // a reference that only exists on one event's entry (PV6 -> Mukund)
+        ...referenceKeys.map((key) => ({
+          references: { $regex: `^\\s*${escapeRegex(key)}\\s*$`, $options: "i" },
+        })),
+      ],
+    });
+  }
+
+  if (andConditions.length) matchStage.$and = andConditions;
+
   // ---- search ----
   const searchText = String(query.search || "").trim();
 
@@ -104,6 +198,7 @@ const buildHistoryMatch = async (query = {}) => {
     ]);
 
     matchStage.$and = [
+      ...(matchStage.$and || []),
       {
         $or: [
           {
@@ -167,7 +262,7 @@ const getAllEventHistory = async (query = {}) => {
   const allIds = groups.flatMap((g) => g.entryIds);
   const entries = allIds.length
     ? await ContactEventHistory.find({ _id: { $in: allIds } })
-        .populate("contactId", "fullName whatsappNumber spouseName spouseMobile")
+        .populate(CONTACT_POPULATE)
         .populate("eventId", "title edition startDateTime endDateTime venueName status")
     : [];
 
@@ -185,9 +280,25 @@ const getAllEventHistory = async (query = {}) => {
       );
 
     const first = groupEntries[0];
+    const live = first?.contactId || null;
+    const rowCategory = live
+      ? g._id.isSpouse
+        ? live.professionCategory
+        : live.companyCategory
+      : null;
     return {
       _id: `${g._id.contactId}:${g._id.isSpouse ? "spouse" : "main"}`,
-      contactId: first?.contactId || null,
+      contactId: live,
+      // Shown as the Category / Qty / Reference columns.
+      categoryId: rowCategory?._id ? String(rowCategory._id) : "",
+      category: rowCategory?.name || "",
+      // ONE merged Reference cell: the contact's current references PLUS
+      // the reference saved on each event entry (PV6 -> Mukund,
+      // PV7 -> Dhaval  =>  Mukund, Dhaval).
+      references: mergeReferences(
+        Array.isArray(live?.references) ? live.references : [],
+        groupEntries.map((e) => e.references || [])
+      ),
       // Saved copy of the person (see model) - used when the live Contact
       // no longer has these details.
       contactSnapshot: groupEntries.find((e) => e.contactSnapshot)?.contactSnapshot || null,
@@ -200,6 +311,7 @@ const getAllEventHistory = async (query = {}) => {
         notes: e.notes,
         source: e.source || "manual",
         markedManually: !!e.markedManually,
+        references: e.references || [],
         createdAt: e.createdAt,
       })),
     };
@@ -220,30 +332,69 @@ const getAllEventHistory = async (query = {}) => {
 };
 
 // ================= ATTENDANCE COUNTS =================
-// GET /stats — how many entries are Attended / Not Attended for the same
-// view as the table (edition filter + search). One entry = one person at one
-// edition, so a person who came to 3 editions counts 3 times.
+// GET /stats — Attended / Not Attended for the same view as the table
+// (edition filter + search): `total/attended/notAttended` count ENTRIES (one
+// person at one edition), `persons` is the same split QTY-wise (a couple = 2).
 const getHistoryStats = async (query = {}) => {
   const matchStage = await buildHistoryMatch({
     eventId: query.eventId,
     search: query.search,
+    category: query.category,
+    reference: query.reference,
   });
 
-  const groups = await ContactEventHistory.aggregate([
-    { $match: matchStage },
-    { $group: { _id: "$status", count: { $sum: 1 } } },
-  ]);
+  // QTY-wise: one entry stands for the PERSONS of its contact (Single = 1,
+  // Couple = 2, Manual = typed number), not for "1". A spouse entry is the
+  // one spouse (1). When a contact has BOTH a main and a spouse entry for
+  // the same event, the main entry only counts the remaining persons so
+  // nobody is counted twice.
+  const rows = await ContactEventHistory.find(matchStage)
+    .select("contactId eventId isSpouse status")
+    .lean();
 
-  const countOf = (status) => groups.find((g) => g._id === status)?.count || 0;
-  const total = groups.reduce((sum, g) => sum + g.count, 0);
-  const attended = countOf("Attended");
-  const notAttended = countOf("Not Attended");
+  const contacts = await Contact.find({
+    _id: { $in: [...new Set(rows.map((r) => String(r.contactId)))] },
+  })
+    .select("persons entryType relationship")
+    .lean();
+  const contactById = new Map(contacts.map((c) => [String(c._id), c]));
+
+  const spouseKeys = new Set(
+    rows.filter((r) => r.isSpouse).map((r) => `${r.contactId}:${r.eventId}`)
+  );
+
+  const qtyOf = (row) => {
+    if (row.isSpouse) return 1;
+    const contact = contactById.get(String(row.contactId));
+    const persons = contact ? personsOf(contact) : 1;
+    const hasSpouseRow = spouseKeys.has(`${row.contactId}:${row.eventId}`);
+    return Math.max(1, hasSpouseRow ? persons - 1 : persons);
+  };
+
+  // Entry counts (one entry = one person at one edition) - the main cards.
+  let total = rows.length;
+  let attended = 0;
+  let notAttended = 0;
+  // Qty-wise PERSON counts - shown below the cards.
+  const persons = { total: 0, attended: 0, notAttended: 0 };
+  rows.forEach((row) => {
+    const qty = qtyOf(row);
+    persons.total += qty;
+    if (row.status === "Attended") {
+      attended += 1;
+      persons.attended += qty;
+    } else if (row.status === "Not Attended") {
+      notAttended += 1;
+      persons.notAttended += qty;
+    }
+  });
 
   return {
     total,
     attended,
     notAttended,
     other: total - attended - notAttended,
+    persons,
   };
 };
 
@@ -299,10 +450,12 @@ const exportEventHistory = async (query, res) => {
     eventId: query.eventId,
     search: query.search,
     status: query.status,
+    category: query.category,
+    reference: query.reference,
   });
 
   const rawEntries = await ContactEventHistory.find(matchStage)
-    .populate("contactId", "fullName whatsappNumber spouseName spouseMobile")
+    .populate(CONTACT_POPULATE)
     .populate("eventId", "title edition startDateTime")
     .sort({ createdAt: -1 });
 
@@ -328,6 +481,8 @@ const exportEventHistory = async (query, res) => {
     { header: "WhatsApp Number", key: "mobile", width: 20 },
     { header: "Guest Type", key: "type", width: 14 },
     { header: "Spouse Of", key: "spouseOf", width: 26 },
+    { header: "Category", key: "category", width: 22 },
+    { header: "Reference", key: "reference", width: 28 },
     { header: "Edition", key: "edition", width: 18 },
     { header: "Event Date", key: "eventDate", width: 22 },
     { header: "Status", key: "status", width: 16 },
@@ -356,6 +511,15 @@ const exportEventHistory = async (query, res) => {
       mobile: mobile || "-",
       type: isSpouse ? "Spouse" : "Guest",
       spouseOf: isSpouse ? pick("fullName") || "-" : "-",
+      category:
+        (isSpouse ? live.professionCategory?.name : live.companyCategory?.name) || "-",
+      reference: (() => {
+        const merged = mergeReferences(
+          Array.isArray(live.references) ? live.references : [],
+          entry.references || []
+        );
+        return merged.length ? merged.join(", ") : "-";
+      })(),
       edition,
       eventDate: fmt(entry.eventId?.startDateTime),
       status,
@@ -384,7 +548,7 @@ const exportEventHistory = async (query, res) => {
 
   sheet.views = [{ state: "frozen", ySplit: 1 }];
   if (entries.length > 0) {
-    sheet.autoFilter = { from: "A1", to: "K1" };
+    sheet.autoFilter = { from: "A1", to: "M1" };
   }
 
   // ---------- sheet 2: counts per edition ----------
@@ -466,6 +630,54 @@ const getHistoryEditions = async () => {
     })
     .filter(Boolean)
     .sort((a, b) => new Date(b.startDateTime || 0) - new Date(a.startDateTime || 0));
+};
+
+// ================= CATEGORY + REFERENCE FILTER OPTIONS =================
+// Only categories / references of people who really have history, so every
+// option in the Event History filters can show at least one row.
+const getHistoryFilterOptions = async () => {
+  const contactIds = await ContactEventHistory.distinct("contactId", {
+    isDeleted: { $ne: true },
+  });
+
+  const contacts = await Contact.find({ _id: { $in: contactIds } })
+    .select("references companyCategory professionCategory")
+    .populate("companyCategory", "name")
+    .populate("professionCategory", "name")
+    .lean();
+
+  const categories = new Map();
+  const references = new Map();
+
+  // references saved on the event entries themselves
+  const entryRefs = await ContactEventHistory.distinct("references", {
+    isDeleted: { $ne: true },
+  });
+  entryRefs.forEach((raw) => {
+    if (typeof raw !== "string" || !raw.trim()) return;
+    const key = Contact.normalizeReferenceKey(raw.trim());
+    if (!references.has(key)) references.set(key, raw.trim());
+  });
+
+  contacts.forEach((contact) => {
+    [contact.companyCategory, contact.professionCategory].forEach((cat) => {
+      if (cat?._id && cat.name) categories.set(String(cat._id), cat.name);
+    });
+    (contact.references || []).forEach((raw) => {
+      if (typeof raw !== "string") return;
+      const trimmed = raw.trim();
+      if (!trimmed) return;
+      const key = Contact.normalizeReferenceKey(trimmed);
+      if (!references.has(key)) references.set(key, trimmed);
+    });
+  });
+
+  const byLabel = (a, b) => a.label.toLowerCase().localeCompare(b.label.toLowerCase());
+
+  return {
+    categories: [...categories].map(([value, label]) => ({ value, label })).sort(byLabel),
+    references: [...references.values()].map((value) => ({ value, label: value })).sort(byLabel),
+  };
 };
 
 // ================= GET EVENT HISTORY BY CONTACT =================
@@ -632,6 +844,7 @@ module.exports = {
   markAttendance,
   exportEventHistory,
   getHistoryEditions,
+  getHistoryFilterOptions,
   getEventHistoryByContact,
   updateEventHistory,
   deleteEventHistory,

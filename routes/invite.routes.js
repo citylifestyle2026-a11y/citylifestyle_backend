@@ -16,7 +16,17 @@ router.get("/preview", controller.preview);
 router.get("/design", controller.designInfo);
 router.post("/design", upload.designUpload.single("design"), controller.uploadDesign);
 router.put("/design/style", controller.saveNameStyle);
+router.put("/design/photo-box", controller.savePhotoBox);
 router.delete("/design", controller.removeDesign);
+
+// GUEST CARD design (separate from the invitation card design above): the picture
+// guests add their own photo + name to, and where the photo / name go on it.
+router.get("/guest-design", controller.guestDesignInfo);
+router.get("/guest-design/image", controller.guestDesignImage);
+router.post("/guest-design", upload.designUpload.single("design"), controller.guestUploadDesign);
+router.put("/guest-design/style", controller.guestSaveNameStyle);
+router.put("/guest-design/photo-box", controller.guestSavePhotoBox);
+router.delete("/guest-design", controller.guestRemoveDesign);
 
 router.post("/", controller.create);
 router.put("/:id", controller.update);

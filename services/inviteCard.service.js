@@ -94,24 +94,33 @@ const loadFallbackDesign = async () => {
 // Cache the (read-only) design between cards so sending to hundreds of
 // guests does not re-read / re-draw it every time. One tiny query per card
 // checks `updatedAt`, so a new upload is picked up immediately.
-let cache = { key: "", design: null };
+const caches = {}; // one cache per design key ("default" / "guest")
 
-const getDesignAndStyle = async () => {
-  const meta = await InviteDesign.findOne({ key: "default" })
-    .select("updatedAt nameStyle width height image")
+const isGuest = (key) => key === "guest";
+const nameBase = (key) => (isGuest(key) ? cfg.GUEST.NAME : cfg.NAME);
+
+const getDesignAndStyle = async (key = "default") => {
+  const meta = await InviteDesign.findOne({ key })
+    .select("updatedAt nameStyle photoBox width height image")
     .lean();
 
   const hasUpload = Boolean(meta && meta.image && meta.image.length);
-  const key = hasUpload ? `db:${new Date(meta.updatedAt).getTime()}` : "fallback";
+  const cacheKey = hasUpload ? `db:${new Date(meta.updatedAt).getTime()}` : "fallback";
 
-  if (!cache.design || cache.key !== key) {
-    cache = {
-      key,
+  // The guest card has NO placeholder: until the admin uploads its design it is "not ready".
+  if (!hasUpload && isGuest(key)) {
+    throw new AppError("The card is not ready yet. Please try later.", 404);
+  }
+
+  const cache = caches[key];
+  if (!cache || !cache.design || cache.key !== cacheKey) {
+    caches[key] = {
+      key: cacheKey,
       design: hasUpload ? Buffer.from(meta.image.buffer || meta.image) : await loadFallbackDesign(),
     };
   }
 
-  return { design: cache.design, saved: (meta && meta.nameStyle) || {}, hasUpload };
+  return { design: caches[key].design, saved: (meta && meta.nameStyle) || {}, hasUpload };
 };
 
 const clamp = (value, min, max, fallback) => {
@@ -122,8 +131,7 @@ const clamp = (value, min, max, fallback) => {
 const HEX = /^#[0-9a-f]{6}$/i;
 
 // default < saved by admin < temporary override (live preview sliders)
-const resolveStyle = (saved = {}, override = {}) => {
-  const base = cfg.NAME;
+const resolveStyle = (saved = {}, override = {}, base = cfg.NAME) => {
   const pick = (field) =>
     override[field] !== undefined && override[field] !== null && override[field] !== ""
       ? override[field]
@@ -195,12 +203,14 @@ const nameLengthScale = (name) => {
 //   1. fits on one line            -> written at the full chosen size
 //   2. too wide but has spaces     -> wrapped onto 2-3 centred lines, still full size
 //   3. too wide and a single word  -> shrunk only as much as needed to fit
-const generateCard = async (rawName, styleOverride = {}) => {
+const generateCard = async (rawName, styleOverride = {}, baseImage = null, key = "default") => {
   const name = String(rawName || "").replace(/\s+/g, " ").trim() || "Guest";
-  const { design, saved } = await getDesignAndStyle();
+  const { design: fixedDesign, saved } = await getDesignAndStyle(key);
+  // baseImage = the design with the guest's photo already on it (name is drawn on top).
+  const design = baseImage || fixedDesign;
   const { width: W, height: H } = await sharp(design).metadata();
-  const style = resolveStyle(saved, styleOverride);
-  const n = cfg.NAME;
+  const style = resolveStyle(saved, styleOverride, nameBase(key));
+  const n = nameBase(key);
 
   const baseSize = Math.max(
     8,
@@ -256,10 +266,112 @@ const generateCard = async (rawName, styleOverride = {}) => {
     .toBuffer();
 };
 
+// ---------- photo box (where the guest's own photo goes) ----------
+// Guest card only: where the guest's photo goes (defaults fit parv_template_card.jpg).
+const DEFAULT_PHOTO_BOX = cfg.GUEST.PHOTO_BOX;
+
+const resolvePhotoBox = (saved = {}, override = {}) => {
+  const pick = (field) =>
+    override[field] !== undefined && override[field] !== null && override[field] !== ""
+      ? override[field]
+      : saved && saved[field] !== undefined && saved[field] !== null
+      ? saved[field]
+      : DEFAULT_PHOTO_BOX[field];
+
+  const wPct = clamp(pick("wPct"), 5, 100, DEFAULT_PHOTO_BOX.wPct);
+  const hPct = clamp(pick("hPct"), 5, 100, DEFAULT_PHOTO_BOX.hPct);
+  return {
+    wPct,
+    hPct,
+    xPct: clamp(pick("xPct"), 0, 100 - wPct, DEFAULT_PHOTO_BOX.xPct),
+    yPct: clamp(pick("yPct"), 0, 100 - hPct, DEFAULT_PHOTO_BOX.yPct),
+    shape: pick("shape") === "rect" ? "rect" : "circle",
+  };
+};
+
+// ---------- the GUEST card: design + the guest's photo + the guest's name ----------
+// Used by the public "guest card" link: the guest uploads a photo and types a
+// name; the photo is cropped to fill the admin's photo box (circle or
+// rectangle) and the name goes where the admin placed it.
+const generateGuestCard = async (rawName, photoBuffer) => {
+  if (!photoBuffer) return generateCard(rawName, {}, null, "guest");
+
+  const { design, saved } = await getDesignAndStyle("guest");
+  const { width: W, height: H } = await sharp(design).metadata();
+  const box = resolvePhotoBox(saved.photoBox || {});
+
+  const bw = Math.max(20, Math.round((W * box.wPct) / 100));
+  const bh = Math.max(20, Math.round((H * box.hPct) / 100));
+  const left = Math.min(W - bw, Math.max(0, Math.round((W * box.xPct) / 100)));
+  const top = Math.min(H - bh, Math.max(0, Math.round((H * box.yPct) / 100)));
+
+  let photo;
+  try {
+    photo = await sharp(photoBuffer)
+      .rotate() // phone photos: honour EXIF orientation
+      .resize(bw, bh, { fit: "cover", position: "attention" })
+      .png()
+      .toBuffer();
+
+    if (box.shape === "circle") {
+      const mask = Buffer.from(
+        `<svg xmlns="http://www.w3.org/2000/svg" width="${bw}" height="${bh}">` +
+          `<ellipse cx="${bw / 2}" cy="${bh / 2}" rx="${bw / 2}" ry="${bh / 2}" fill="#fff"/></svg>`
+      );
+      photo = await sharp(photo).composite([{ input: mask, blend: "dest-in" }]).png().toBuffer();
+    }
+  } catch {
+    throw new AppError("This photo could not be read. Please upload a JPG or PNG.", 400);
+  }
+
+  // Photo first, name on top - so the name is never hidden behind the photo.
+  const withPhoto = await sharp(design)
+    .flatten({ background: "#ffffff" })
+    .composite([{ input: photo, left, top }])
+    .png()
+    .toBuffer();
+
+  return generateCard(rawName, {}, withPhoto, "guest");
+};
+
+// Safe info for the public page (no admin data).
+const publicInfo = async () => {
+  const info = await designInfo("guest");
+  return {
+    hasDesign: info.hasDesign,
+    width: info.width,
+    height: info.height,
+    photoBox: info.photoBox,
+    nameStyle: info.nameStyle, // so the public page can show the name live on the card
+    version: info.updatedAt ? new Date(info.updatedAt).getTime() : 0, // cache-buster for the picture
+  };
+};
+
+// The blank design (no photo / name) for the public page's live preview.
+// Downsized: it is only shown on screen; the download is generated at full size.
+const previewDesign = async () => {
+  const { design } = await getDesignAndStyle("guest");
+  return sharp(design)
+    .resize({ width: 1200, withoutEnlargement: true })
+    .flatten({ background: "#ffffff" })
+    .jpeg({ quality: 85 })
+    .toBuffer();
+};
+
+const savePhotoBox = async (body = {}, adminId, key = "guest") => {
+  const box = resolvePhotoBox({}, body);
+  await InviteDesign.findOneAndUpdate(
+    { key },
+    { $set: { photoBox: box, updatedBy: adminId || undefined } },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
+  return designInfo(key);
+};
+
 // ---------- admin: design upload / position ----------
-const designInfo = async () => {
-  const doc = await InviteDesign.findOne({ key: "default" })
-    .select("width height originalName updatedAt nameStyle image")
+const designInfo = async (key = "default") => {
+  const doc = await InviteDesign.findOne({ key })
+    .select("width height originalName updatedAt nameStyle photoBox image")
     .lean();
   const hasDesign = Boolean(doc && doc.image && doc.image.length);
 
@@ -269,13 +381,15 @@ const designInfo = async () => {
     height: hasDesign ? doc.height : 0,
     originalName: hasDesign ? doc.originalName : "",
     updatedAt: hasDesign ? doc.updatedAt : null,
-    nameStyle: resolveStyle((doc && doc.nameStyle) || {}),
-    defaults: resolveStyle({}),
+    nameStyle: resolveStyle((doc && doc.nameStyle) || {}, {}, nameBase(key)),
+    photoBox: resolvePhotoBox((doc && doc.photoBox) || {}),
+    defaults: resolveStyle({}, {}, nameBase(key)),
+    defaultPhotoBox: { ...DEFAULT_PHOTO_BOX },
   };
 };
 
 // multer file -> normalised JPEG stored in MongoDB.
-const saveDesign = async (file, adminId) => {
+const saveDesign = async (file, adminId, key = "default") => {
   if (!file || !Buffer.isBuffer(file.buffer)) {
     throw new AppError("Please choose the invitation card image (JPG or PNG).", 400);
   }
@@ -300,7 +414,7 @@ const saveDesign = async (file, adminId) => {
   }
 
   await InviteDesign.findOneAndUpdate(
-    { key: "default" },
+    { key },
     {
       $set: {
         image: jpeg,
@@ -310,33 +424,44 @@ const saveDesign = async (file, adminId) => {
         // A different design needs the name somewhere else: start from the
         // defaults and let the admin click the spot (Invitation Cards page).
         nameStyle: { centerXPct: null, topPct: null, fontSizePct: null, color: null },
+        photoBox: { xPct: null, yPct: null, wPct: null, hPct: null, shape: null },
         updatedBy: adminId || undefined,
       },
     },
     { upsert: true, new: true, setDefaultsOnInsert: true }
   );
-  cache = { key: "", design: null };
-  return designInfo();
+  delete caches[key];
+  return designInfo(key);
 };
 
-const saveNameStyle = async (body = {}, adminId) => {
-  const style = resolveStyle({}, body);
+const saveNameStyle = async (body = {}, adminId, key = "default") => {
+  const style = resolveStyle({}, body, nameBase(key));
   await InviteDesign.findOneAndUpdate(
-    { key: "default" },
+    { key },
     { $set: { nameStyle: style, updatedBy: adminId || undefined } },
     { upsert: true, new: true, setDefaultsOnInsert: true }
   );
-  return designInfo();
+  return designInfo(key);
 };
 
-// Back to the built-in placeholder card.
-const removeDesign = async () => {
+// Invitation: back to the built-in placeholder card. Guest card: "not ready" again.
+const removeDesign = async (key = "default") => {
   await InviteDesign.findOneAndUpdate(
-    { key: "default" },
+    { key },
     { $set: { image: null, width: 0, height: 0, originalName: "" } }
   );
-  cache = { key: "", design: null };
-  return designInfo();
+  delete caches[key];
+  return designInfo(key);
 };
 
-module.exports = { generateCard, designInfo, saveDesign, saveNameStyle, removeDesign };
+module.exports = {
+  generateCard,
+  generateGuestCard,
+  publicInfo,
+  previewDesign,
+  savePhotoBox,
+  designInfo,
+  saveDesign,
+  saveNameStyle,
+  removeDesign,
+};

@@ -84,13 +84,22 @@ const buildCrewQuery = (query = {}) => {
   //  notSent   - no pass sent, none cancelled
   //  rejected  - rejected crew (a cancelled pass lives in its own tab)
   //  cancelled - pass was cancelled and not brought back yet
+  // A crew member has one pass. With an event picked in the dashboard
+  // dropdown, "sent" means a pass for THAT event; a pass of another event
+  // counts as "not sent" here.
+  const eventId = mongoose.Types.ObjectId.isValid(String(query.eventId || ""))
+    ? new mongoose.Types.ObjectId(String(query.eventId))
+    : null;
+
   if (query.passStatus === "pending") {
     filter.approvalStatus = "pending";
   } else if (query.passStatus === "sent") {
     filter.passSentAt = { $ne: null };
+    if (eventId) filter.passEventId = eventId;
   } else if (query.passStatus === "notSent") {
-    filter.passSentAt = null;
     filter.passCancelledAt = null;
+    if (eventId) filter.$nor = [{ passSentAt: { $ne: null }, passEventId: eventId }];
+    else filter.passSentAt = null;
   } else if (query.passStatus === "rejected") {
     filter.approvalStatus = "rejected";
     filter.$and = [{ $or: [{ passCancelledAt: null }, { passSentAt: { $ne: null } }] }];
@@ -149,10 +158,17 @@ const getAllCrew = async (query = {}) => {
 
   // Tab counts follow the search + category filter, not the pass tab itself.
   const base = buildCrewQuery({ ...query, passStatus: undefined });
+  const evId = mongoose.Types.ObjectId.isValid(String(query.eventId || ""))
+    ? new mongoose.Types.ObjectId(String(query.eventId))
+    : null;
   const [all, passSent, passNotSent, passCancelled, rejectedAll, pending] = await Promise.all([
     Crew.countDocuments(base),
-    Crew.countDocuments({ ...base, passSentAt: { $ne: null } }),
-    Crew.countDocuments({ ...base, passSentAt: null, passCancelledAt: null }),
+    Crew.countDocuments({ ...base, passSentAt: { $ne: null }, ...(evId ? { passEventId: evId } : {}) }),
+    Crew.countDocuments(
+      evId
+        ? { ...base, passCancelledAt: null, $nor: [{ passSentAt: { $ne: null }, passEventId: evId }] }
+        : { ...base, passSentAt: null, passCancelledAt: null }
+    ),
     Crew.countDocuments({
       ...base,
       approvalStatus: "rejected",

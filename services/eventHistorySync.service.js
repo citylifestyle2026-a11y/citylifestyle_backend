@@ -262,7 +262,7 @@ const syncFromEvent = async (data, adminId) => {
       isDeleted: { $ne: true },
       whatsappNumber: { $in: [...mobiles, ...mobiles.map((k) => `91${k}`)] },
     })
-      .select("_id whatsappNumber fullName relationship spouseName spouseMobile")
+      .select("_id whatsappNumber fullName relationship spouseName spouseMobile references")
       .lean();
 
     const map = new Map();
@@ -364,8 +364,27 @@ const syncFromEvent = async (data, adminId) => {
     contactId: { $in: contactIds },
     isDeleted: { $ne: true },
   })
-    .select("contactId isSpouse status notes")
+    .select("contactId isSpouse status notes references")
     .lean();
+
+  // contact -> its references right now; saved on every row so each event
+  // keeps its own reference and Event History can merge them.
+  const refsByContact = new Map();
+  for (const contact of contactByMobile.values()) {
+    refsByContact.set(String(contact._id), contact.references || []);
+  }
+  const mergeRefs = (...lists) => {
+    const seen = new Set();
+    const out = [];
+    lists.flat().forEach((raw) => {
+      const name = typeof raw === "string" ? raw.trim() : "";
+      if (name && !seen.has(name.toLowerCase())) {
+        seen.add(name.toLowerCase());
+        out.push(name);
+      }
+    });
+    return out;
+  };
 
   const rowKeyOf = (contactId, isSpouse) => `${contactId}:${isSpouse ? 1 : 0}`;
   const rowBySlot = new Map(
@@ -393,6 +412,7 @@ const syncFromEvent = async (data, adminId) => {
         isSpouse: slot.isSpouse,
         status: "Attended",
         notes: `Attended ${event.title} (added from Entry Report)`,
+        references: mergeRefs(refsByContact.get(String(slot.contactId)) || []),
         source: SOURCE,
         createdBy: adminId || null,
       });
@@ -405,6 +425,10 @@ const syncFromEvent = async (data, adminId) => {
             $set: {
               status: "Attended",
               ...(row.notes ? {} : { notes: `Attended ${event.title} (added from Entry Report)` }),
+              references: mergeRefs(
+                row.references || [],
+                refsByContact.get(String(slot.contactId)) || []
+              ),
             },
           },
         },
@@ -412,6 +436,15 @@ const syncFromEvent = async (data, adminId) => {
       attendedUpdated += 1;
     } else {
       attendedUnchanged += 1;
+      const merged = mergeRefs(
+        row.references || [],
+        refsByContact.get(String(slot.contactId)) || []
+      );
+      if (merged.length !== (row.references || []).length) {
+        updates.push({
+          updateOne: { filter: { _id: row._id }, update: { $set: { references: merged } } },
+        });
+      }
     }
   }
 
@@ -432,6 +465,7 @@ const syncFromEvent = async (data, adminId) => {
       isSpouse: slot.isSpouse,
       status: "Not Attended",
       notes: `Registered for ${event.title} but did not attend (added from Entry Report)`,
+      references: mergeRefs(refsByContact.get(String(slot.contactId)) || []),
       source: SOURCE,
       createdBy: adminId || null,
     });

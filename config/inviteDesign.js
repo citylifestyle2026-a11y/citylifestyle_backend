@@ -33,4 +33,20 @@ module.exports = {
     // Names longer than this start shrinking
     shrinkAfterChars: 15,
   },
+
+  // The GUEST CARD (public /guest-card link, guest adds own photo + name) has its
+  // OWN design, separate from the invitation card above. Defaults fit
+  // parv_template_card.jpg (900 x 1600): circle photo + cream name pill.
+  GUEST: {
+    NAME: {
+      centerXPct: 50,
+      topPct: 43.8,
+      maxWidthPct: 66,
+      fontSizePct: 5.1,
+      minFontSizePct: 2,
+      color: "#6E0A0E",
+      shrinkAfterChars: 15,
+    },
+    PHOTO_BOX: { xPct: 33.33, yPct: 21.25, wPct: 33.33, hPct: 18.75, shape: "circle" },
+  },
 };

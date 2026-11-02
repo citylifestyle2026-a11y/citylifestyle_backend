@@ -30,6 +30,12 @@ const formLinkSchema = new mongoose.Schema(
 
     target: { type: String, enum: ["contact", "member"], default: "contact" },
 
+    // Edition (event) every person who fills this link belongs to. Their
+    // Guest List entry is saved under this edition. Empty (old links) = the
+    // default / active event is used, exactly as before.
+    editionEventId: { type: mongoose.Schema.Types.ObjectId, ref: "Event", default: null },
+    editionName: { type: String, trim: true, default: "" },
+
     // "closed" = stopped by an admin (can be re-opened).
     status: { type: String, enum: ["active", "closed"], default: "active" },
 

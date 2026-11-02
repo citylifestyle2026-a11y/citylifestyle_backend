@@ -48,6 +48,14 @@ exports.saveNameStyle = asyncHandler(async (req, res) =>
   })
 );
 
+exports.savePhotoBox = asyncHandler(async (req, res) =>
+  res.json({
+    success: true,
+    message: "Photo position saved.",
+    data: await inviteService.savePhotoBox(req.body, req.user?.id),
+  })
+);
+
 exports.removeDesign = asyncHandler(async (req, res) =>
   res.json({
     success: true,
@@ -63,3 +71,51 @@ exports.create = asyncHandler(async (req, res) =>
 exports.update = asyncHandler(async (req, res) =>
   res.json(await inviteService.update(req.params.id, req.body))
 );
+
+// ----- GUEST CARD design (separate from the invitation card design above) -----
+// The design the public /guest-card page uses: guests add their own photo + name.
+const cardService = require("../services/inviteCard.service");
+
+exports.guestDesignInfo = asyncHandler(async (req, res) =>
+  res.json({ success: true, data: await cardService.designInfo("guest") })
+);
+
+exports.guestUploadDesign = asyncHandler(async (req, res) =>
+  res.json({
+    success: true,
+    message: "Guest card design uploaded.",
+    data: await cardService.saveDesign(req.file, req.user?.id, "guest"),
+  })
+);
+
+exports.guestSaveNameStyle = asyncHandler(async (req, res) =>
+  res.json({
+    success: true,
+    message: "Name position saved.",
+    data: await cardService.saveNameStyle(req.body, req.user?.id, "guest"),
+  })
+);
+
+exports.guestSavePhotoBox = asyncHandler(async (req, res) =>
+  res.json({
+    success: true,
+    message: "Photo position saved.",
+    data: await cardService.savePhotoBox(req.body, req.user?.id, "guest"),
+  })
+);
+
+exports.guestRemoveDesign = asyncHandler(async (req, res) =>
+  res.json({
+    success: true,
+    message: "Guest card design removed. The guest card link will show \"not ready\".",
+    data: await cardService.removeDesign("guest"),
+  })
+);
+
+// The blank guest card picture, for the admin's position editor (same picture guests see).
+exports.guestDesignImage = asyncHandler(async (req, res) => {
+  const info = await cardService.designInfo("guest");
+  if (!info.hasDesign) return res.status(404).json({ success: false, message: "No guest card design uploaded." });
+  const jpg = await cardService.previewDesign();
+  res.set("Content-Type", "image/jpeg").set("Cache-Control", "no-store").send(jpg);
+});

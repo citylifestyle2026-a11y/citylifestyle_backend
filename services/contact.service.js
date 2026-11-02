@@ -277,6 +277,15 @@ const createContact = async (data, adminId, files = {}, options = {}) => {
   // has passed, and are removed again if the save itself fails.
   const images = await uploadContactImages(files, relationship === "Couple");
 
+  // The guest belongs to the event picked in the dashboard dropdown (or the
+  // default event), so it shows up under that event's Guest List.
+  const ownEvent = await require("../utils/defaultEvent").resolveEventForNewRecord(
+    data.editionEventId
+  );
+  const eventFields = ownEvent
+    ? { editionEventId: ownEvent._id, editionName: ownEvent.edition || ownEvent.title }
+    : {};
+
   try {
     const contact = await Contact.create({
       fullName,
@@ -307,6 +316,7 @@ const createContact = async (data, adminId, files = {}, options = {}) => {
         ? { approvalStatus: options.approvalStatus }
         : {}),
       ...(options.formLinkId ? { formLinkId: options.formLinkId } : {}),
+      ...eventFields,
       createdBy: adminId,
       ...imageFields(images),
     });
@@ -646,6 +656,21 @@ function buildContactQuery(query) {
 }
 
 
+// ================= BLOCKED FILTER =================
+// ?blocked=true -> only guests whose WhatsApp / spouse number is on the Block
+// List. Needs the Block List, so it cannot live in the sync buildContactQuery.
+const blockedCondition = async () => {
+  const variants = await require("./blocklist.service").getBlockedNumberVariants();
+  if (!variants.length) return { _id: null }; // nobody is blocked -> empty result
+  return { $or: [{ whatsappNumber: { $in: variants } }, { spouseMobile: { $in: variants } }] };
+};
+
+const applyBlockedFilter = async (filter, query) => {
+  if (String(query.blocked) === "true") {
+    filter.$and = [...(filter.$and || []), await blockedCondition()];
+  }
+};
+
 // ================= APPROVAL STATUS COUNTS =================
 // Numbers shown on the Pending / Approved / Rejected filter tabs. Counted
 // over every visible contact (same base filter as the list), independent of
@@ -701,6 +726,12 @@ const getApprovalStatusCounts = async (editionEventId = null) => {
     console.error("Could not clean orphan duplicates:", error.message);
   }
   counts.duplicate = await ContactDuplicate.countDocuments({});
+  // Blocked tab: guests whose number is on the Block List.
+  try {
+    counts.blocked = await Contact.countDocuments({ ...match, ...(await blockedCondition()) });
+  } catch (error) {
+    counts.blocked = 0;
+  }
 
   return counts;
 };
@@ -1001,12 +1032,29 @@ const restorePassForContact = async (contact) => {
 //  - Moving a contact to Rejected sends the polite "we will invite you to
 //    the next Parv" WhatsApp message (once per rejection; a failed message
 //    never blocks the status change).
-const bulkUpdateApprovalStatus = async ({ ids, status }, adminId) => {
+const bulkUpdateApprovalStatus = async ({ ids, status, confirmBlocked }, adminId) => {
   if (!APPROVAL_STATUSES.includes(status)) {
     throw new AppError("Status must be pending, approved or rejected.", 400);
   }
 
   let contactIds = validateIdList(ids);
+
+  // Approving a guest whose number is on the Block List needs an explicit
+  // confirmation (confirmBlocked: true); otherwise nothing is changed.
+  if (status === "approved") {
+    const toApprove = await Contact.find({
+      _id: { $in: contactIds },
+      isDeleted: { $ne: true },
+      historyOnly: { $ne: true },
+      approvalStatus: { $nin: ["approved", null] },
+    })
+      .select("fullName whatsappNumber spouseMobile")
+      .lean();
+    await require("./blocklist.service").assertBlockedConfirmed(toApprove, confirmBlocked, (c) => [
+      c.whatsappNumber,
+      c.spouseMobile,
+    ]);
+  }
 
   // Rejecting an APPROVED guest is allowed:
   //  - with a pass sent  -> same as "Cancel Pass" (pass cancelled, proper
@@ -1607,7 +1655,7 @@ const deleteBookingsOfContacts = async ({ ids }, adminId) => {
 // POST /api/contacts/resend-pass { ids }
 // Sends the SAME invitation (same QR link) again to approved contacts that
 // already have an active pass — e.g. when they say they never got it.
-const resendPassToContacts = async ({ ids }) => {
+const resendPassToContacts = async ({ ids, confirmBlocked }) => {
   const BookingTicket = require("../models/bookingTicket.model");
   const bookingTicketService = require("./bookingTicket.service");
 
@@ -1618,6 +1666,11 @@ const resendPassToContacts = async ({ ids }) => {
     isDeleted: { $ne: true },
     historyOnly: { $ne: true },
   });
+
+  await require("./blocklist.service").assertBlockedConfirmed(contacts, confirmBlocked, (c) => [
+    c.whatsappNumber,
+    c.spouseMobile,
+  ]);
 
   const byId = new Map(contacts.map((c) => [String(c._id), c]));
   const results = [];
@@ -1745,7 +1798,10 @@ const raisePersonsForPass = async (contact, guests) => {
   };
 };
 
-const sendPassToContacts = async ({ ids, eventId, ticketTypeId, quantities }, adminId) => {
+const sendPassToContacts = async (
+  { ids, eventId, ticketTypeId, quantities, confirmBlocked },
+  adminId
+) => {
   // Required lazily: booking.service is heavy and only needed here.
   const bookingService = require("./booking.service");
   const Event = require("../models/event.model");
@@ -1773,6 +1829,13 @@ const sendPassToContacts = async ({ ids, eventId, ticketTypeId, quantities }, ad
     isDeleted: { $ne: true },
     historyOnly: { $ne: true },
   });
+
+  // Blocked number(s) in the selection: nothing is sent until the admin
+  // confirms (confirmBlocked: true).
+  await require("./blocklist.service").assertBlockedConfirmed(contacts, confirmBlocked, (c) => [
+    c.whatsappNumber,
+    c.spouseMobile,
+  ]);
 
   const byId = new Map(contacts.map((c) => [String(c._id), c]));
   const results = [];
@@ -1887,6 +1950,7 @@ const getAllContacts = async (query) => {
 
   const { filter, sortField, sortOrder, applyCollationIfNeeded } =
     buildContactQuery(query);
+  await applyBlockedFilter(filter, query);
 
   const total = await applyCollationIfNeeded(Contact.countDocuments(filter));
 
@@ -1928,6 +1992,12 @@ const getAllContacts = async (query) => {
     console.error("Could not check Contact Book matches:", error.message);
   }
 
+  // Block List flag: same WhatsApp / spouse number as a blocked person.
+  await require("./blocklist.service").attachBlockedFlag(rows, (r) => [
+    r.whatsappNumber,
+    r.spouseMobile,
+  ]);
+
   return {
     success: true,
     message: "Contacts fetched successfully",
@@ -1954,6 +2024,7 @@ const getAllContacts = async (query) => {
 const exportContacts = async (query, res) => {
   const { filter, sortField, sortOrder, applyCollationIfNeeded } =
     buildContactQuery(query);
+  await applyBlockedFilter(filter, query);
 
   const contacts = await applyCollationIfNeeded(
     Contact.find(filter)
@@ -1962,6 +2033,12 @@ const exportContacts = async (query, res) => {
       .populate("createdBy", "name")
       .sort({ [sortField]: sortOrder })
   ).lean();
+
+  // Block List flag for the "Blocked" columns of the sheet.
+  await require("./blocklist.service").attachBlockedFlag(contacts, (c) => [
+    c.whatsappNumber,
+    c.spouseMobile,
+  ]);
 
   // ================= WORKBOOK =================
   const ExcelJS = require("exceljs");
@@ -1994,6 +2071,8 @@ const exportContacts = async (query, res) => {
     { header: "Edition", key: "editionName", width: 18 },
     { header: "Status", key: "approvalStatus", width: 14 },
     { header: "Pass Sent", key: "passSent", width: 22 },
+    { header: "Blocked", key: "blocked", width: 12 },
+    { header: "Block Reason", key: "blockReason", width: 35 },
     { header: "Created At", key: "createdAt", width: 22 },
   ];
 
@@ -2095,6 +2174,8 @@ const exportContacts = async (query, res) => {
       passSent: contact.passSentAt
         ? `Yes - ${new Date(contact.passSentAt).toLocaleString("en-GB")}`
         : "No",
+      blocked: contact.blocked ? "Yes" : "No",
+      blockReason: contact.blocked?.reason || "-",
       createdAt: contact.createdAt
         ? new Date(contact.createdAt).toLocaleString("en-GB")
         : "-",
@@ -2132,7 +2213,12 @@ const getContactById = async (id) => {
     throw new AppError("Contact not found", 404);
   }
 
-  return contact;
+  const out = contact.toObject();
+  await require("./blocklist.service").attachBlockedFlag([out], (r) => [
+    r.whatsappNumber,
+    r.spouseMobile,
+  ]);
+  return out;
 };
 
 // ================= UPDATE CONTACT =================

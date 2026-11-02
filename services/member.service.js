@@ -296,6 +296,13 @@ const importMembers = async (
   const importAll = mode === "all";
   const rows = await parseMembersFile(buffer, fileName);
 
+  // Numbers on the Block List are rejected: they are never saved (not even
+  // as "Needs Fix" in mode "all") and never update an existing member.
+  const blockedRows = await require("./blocklist.service").findBlockedByNumbers(
+    rows.map((r) => r.data.mobile).filter(Boolean)
+  );
+  let blockedCount = 0;
+
   // Same mobile number again (already saved, or repeated in the file) is no
   // longer a duplicate: that member is UPDATED with the new row's details.
   const existing = await Member.find({ mobileStatus: "valid" }, { mobile: 1, references: 1 }).lean();
@@ -409,6 +416,23 @@ const importMembers = async (
       continue;
     }
 
+    const blockedHit = blockedRows.get(normalizeMobileNumber(mobile));
+    if (blockedHit) {
+      blockedCount += 1;
+      if (problems.length < MAX_IMPORT_PROBLEM_ROWS) {
+        problems.push({
+          row: rowNumber,
+          name: data.name || "",
+          mobileNumber: mobile,
+          error: `Blocked number - not imported. Reason: ${blockedHit.reason}`,
+          duplicate: false,
+          blocked: true,
+          data,
+        });
+      }
+      continue;
+    }
+
     // Already in Member List -> update that member.
     if (existingIdByMobile.has(mobile)) {
       const id = existingIdByMobile.get(mobile);
@@ -488,9 +512,10 @@ const importMembers = async (
     updatedCount,
     flaggedCount,
     duplicateCount,
-    failureCount,
+    failureCount: failureCount + blockedCount,
+    blockedCount,
     problems,
-    problemsTruncated: duplicateCount + failureCount > problems.length,
+    problemsTruncated: duplicateCount + failureCount + blockedCount > problems.length,
   };
 };
 
@@ -596,7 +621,11 @@ const getAllMembers = async (query = {}) => {
   const sortBy = SORTABLE.includes(query.sortBy) ? query.sortBy : "name";
   const sortOrder = query.sortOrder === "desc" ? -1 : 1;
 
-  const activeEventIds = await getActiveEventIds();
+  // The event picked in the dashboard dropdown decides who is "In Guest List";
+  // without one, every running event counts (old behaviour).
+  const activeEventIds = mongoose.Types.ObjectId.isValid(String(query.eventId || ""))
+    ? [new mongoose.Types.ObjectId(String(query.eventId))]
+    : await getActiveEventIds();
   const activeSet = new Set(activeEventIds.map(String));
   const filter = buildMemberQuery(query, activeEventIds);
 
@@ -627,6 +656,8 @@ const getAllMembers = async (query = {}) => {
     ...m,
     currentMovedTo: (m.movedTo || []).filter((x) => activeSet.has(String(x.eventId))),
   }));
+  // Block List flag (same mobile number as a blocked person).
+  await require("./blocklist.service").attachBlockedFlag(data, (m) => [m.mobile]);
 
   return {
     success: true,

@@ -23,6 +23,16 @@ const inviteDesignSchema = new mongoose.Schema(
       color: { type: String, default: null },
     },
 
+    // Where the GUEST'S OWN PHOTO goes on the card (public "guest card" link).
+    // All values in % of the design; x / y = top-left corner of the box.
+    photoBox: {
+      xPct: { type: Number, default: null },
+      yPct: { type: Number, default: null },
+      wPct: { type: Number, default: null },
+      hPct: { type: Number, default: null },
+      shape: { type: String, enum: ["rect", "circle", null], default: null },
+    },
+
     updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "Admin" },
   },
   { timestamps: true }

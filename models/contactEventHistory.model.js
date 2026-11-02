@@ -81,6 +81,15 @@ const contactEventHistorySchema = new mongoose.Schema(
       default: null,
     },
 
+    // The person's reference(s) AS THEY WERE for this event (e.g. PV6 ->
+    // "Mukund", PV7 -> "Dhaval"). Event History merges the references of
+    // every event of a person into one Reference cell ("Mukund, Dhaval"),
+    // so a reference is never lost when a later event brings another one.
+    references: {
+      type: [{ type: String, trim: true }],
+      default: [],
+    },
+
     // Copy of the PERSON's details ({ fullName, whatsappNumber, spouseName,
     // spouseMobile }), written only at the moment those details would be
     // lost from the Contact - e.g. a Couple contact is switched to Single or

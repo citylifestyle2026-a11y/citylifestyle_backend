@@ -86,6 +86,13 @@ router.get(
   contactEventHistoryController.getHistoryEditions
 );
 
+// Categories + references of people who have history - filter dropdowns.
+router.get(
+  "/filter-options",
+  protect,
+  contactEventHistoryController.getHistoryFilterOptions
+);
+
 // Get Event History for a Contact — supports ?page=&limit=
 router.get(
   "/contact/:contactId",

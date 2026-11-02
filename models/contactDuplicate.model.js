@@ -49,6 +49,11 @@ const contactDuplicateSchema = new mongoose.Schema(
     // "form" = open public form, "link" = Share Form Link.
     source: { type: String, enum: ["form", "link"], default: "form" },
     formLinkId: { type: mongoose.Schema.Types.ObjectId, ref: "FormLink", default: null },
+
+    // true  = this row's persons were counted on its Form Link (a place was reserved).
+    // false = the person was ALREADY counted on an earlier link / guest row, so this
+    //         link only adds its Reference and uses NO place (nothing to give back).
+    slotCounted: { type: Boolean, default: true },
   },
   { timestamps: true }
 );

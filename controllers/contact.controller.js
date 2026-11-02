@@ -14,10 +14,19 @@ const createContact = async (req, res, next) => {
       req.files
     );
 
+    // If this number is on the Block List, tell the admin right away.
+    const blocklistService = require("../services/blocklist.service");
+    const blocked = await blocklistService.findBlockedByNumbers([
+      contact?.whatsappNumber,
+      contact?.spouseMobile,
+    ]);
+    const blockedFlag = blocked.size ? [...blocked.values()][0] : null;
+
     return res.status(201).json({
       success: true,
       message: "Contact created successfully",
       data: contact,
+      blocked: blockedFlag,
     });
   } catch (error) {
     next(error);

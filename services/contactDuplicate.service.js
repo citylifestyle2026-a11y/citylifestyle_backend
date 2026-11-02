@@ -9,7 +9,8 @@
 //   getDuplicatePreview- existing guest vs new submission, field by field.
 //   fixDuplicate       - writes the chosen values into the ONE Guest List row
 //                        and syncs the Contact Book row with the same number.
-//   ignoreDuplicate    - throws the submission away.
+//   ignoreDuplicate    - removes the submission from the Duplicate tab; the guest
+//                        with that number goes to Pending for a fresh look.
 const Contact = require("../models/contact.model");
 const ContactDuplicate = require("../models/contactDuplicate.model");
 const Member = require("../models/member.model");
@@ -54,7 +55,12 @@ const uploadOne = async (file) => {
 };
 
 // ================= SAVE (called by the public form) =================
-const saveDuplicate = async (existing, data, files = {}, { source = "form", formLinkId = null } = {}) => {
+const saveDuplicate = async (
+  existing,
+  data,
+  files = {},
+  { source = "form", formLinkId = null, countSlot = true } = {}
+) => {
   const isCouple = data.relationship === "Couple";
 
   const profile = await uploadOne(firstFile(files, "profileImage"));
@@ -95,6 +101,7 @@ const saveDuplicate = async (existing, data, files = {}, { source = "form", form
       contactId: existing._id,
       source,
       formLinkId,
+      slotCounted: !!formLinkId && countSlot,
   };
 
   try {
@@ -115,8 +122,9 @@ const saveDuplicate = async (existing, data, files = {}, { source = "form", form
       previous.relationship = payload.relationship || previous.relationship;
       // Every link submission reserved its persons on the link, so the row
       // keeps the running total: removing the row later gives all of it back.
-      if (formLinkId) {
-        previous.persons = personsOf(previous) + payload.persons;
+      const previousCounted = previous.slotCounted !== false && !!previous.formLinkId;
+      if (formLinkId && countSlot) {
+        previous.persons = previousCounted ? personsOf(previous) + payload.persons : payload.persons;
         previous.entryType = payload.entryType || previous.entryType;
       }
       previous.companyCategory = payload.companyCategory || previous.companyCategory;
@@ -135,7 +143,15 @@ const saveDuplicate = async (existing, data, files = {}, { source = "form", form
       }
       previous.submissionCount = (previous.submissionCount || 1) + 1;
       previous.source = source;
-      previous.formLinkId = formLinkId || previous.formLinkId;
+      if (formLinkId && countSlot) {
+        previous.formLinkId = formLinkId;
+        previous.slotCounted = true;
+      } else if (formLinkId && !previousCounted) {
+        // nothing was counted yet: just remember which link it came through
+        previous.formLinkId = formLinkId;
+        previous.slotCounted = false;
+      }
+      // else: the place stays counted on the FIRST link (previous.formLinkId).
 
       await previous.save();
       for (const publicId of oldFiles) await deleteImage(publicId);
@@ -206,7 +222,7 @@ const promoteDuplicateToGuest = async (duplicate, { status = "pending", source =
     createdBy: source?.createdBy || null,
     // Keeps the link on the new guest, so deleting this guest later also
     // lowers that Form Link's progress.
-    formLinkId: duplicate.formLinkId || null,
+    formLinkId: duplicate.slotCounted !== false ? duplicate.formLinkId || null : null,
   };
 
   // A deleted guest that has Event History stays in the database as a hidden
@@ -331,6 +347,8 @@ const listDuplicates = async (query = {}) => {
       .lean(),
     ContactDuplicate.countDocuments(filter),
   ]);
+
+  await require("./blocklist.service").attachBlockedFlag(rows, (r) => [r.whatsappNumber, r.spouseMobile]);
 
   return {
     success: true,
@@ -541,12 +559,32 @@ const ignoreDuplicate = async (duplicateId) => {
   const duplicate = await ContactDuplicate.findByIdAndDelete(duplicateId);
   if (!duplicate) throw new AppError("This duplicate was not found.", 404);
 
+  // Ignore = "do not merge this submission", but the person is not lost: the
+  // guest with this number goes to Pending so the admin can look at it again.
+  // (A second Guest List row with the same number is not allowed.) A guest
+  // whose pass was already sent is left as it is - moving to Pending would
+  // cancel that pass - and Rejected / Pending guests are already where they belong.
+  let movedToPending = false;
+  const guest = await Contact.findOne({
+    _id: duplicate.contactId,
+    isDeleted: { $ne: true },
+    historyOnly: { $ne: true },
+  }).select("approvalStatus passSentAt");
+
+  if (guest && (guest.approvalStatus || "approved") === "approved" && !guest.passSentAt) {
+    await Contact.updateOne(
+      { _id: guest._id },
+      { $set: { approvalStatus: "pending", approvalUpdatedAt: new Date() } }
+    );
+    movedToPending = true;
+  }
+
   if (duplicate.profileImagePublicId) await deleteImage(duplicate.profileImagePublicId);
   if (duplicate.spouseProfileImagePublicId) await deleteImage(duplicate.spouseProfileImagePublicId);
 
   // A submission that came through a Form Link used one place on it; removing
   // it from the Duplicate tab gives that place back.
-  if (duplicate.formLinkId) {
+  if (duplicate.formLinkId && duplicate.slotCounted !== false) {
     try {
       await require("./formLink.service").releaseSlot(duplicate.formLinkId, personsOf(duplicate));
     } catch (error) {
@@ -554,7 +592,13 @@ const ignoreDuplicate = async (duplicateId) => {
     }
   }
 
-  return { success: true, message: "Duplicate removed." };
+  return {
+    success: true,
+    message: movedToPending
+      ? "Ignored. The guest was moved to Pending."
+      : "Ignored. The duplicate was removed from this list.",
+    data: { movedToPending },
+  };
 };
 
 // ================= BULK (for hundreds of duplicates) =================
@@ -611,15 +655,23 @@ const bulkFixDuplicates = async (body) => {
 const bulkIgnoreDuplicates = async (body) => {
   const ids = await collectIds(body);
   let removed = 0;
+  let movedToPending = 0;
   for (const id of ids) {
     try {
-      await ignoreDuplicate(id);
+      const res = await ignoreDuplicate(id);
       removed += 1;
+      if (res.data?.movedToPending) movedToPending += 1;
     } catch (error) {
       // already gone - nothing to do
     }
   }
-  return { success: true, message: `${removed} duplicate${removed === 1 ? "" : "s"} removed.`, data: { removed } };
+  return {
+    success: true,
+    message:
+      `${removed} duplicate${removed === 1 ? "" : "s"} ignored` +
+      (movedToPending ? `, ${movedToPending} guest${movedToPending === 1 ? "" : "s"} moved to Pending.` : "."),
+    data: { removed, movedToPending },
+  };
 };
 
 module.exports = {

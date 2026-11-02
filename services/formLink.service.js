@@ -5,6 +5,7 @@
 const crypto = require("crypto");
 const mongoose = require("mongoose");
 const FormLink = require("../models/formLink.model");
+const Event = require("../models/event.model");
 const CompanyCategory = require("../models/companycategory.model");
 const AppError = require("../utils/AppError");
 const Contact = require("../models/contact.model");
@@ -32,6 +33,22 @@ const cleanQuantity = (value) => {
   return n;
 };
 
+// Edition = event. Returns { editionEventId, editionName } for a picked event,
+// or empty values when none is picked (the default event is used then).
+const resolveEdition = async (value) => {
+  if (value === undefined || value === null || value === "") {
+    return { editionEventId: null, editionName: "" };
+  }
+  if (!mongoose.Types.ObjectId.isValid(String(value))) {
+    throw new AppError("Invalid edition.", 400);
+  }
+  const event = await Event.findOne({ _id: value, isDeleted: { $ne: true } })
+    .select("title edition")
+    .lean();
+  if (!event) throw new AppError("Edition not found.", 404);
+  return { editionEventId: event._id, editionName: event.edition || event.title || "" };
+};
+
 // active | full | closed
 const linkState = (link) => {
   if (link.status === "closed") return "closed";
@@ -49,6 +66,8 @@ const present = (link) => {
     remaining: Math.max(0, plain.quantity - plain.usedCount),
     token: plain.token,
     target: plain.target,
+    editionEventId: plain.editionEventId || null,
+    editionName: plain.editionName || "",
     status: plain.status,
     state: linkState(plain),
     createdAt: plain.createdAt,
@@ -63,11 +82,13 @@ const createFormLink = async (body = {}, adminId = null) => {
 
   const quantity = cleanQuantity(body.quantity);
   const target = TARGETS.includes(body.target) ? body.target : "contact";
+  const edition = await resolveEdition(body.editionEventId);
 
   const link = await FormLink.create({
     name,
     quantity,
     target,
+    ...edition,
     token: crypto.randomBytes(12).toString("hex"),
     createdBy: adminId || null,
   });
@@ -145,6 +166,14 @@ const updateFormLink = async (id, body = {}) => {
       );
     }
     link.quantity = quantity;
+  }
+
+  // Edition can be changed later; it applies to people who fill the form
+  // AFTER the edit (people already saved keep their edition).
+  if (body.editionEventId !== undefined) {
+    const edition = await resolveEdition(body.editionEventId);
+    link.editionEventId = edition.editionEventId;
+    link.editionName = edition.editionName;
   }
 
   if (body.status !== undefined) {
@@ -325,6 +354,7 @@ const getPublicInfo = async (token) => {
     quantity: link.quantity,
     usedCount: link.usedCount,
     remaining: Math.max(0, link.quantity - link.usedCount),
+    editionName: link.editionName || "",
     available: state === "active",
     message: state === "active" ? "" : unavailableMessage(link),
   };
@@ -346,6 +376,11 @@ const attachLink = async (req, res, next) => {
       (ref) => String(ref || "").trim().toLowerCase() !== link.name.toLowerCase()
     );
     req.body.references = [link.name, ...rest];
+
+    // The person is saved under the link's edition (never what the client
+    // sends). Old links without an edition fall back to the default event.
+    if (link.editionEventId) req.body.editionEventId = String(link.editionEventId);
+    else delete req.body.editionEventId;
 
     // Quantity counts PERSONS: Single = 1, Couple = 2. Refuse early when what
     // is left is not enough for this entry (e.g. a Couple with 1 place left).
