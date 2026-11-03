@@ -161,6 +161,28 @@ const assertBlockedConfirmed = async (rows, confirmBlocked, numbersOf) => {
   );
 };
 
+/**
+ * Every spelling of every blocked number ("98XXXXXXXX", "9198XXXXXXXX",
+ * "+9198XXXXXXXX"), because contacts are stored as bare 10-digit numbers
+ * while the Block List keeps the canonical "91XXXXXXXXXX" form.
+ * Used by the Guest List "Blocked" tab and its count.
+ */
+const getBlockedNumberVariants = async () => {
+  const rows = await BlockedPerson.find({}).select("mobileNumber").lean();
+  const out = new Set();
+  for (const r of rows) {
+    const canon = normalizeMobileNumber(r.mobileNumber);
+    if (canon) {
+      out.add(canon.slice(2));
+      out.add(canon);
+      out.add(`+${canon}`);
+    } else if (r.mobileNumber) {
+      out.add(String(r.mobileNumber));
+    }
+  }
+  return [...out];
+};
+
 module.exports = {
   createBlock,
   listBlocks,
@@ -170,4 +192,5 @@ module.exports = {
   findBlockedByNumber,
   attachBlockedFlag,
   assertBlockedConfirmed,
+  getBlockedNumberVariants,
 };

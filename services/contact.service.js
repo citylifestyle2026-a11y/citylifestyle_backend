@@ -286,6 +286,22 @@ const createContact = async (data, adminId, files = {}, options = {}) => {
     ? { editionEventId: ownEvent._id, editionName: ownEvent.edition || ownEvent.title }
     : {};
 
+  // A guest whose number (or spouse number) is on the Block List is saved as
+  // "rejected", not "approved". An admin can still approve them later, but
+  // that asks for an explicit confirmation (see assertBlockedConfirmed).
+  let blockedStatus = {};
+  if (!options.approvalStatus) {
+    try {
+      const blockedMap = await require("./blocklist.service").findBlockedByNumbers([
+        whatsappNumber,
+        spouseMobile,
+      ]);
+      if (blockedMap.size > 0) blockedStatus = { approvalStatus: "rejected" };
+    } catch (error) {
+      console.error("Could not check Block List:", error.message);
+    }
+  }
+
   try {
     const contact = await Contact.create({
       fullName,
@@ -316,6 +332,7 @@ const createContact = async (data, adminId, files = {}, options = {}) => {
         ? { approvalStatus: options.approvalStatus }
         : {}),
       ...(options.formLinkId ? { formLinkId: options.formLinkId } : {}),
+      ...blockedStatus,
       ...eventFields,
       createdBy: adminId,
       ...imageFields(images),
@@ -671,6 +688,25 @@ const applyBlockedFilter = async (filter, query) => {
   }
 };
 
+// "All" tab of the Guest List: guests on the Block List are NOT shown there
+// (they only appear in the Blocked tab). Applies only when no status tab is
+// selected (no approvalStatus / passStatus / hamper / blocked filter).
+const excludeBlockedFromAll = async (filter, query) => {
+  const isAllTab =
+    String(query.blocked) !== "true" &&
+    !query.approvalStatus &&
+    !query.passStatus &&
+    !query.hamper;
+  if (!isAllTab) return;
+
+  const variants = await require("./blocklist.service").getBlockedNumberVariants();
+  if (!variants.length) return;
+  filter.$and = [
+    ...(filter.$and || []),
+    { whatsappNumber: { $nin: variants }, spouseMobile: { $nin: variants } },
+  ];
+};
+
 // ================= APPROVAL STATUS COUNTS =================
 // Numbers shown on the Pending / Approved / Rejected filter tabs. Counted
 // over every visible contact (same base filter as the list), independent of
@@ -732,6 +768,8 @@ const getApprovalStatusCounts = async (editionEventId = null) => {
   } catch (error) {
     counts.blocked = 0;
   }
+  // Blocked guests are not listed under "All", so they are not counted there.
+  counts.all = Math.max(0, counts.all - counts.blocked);
 
   return counts;
 };
@@ -1951,6 +1989,7 @@ const getAllContacts = async (query) => {
   const { filter, sortField, sortOrder, applyCollationIfNeeded } =
     buildContactQuery(query);
   await applyBlockedFilter(filter, query);
+  await excludeBlockedFromAll(filter, query);
 
   const total = await applyCollationIfNeeded(Contact.countDocuments(filter));
 
