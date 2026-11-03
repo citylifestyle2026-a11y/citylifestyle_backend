@@ -497,8 +497,12 @@ contactSchema.index({ fullName: 1 });
 // contacts only — a partial unique index so a soft-deleted contact's
 // number never blocks the same number being reused on a new contact,
 // while still preventing two active contacts from sharing one number.
+// The SAME number may be a guest in different editions (events) - e.g. a
+// Parv 6 guest who is invited again to the next event. It must be unique only
+// WITHIN one edition. (The old index on whatsappNumber alone is dropped on
+// start-up by config/db.js.)
 contactSchema.index(
-  { whatsappNumber: 1 },
+  { whatsappNumber: 1, editionEventId: 1 },
   { unique: true, partialFilterExpression: { isDeleted: false } }
 );
 

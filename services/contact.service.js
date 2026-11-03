@@ -179,11 +179,24 @@ const createContact = async (data, adminId, files = {}, options = {}) => {
   const trimmedFullName = String(fullName || "").trim();
   const trimmedWhatsappNumber = String(whatsappNumber || "").trim();
 
+  // The guest belongs to the event picked in the dashboard dropdown (or the
+  // default event), so it shows up under that event's Guest List. The same
+  // number can be a guest in several events: duplicates are checked INSIDE
+  // this edition only.
+  const ownEvent = await require("../utils/defaultEvent").resolveEventForNewRecord(
+    data.editionEventId
+  );
+  const ownEditionId = ownEvent ? ownEvent._id : null;
+  const eventFields = ownEvent
+    ? { editionEventId: ownEvent._id, editionName: ownEvent.edition || ownEvent.title }
+    : {};
+
   const existingContact = await Contact.findOne({
     isDeleted: { $ne: true },
     historyOnly: { $ne: true },
     whatsappNumber: trimmedWhatsappNumber,
     fullName: trimmedFullName,
+    editionEventId: ownEditionId,
   }).collation(CASE_INSENSITIVE_COLLATION);
 
   if (existingContact) {
@@ -217,6 +230,8 @@ const createContact = async (data, adminId, files = {}, options = {}) => {
     isDeleted: { $ne: true },
     historyOnly: true,
     whatsappNumber: trimmedWhatsappNumber,
+    // hidden record of this edition, or one that belongs to no edition yet
+    editionEventId: { $in: [ownEditionId, null] },
   });
 
   if (historyOnlyContact) {
@@ -247,6 +262,7 @@ const createContact = async (data, adminId, files = {}, options = {}) => {
           profession,
           professionCategory: professionCategory || null,
           historyOnly: false,
+          ...eventFields,
           ...(options.approvalStatus
             ? { approvalStatus: options.approvalStatus }
             : {}),
@@ -267,7 +283,7 @@ const createContact = async (data, adminId, files = {}, options = {}) => {
     }
   }
 
-  await assertWhatsappNumberNotDuplicate(trimmedWhatsappNumber);
+  await assertWhatsappNumberNotDuplicate(trimmedWhatsappNumber, null, ownEditionId);
 
   // References are passed through as-is here — trimming and
   // case-insensitive de-duplication happen in Contact.model.js's own
@@ -276,15 +292,6 @@ const createContact = async (data, adminId, files = {}, options = {}) => {
   // Photos are uploaded only AFTER every duplicate/category check above
   // has passed, and are removed again if the save itself fails.
   const images = await uploadContactImages(files, relationship === "Couple");
-
-  // The guest belongs to the event picked in the dashboard dropdown (or the
-  // default event), so it shows up under that event's Guest List.
-  const ownEvent = await require("../utils/defaultEvent").resolveEventForNewRecord(
-    data.editionEventId
-  );
-  const eventFields = ownEvent
-    ? { editionEventId: ownEvent._id, editionName: ownEvent.edition || ownEvent.title }
-    : {};
 
   try {
     const contact = await Contact.create({
@@ -1693,10 +1700,10 @@ const resendPassToContacts = async ({ ids, confirmBlocked }) => {
     historyOnly: { $ne: true },
   });
 
-  await require("./blocklist.service").assertBlockedConfirmed(contacts, confirmBlocked, (c) => [
+  await require("./blocklist.service").assertNoneBlocked(contacts, (c) => [
     c.whatsappNumber,
     c.spouseMobile,
-  ]);
+  ], "the pass");
 
   const byId = new Map(contacts.map((c) => [String(c._id), c]));
   const results = [];
@@ -1858,10 +1865,10 @@ const sendPassToContacts = async (
 
   // Blocked number(s) in the selection: nothing is sent until the admin
   // confirms (confirmBlocked: true).
-  await require("./blocklist.service").assertBlockedConfirmed(contacts, confirmBlocked, (c) => [
+  await require("./blocklist.service").assertNoneBlocked(contacts, (c) => [
     c.whatsappNumber,
     c.spouseMobile,
-  ]);
+  ], "the pass");
 
   const byId = new Map(contacts.map((c) => [String(c._id), c]));
   const results = [];
@@ -2280,7 +2287,11 @@ const updateContact = async (id, data, files = {}) => {
     data.whatsappNumber !== undefined &&
     data.whatsappNumber.trim() !== contact.whatsappNumber.trim()
   ) {
-    await assertWhatsappNumberNotDuplicate(data.whatsappNumber, id);
+    await assertWhatsappNumberNotDuplicate(
+      data.whatsappNumber,
+      id,
+      contact.editionEventId || null
+    );
   }
 
   const updateFields = {};
@@ -2629,10 +2640,17 @@ const getReferenceSummary = async () => {
 // never blocks that same number being reused on a new/other contact —
 // the underlying guarantee against a create/update race is the partial
 // unique index on Contact.model.js's `whatsappNumber` field.
-async function assertWhatsappNumberNotDuplicate(whatsappNumber, excludeId = null) {
+// The number may repeat across editions: it is a duplicate only when the same
+// number is already a guest of the SAME edition (`editionEventId`).
+async function assertWhatsappNumberNotDuplicate(
+  whatsappNumber,
+  excludeId = null,
+  editionEventId = null
+) {
   const filter = {
     isDeleted: { $ne: true },
     whatsappNumber: String(whatsappNumber || "").trim(),
+    editionEventId: editionEventId || null,
   };
 
   if (excludeId) {
@@ -2642,7 +2660,7 @@ async function assertWhatsappNumberNotDuplicate(whatsappNumber, excludeId = null
   const existing = await Contact.findOne(filter);
 
   if (existing) {
-    throw new AppError("WhatsApp Number already exists", 400);
+    throw new AppError("WhatsApp Number already exists in this event's Guest List", 400);
   }
 }
 

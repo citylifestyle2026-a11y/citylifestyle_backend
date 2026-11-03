@@ -152,6 +152,14 @@ const createBooking = async (data, createdBy) => {
       throw new AppError(MOBILE_ERROR_MESSAGE, 400);
     }
 
+    // ================= BLOCK LIST =================
+    // A blocked number never gets a booking / pass.
+    await require("./blocklist.service").assertNoneBlocked(
+      [{ name, mobile: normalizedMobileNumber }],
+      (r) => [r.mobile],
+      "a pass"
+    );
+
     // ================= DUPLICATE BOOKING WARNING (SAME MOBILE NUMBER) =================
     // The SAME mobile number already has a booking for this event +
     // ticket type -> stop here (409) before any ticket is deducted or any

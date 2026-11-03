@@ -9,7 +9,9 @@
     "seed:admin": "node scripts/seedAdmin.js",
     "face:backfill": "node scripts/backfillFaceDescriptors.js",
      "assign:expired-guests:dry": "node scripts/assignExpiredEventToGuests.js --dry-run",
-  "assign:expired-guests": "node scripts/assignExpiredEventToGuests.js"
+  "assign:expired-guests": "node scripts/assignExpiredEventToGuests.js",
+    "fix:duplicates:dry": "node scripts/fixCrossEditionDuplicates.js",
+    "fix:duplicates": "node scripts/fixCrossEditionDuplicates.js --fix"
   },
   "keywords": [
     "event-management",

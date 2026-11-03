@@ -551,11 +551,17 @@ const submitThroughLink = async (link, data, files) => {
   // A number that is already in the Guest List is NOT refused: the submission
   // is saved in the Guest List "Duplicate" tab (it uses one place on the link,
   // creates no guest row / pass) and the admin fixes + syncs it from there.
+  // Only a guest of THIS link's edition counts: the same number can already be
+  // a guest of another event (e.g. Parv 6) and still register for this one.
+  const targetEvent = await require("../utils/defaultEvent").resolveEventForNewRecord(
+    link.editionEventId
+  );
   const alreadyGuest = variants.length
     ? await Contact.findOne({
         isDeleted: { $ne: true },
         historyOnly: { $ne: true },
         whatsappNumber: { $in: variants },
+        editionEventId: targetEvent ? targetEvent._id : null,
       })
         .select("_id")
         .lean()

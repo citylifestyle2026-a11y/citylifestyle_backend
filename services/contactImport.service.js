@@ -334,6 +334,11 @@ const importContactsCsv = async (
   const rows = await parseCsvBuffer(buffer);
   const resolveCategory = await buildCategoryResolver();
 
+  // Rows go to the default event; a number is "already saved" only when it is
+  // a guest of that same event.
+  const importEvent = await require("../utils/defaultEvent").resolveEventForNewRecord(null);
+  const importEditionId = importEvent ? importEvent._id : null;
+
   const results = [];
   const seenNumbers = new Set();
 
@@ -358,6 +363,7 @@ const importContactsCsv = async (
       isDeleted: { $ne: true },
       historyOnly: { $ne: true },
       whatsappNumber: data.whatsappNumber,
+      editionEventId: importEditionId,
     })
       .select("_id")
       .lean();

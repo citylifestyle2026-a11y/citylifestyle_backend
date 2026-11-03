@@ -554,7 +554,39 @@ const getBlockedMobileVariants = async () => {
   }
 };
 
-const buildMemberQuery = (query = {}, activeEventIds = [], blockedVariants = null) => {
+// A member counts as "In Guest List" when they were moved there (movedTo) OR
+// a live Guest List contact with the same WhatsApp number exists in a running
+// edition - e.g. someone who filled the public form / a form link, which
+// puts them in the Guest List and the Contact Book at the same time.
+// Returns { mobiles: [...], byMobile: Map(mobile -> [{eventId, editionName}]) }.
+const getGuestListPresence = async (activeEventIds = []) => {
+  const byMobile = new Map();
+  if (!activeEventIds.length) return { mobiles: [], byMobile };
+
+  const rows = await Contact.find({
+    isDeleted: { $ne: true },
+    historyOnly: { $ne: true },
+    editionEventId: { $in: activeEventIds },
+  })
+    .select("whatsappNumber editionEventId editionName")
+    .lean();
+
+  rows.forEach((c) => {
+    const key = String(c.whatsappNumber || "").trim();
+    if (!key) return;
+    if (!byMobile.has(key)) byMobile.set(key, []);
+    byMobile.get(key).push({ eventId: c.editionEventId, editionName: c.editionName || "" });
+  });
+
+  return { mobiles: [...byMobile.keys()], byMobile };
+};
+
+const buildMemberQuery = (
+  query = {},
+  activeEventIds = [],
+  blockedVariants = null,
+  guestMobiles = null
+) => {
   const filter = {};
   const and = [];
 
@@ -623,11 +655,17 @@ const buildMemberQuery = (query = {}, activeEventIds = [], blockedVariants = nul
   }
 
   if (MOVED_FILTERS.includes(query.moved)) {
-    and.push(
-      query.moved === "inGuestList"
-        ? { "movedTo.eventId": { $in: activeEventIds } }
-        : { "movedTo.eventId": { $nin: activeEventIds } }
-    );
+    const extra = Array.isArray(guestMobiles) && guestMobiles.length > 0;
+    if (query.moved === "inGuestList") {
+      and.push(
+        extra
+          ? { $or: [{ "movedTo.eventId": { $in: activeEventIds } }, { mobile: { $in: guestMobiles } }] }
+          : { "movedTo.eventId": { $in: activeEventIds } }
+      );
+    } else {
+      and.push({ "movedTo.eventId": { $nin: activeEventIds } });
+      if (extra) and.push({ mobile: { $nin: guestMobiles } });
+    }
   }
 
   if (and.length) filter.$and = and;
@@ -648,7 +686,8 @@ const getAllMembers = async (query = {}) => {
     : await getActiveEventIds();
   const activeSet = new Set(activeEventIds.map(String));
   const blockedVariants = await getBlockedMobileVariants();
-  const filter = buildMemberQuery(query, activeEventIds, blockedVariants);
+  const guestPresence = await getGuestListPresence(activeEventIds);
+  const filter = buildMemberQuery(query, activeEventIds, blockedVariants, guestPresence.mobiles);
   const notBlocked = blockedVariants.length ? { mobile: { $nin: blockedVariants } } : {};
 
   const [rows, total] = await Promise.all([
@@ -666,7 +705,13 @@ const getAllMembers = async (query = {}) => {
   // Blocked members are left out of every tab except "Blocked".
   const [all, inGuestList, invalidCount, duplicateCount, blockedCount] = await Promise.all([
     Member.countDocuments(notBlocked),
-    Member.countDocuments({ ...notBlocked, "movedTo.eventId": { $in: activeEventIds } }),
+    Member.countDocuments({
+      ...notBlocked,
+      $or: [
+        { "movedTo.eventId": { $in: activeEventIds } },
+        ...(guestPresence.mobiles.length ? [{ mobile: { $in: guestPresence.mobiles } }] : []),
+      ],
+    }),
     Member.countDocuments({ ...notBlocked, mobileStatus: "invalid" }),
     Member.countDocuments({ ...notBlocked, mobileStatus: "duplicate" }),
     blockedVariants.length
@@ -678,10 +723,14 @@ const getAllMembers = async (query = {}) => {
   // movedTo is the permanent record of every edition a member went to
   // (kept even after that event ends or is deleted); currentMovedTo is only
   // the editions that are still running.
-  const data = rows.map((m) => ({
-    ...m,
-    currentMovedTo: (m.movedTo || []).filter((x) => activeSet.has(String(x.eventId))),
-  }));
+  const data = rows.map((m) => {
+    const fromMoved = (m.movedTo || []).filter((x) => activeSet.has(String(x.eventId)));
+    // Also "in" an edition when the same number is already in that edition's Guest List.
+    const fromGuestList = fromMoved.length
+      ? []
+      : guestPresence.byMobile.get(String(m.mobile || "").trim()) || [];
+    return { ...m, currentMovedTo: [...fromMoved, ...fromGuestList] };
+  });
   // Block List flag (same mobile number as a blocked person).
   await require("./blocklist.service").attachBlockedFlag(data, (m) => [m.mobile]);
 
@@ -744,8 +793,10 @@ const getMemberReferences = async () => {
 // ids -> those members; selectAll -> every member matching `filters`.
 const resolveMembers = async ({ ids, selectAll, filters }) => {
   if (selectAll) {
+    const activeIds = await getActiveEventIds();
+    const presence = await getGuestListPresence(activeIds);
     return Member.find(
-      buildMemberQuery(filters || {}, await getActiveEventIds(), await getBlockedMobileVariants())
+      buildMemberQuery(filters || {}, activeIds, await getBlockedMobileVariants(), presence.mobiles)
     );
   }
 
@@ -828,10 +879,14 @@ const moveMembersToGuestList = async (body, adminId) => {
       const professionCategory =
         member.relationship === "Couple" ? await resolveCategoryId(member.spouseProfession) : null;
 
+      // The same number can be a guest in other events too - only a guest of
+      // THIS event (or a hidden history-only record without an event) is reused,
+      // so moving someone to a new event never takes the guest away from Parv 6.
       const existing = await Contact.findOne({
         isDeleted: { $ne: true },
         whatsappNumber: member.mobile,
-      });
+        editionEventId: { $in: [event._id, null] },
+      }).sort({ editionEventId: -1 });
 
       if (existing && String(existing.editionEventId) === String(event._id) && !existing.historyOnly) {
         counts.alreadyThere += 1;
@@ -1248,7 +1303,8 @@ const buildExportRows = async (query = {}) => {
   const filter = buildMemberQuery(
     query,
     activeEventIds,
-    query.moved === "blocked" ? await getBlockedMobileVariants() : null
+    query.moved === "blocked" ? await getBlockedMobileVariants() : null,
+    (await getGuestListPresence(activeEventIds)).mobiles
   );
 
   const ids = String(query.ids || "")

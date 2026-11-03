@@ -262,13 +262,19 @@ const syncFromEvent = async (data, adminId) => {
       isDeleted: { $ne: true },
       whatsappNumber: { $in: [...mobiles, ...mobiles.map((k) => `91${k}`)] },
     })
-      .select("_id whatsappNumber fullName relationship spouseName spouseMobile references")
+      .select("_id whatsappNumber fullName relationship spouseName spouseMobile references editionEventId")
       .lean();
 
+    // A number can be a guest in several events: attach to the guest of THIS
+    // event when there is one, otherwise to the first one found.
     const map = new Map();
     for (const contact of found) {
       const mobile = toLocalMobileNumber(contact.whatsappNumber) || contact.whatsappNumber;
-      if (!map.has(mobile)) map.set(mobile, contact);
+      const sameEvent = String(contact.editionEventId || "") === String(event._id);
+      const current = map.get(mobile);
+      if (!current || (sameEvent && String(current.editionEventId || "") !== String(event._id))) {
+        map.set(mobile, contact);
+      }
     }
     return map;
   };

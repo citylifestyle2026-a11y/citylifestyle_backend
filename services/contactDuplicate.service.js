@@ -37,7 +37,10 @@ const numberVariants = (value) => {
   return [...new Set([raw, canonical, canonical ? canonical.slice(2) : null].filter(Boolean))];
 };
 
-const findGuestByNumber = async (whatsappNumber) => {
+// `editionEventId`: the edition (event) the submission is for. The same number
+// may be a guest in another event, so only a guest of THIS edition makes it a
+// duplicate. Leave it undefined to look in every edition.
+const findGuestByNumber = async (whatsappNumber, editionEventId) => {
   const variants = numberVariants(whatsappNumber);
   if (!variants.length) return null;
 
@@ -45,6 +48,7 @@ const findGuestByNumber = async (whatsappNumber) => {
     isDeleted: { $ne: true },
     historyOnly: { $ne: true },
     whatsappNumber: { $in: variants },
+    ...(editionEventId === undefined ? {} : { editionEventId: editionEventId || null }),
   }).select("_id");
 };
 
@@ -169,7 +173,11 @@ const saveDuplicate = async (
 // Returns the saved ContactDuplicate, or null when the number is NOT a
 // duplicate (the caller then creates the guest as usual).
 const captureIfDuplicate = async (data, files, options) => {
-  const existing = await findGuestByNumber(data.whatsappNumber);
+  // Same edition rule as contactService.createContact (picked event or default).
+  const ownEvent = await require("../utils/defaultEvent").resolveEventForNewRecord(
+    data.editionEventId
+  );
+  const existing = await findGuestByNumber(data.whatsappNumber, ownEvent ? ownEvent._id : null);
   if (!existing) return null;
   return saveDuplicate(existing, data, files, options);
 };
@@ -183,7 +191,11 @@ const captureIfDuplicate = async (data, files, options) => {
 const promoteDuplicateToGuest = async (duplicate, { status = "pending", source = null } = {}) => {
   // Someone already added this number again meanwhile: stay a duplicate of
   // that guest instead of creating a second row with the same number.
-  const current = await findGuestByNumber(duplicate.whatsappNumber);
+  // Same number in the SAME edition as the deleted guest (undefined = unknown).
+  const current = await findGuestByNumber(
+    duplicate.whatsappNumber,
+    source ? source.editionEventId || null : undefined
+  );
   if (current) {
     await ContactDuplicate.updateOne({ _id: duplicate._id }, { contactId: current._id });
     return null;
@@ -235,6 +247,7 @@ const promoteDuplicateToGuest = async (duplicate, { status = "pending", source =
         isDeleted: { $ne: true },
         historyOnly: true,
         whatsappNumber: { $in: variants },
+        ...(source ? { editionEventId: { $in: [source.editionEventId || null, null] } } : {}),
       })
     : null;
 
@@ -680,6 +693,7 @@ module.exports = {
   findGuestByNumber,
   saveDuplicate,
   captureIfDuplicate,
+  promoteDuplicateToGuest,
   getDuplicateCount,
   promoteDuplicatesForContacts,
   purgeOrphanDuplicates,

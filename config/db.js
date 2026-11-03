@@ -40,6 +40,35 @@ const connectDB = async () => {
       { $set: { mobileStatus: "valid" } }
     );
     await Member.syncIndexes();
+
+    // ================= GUEST LIST: NUMBER UNIQUE PER EDITION =================
+    // Contact.whatsappNumber used to be unique on its own, so a number that was
+    // a guest in Parv 6 could not be a guest in the next event (it showed up in
+    // the Duplicate tab instead). The index is now (whatsappNumber + edition).
+    // Only the old single-field index is dropped here (nothing else on Contact
+    // is touched), then the new one is built. Safe to run on every start.
+    const Contact = require("../models/contact.model");
+    try {
+      const existingIndexes = await Contact.collection.indexes();
+      const old = existingIndexes.find(
+        (index) =>
+          index.name === "whatsappNumber_1" &&
+          index.unique &&
+          Object.keys(index.key).length === 1
+      );
+      if (old) {
+        await Contact.collection.dropIndex("whatsappNumber_1");
+        console.log("Dropped old Contact index whatsappNumber_1");
+      }
+      // Built directly (not Contact.createIndexes()): if some OTHER Contact index
+      // ever conflicts, that must not stop this one from being created.
+      await Contact.collection.createIndex(
+        { whatsappNumber: 1, editionEventId: 1 },
+        { unique: true, partialFilterExpression: { isDeleted: false } }
+      );
+    } catch (indexError) {
+      console.error("Could not update Contact indexes:", indexError.message);
+    }
   } catch (error) {
     console.error("========== FULL ERROR ==========");
     console.error(error);

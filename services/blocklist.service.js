@@ -183,6 +183,30 @@ const getBlockedNumberVariants = async () => {
   return [...out];
 };
 
+/**
+ * HARD stop (no confirmation possible): a pass / booking must never be sent
+ * to a number on the Block List. `numbersOf(row)` returns the row's numbers.
+ */
+const assertNoneBlocked = async (rows, numbersOf, what = "a pass") => {
+  const list = Array.isArray(rows) ? rows : [];
+  if (list.length === 0) return;
+
+  const map = await findBlockedByNumbers(list.flatMap((r) => numbersOf(r) || []));
+  if (map.size === 0) return;
+
+  const names = list
+    .filter((r) => (numbersOf(r) || []).some((n) => map.has(normalizeMobileNumber(n))))
+    .map((r) => r.fullName || r.name)
+    .filter(Boolean)
+    .slice(0, 5)
+    .join(", ");
+
+  throw new AppError(
+    `${what.charAt(0).toUpperCase()}${what.slice(1)} cannot be sent to a blocked guest${names ? ` (${names})` : ""}. Remove them from the Block List first.`,
+    403
+  );
+};
+
 module.exports = {
   createBlock,
   listBlocks,
@@ -193,4 +217,5 @@ module.exports = {
   attachBlockedFlag,
   assertBlockedConfirmed,
   getBlockedNumberVariants,
+  assertNoneBlocked,
 };
