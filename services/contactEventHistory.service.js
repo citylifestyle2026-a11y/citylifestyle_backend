@@ -91,11 +91,20 @@ const buildHistoryMatch = async (query = {}) => {
     filter.contactId = query.contactId;
   }
 
-  if (query.eventId) {
-    if (!mongoose.Types.ObjectId.isValid(query.eventId)) {
+  // ONE edition (?eventId=a) or SEVERAL (?eventId=a&eventId=b, or "a,b").
+  const eventIds = [
+    ...new Set(
+      (Array.isArray(query.eventId) ? query.eventId : [query.eventId])
+        .flatMap((v) => String(v || "").split(","))
+        .map((v) => v.trim())
+        .filter(Boolean)
+    ),
+  ];
+  if (eventIds.length) {
+    if (!eventIds.every((id) => mongoose.Types.ObjectId.isValid(id))) {
       throw new AppError("Invalid Event ID", 400);
     }
-    filter.eventId = query.eventId;
+    filter.eventId = eventIds.length === 1 ? eventIds[0] : { $in: eventIds };
   }
 
   if (query.status) {
@@ -109,7 +118,11 @@ const buildHistoryMatch = async (query = {}) => {
   const toObjectId = (v) => new mongoose.Types.ObjectId(v);
   const matchStage = { ...filter };
   if (matchStage.contactId) matchStage.contactId = toObjectId(matchStage.contactId);
-  if (matchStage.eventId) matchStage.eventId = toObjectId(matchStage.eventId);
+  if (matchStage.eventId) {
+    matchStage.eventId = matchStage.eventId.$in
+      ? { $in: matchStage.eventId.$in.map(toObjectId) }
+      : toObjectId(matchStage.eventId);
+  }
 
   const andConditions = [];
 
@@ -217,7 +230,77 @@ const buildHistoryMatch = async (query = {}) => {
     ];
   }
 
+  // ---- reference filter, PER ENTRY ----
+  // The person-level filter above only finds people who have the reference
+  // somewhere. Keep only the entries (edition rows) whose OWN edition
+  // reference is one of the ticked ones (PV6 -> Mukund, PV7 -> Rahul:
+  // ticking Mukund leaves the PV6 entry only).
+  if (referenceKeys.length) {
+    const candidates = await ContactEventHistory.find(matchStage)
+      .select("eventId references contactSnapshot")
+      .populate({ path: "contactId", select: "whatsappNumber references" })
+      .lean();
+    const referencesOfEntry = await makeReferenceResolver(candidates);
+    const wanted = new Set(referenceKeys);
+    const keepIds = candidates
+      .filter((e) =>
+        referencesOfEntry(e).some((ref) => wanted.has(Contact.normalizeReferenceKey(ref)))
+      )
+      .map((e) => e._id);
+    matchStage._id = { $in: keepIds };
+  }
+
   return matchStage;
+};
+
+// ---- reference of EACH edition (used by the page AND the Excel export) ----
+// A guest's reference belongs to the edition (PV6 -> Mukund, PV7 -> Rahul).
+// It can be saved on the history entry, on that entry's Contact, or only on
+// the Guest List contact of the SAME number for that edition (e.g. a person
+// added from Entry Report gets a history-only contact with no reference).
+// Returns (entry) => [references of that entry's edition].
+const last10Digits = (value) => {
+  const digits = String(value || "").replace(/\D/g, "");
+  return digits.length >= 10 ? digits.slice(-10) : digits;
+};
+
+const makeReferenceResolver = async (entries) => {
+  const numberVariants = new Set();
+  entries.forEach((e) => {
+    const n = last10Digits(e.contactId?.whatsappNumber || e.contactSnapshot?.whatsappNumber);
+    if (n.length === 10) {
+      numberVariants.add(n);
+      numberVariants.add(`91${n}`);
+      numberVariants.add(`+91${n}`);
+    }
+  });
+  const sameNumberContacts = numberVariants.size
+    ? await Contact.find({
+        isDeleted: { $ne: true },
+        whatsappNumber: { $in: [...numberVariants] },
+      })
+        .select("whatsappNumber references editionEventId")
+        .lean()
+    : [];
+  const contactsByNumber = new Map();
+  sameNumberContacts.forEach((c) => {
+    const n = last10Digits(c.whatsappNumber);
+    if (!contactsByNumber.has(n)) contactsByNumber.set(n, []);
+    contactsByNumber.get(n).push(c);
+  });
+
+  return (e) => {
+    const eventKey = String(e.eventId?._id || e.eventId || "");
+    const n = last10Digits(e.contactId?.whatsappNumber || e.contactSnapshot?.whatsappNumber);
+    const fromSameEdition = (contactsByNumber.get(n) || [])
+      .filter((c) => eventKey && String(c.editionEventId || "") === eventKey)
+      .map((c) => c.references || []);
+    return mergeReferences(
+      e.references || [],
+      Array.isArray(e.contactId?.references) ? e.contactId.references : [],
+      ...fromSameEdition
+    );
+  };
 };
 
 // ================= GET ALL EVENT HISTORY (ALL CONTACTS) =================
@@ -296,6 +379,8 @@ const getAllEventHistory = async (query = {}) => {
 
   const entryById = new Map(entries.map((e) => [String(e._id), withEventFallback(e)]));
 
+  const referencesOfEntry = await makeReferenceResolver(entries);
+
   const history = groups.map((g) => {
     const groupEntries = g.entryIds
       .map((id) => entryById.get(String(id)))
@@ -308,6 +393,7 @@ const getAllEventHistory = async (query = {}) => {
       );
 
     // Newest edition's contact is the "live" one (latest details win).
+    const refsByEntry = new Map(groupEntries.map((e) => [String(e._id), referencesOfEntry(e)]));
     const withContact = groupEntries.filter((e) => e.contactId);
     const live = withContact.length ? withContact[withContact.length - 1].contactId : null;
     // Category: newest edition that has one (a guest may have it in one edition only).
@@ -325,7 +411,7 @@ const getAllEventHistory = async (query = {}) => {
       // (PV6 -> Mukund, PV7 -> Dhaval  =>  Mukund, Dhaval).
       references: mergeReferences(
         withContact.map((e) => (Array.isArray(e.contactId.references) ? e.contactId.references : [])),
-        groupEntries.map((e) => e.references || [])
+        groupEntries.map((e) => refsByEntry.get(String(e._id)) || [])
       ),
       // Saved copy of the person (see model) - used when the live Contact
       // no longer has these details.
@@ -339,7 +425,8 @@ const getAllEventHistory = async (query = {}) => {
         notes: e.notes,
         source: e.source || "manual",
         markedManually: !!e.markedManually,
-        references: e.references || [],
+        // This edition's own reference(s) - shown per edition on the page.
+        references: refsByEntry.get(String(e._id)) || [],
         createdAt: e.createdAt,
       })),
     };
@@ -488,6 +575,7 @@ const exportEventHistory = async (query, res) => {
     .sort({ createdAt: -1 });
 
   const entries = rawEntries.map(withEventFallback);
+  const referencesOfEntry = await makeReferenceResolver(entries);
 
   const workbook = new ExcelJS.Workbook();
   workbook.creator = "Event Management CRM";
@@ -542,10 +630,8 @@ const exportEventHistory = async (query, res) => {
       category:
         (isSpouse ? live.professionCategory?.name : live.companyCategory?.name) || "-",
       reference: (() => {
-        const merged = mergeReferences(
-          Array.isArray(live.references) ? live.references : [],
-          entry.references || []
-        );
+        // This entry's OWN edition reference (same as the page).
+        const merged = referencesOfEntry(entry);
         return merged.length ? merged.join(", ") : "-";
       })(),
       edition,

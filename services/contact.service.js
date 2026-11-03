@@ -667,9 +667,17 @@ function buildContactQuery(query) {
 // ?blocked=true -> only guests whose WhatsApp / spouse number is on the Block
 // List. Needs the Block List, so it cannot live in the sync buildContactQuery.
 const blockedCondition = async () => {
-  const variants = await require("./blocklist.service").getBlockedNumberVariants();
-  if (!variants.length) return { _id: null }; // nobody is blocked -> empty result
-  return { $or: [{ whatsappNumber: { $in: variants } }, { spouseMobile: { $in: variants } }] };
+  const blocklist = require("./blocklist.service");
+  const variants = await blocklist.getBlockedNumberVariants();
+  const nameRegexes = await blocklist.getBlockedNameRegexes();
+  if (!variants.length && !nameRegexes.length) return { _id: null }; // nobody is blocked -> empty result
+  // Same number OR (same full name, even with a different number).
+  const or = [];
+  if (variants.length) {
+    or.push({ whatsappNumber: { $in: variants } }, { spouseMobile: { $in: variants } });
+  }
+  if (nameRegexes.length) or.push({ fullName: { $in: nameRegexes } });
+  return { $or: or };
 };
 
 const applyBlockedFilter = async (filter, query) => {
@@ -684,12 +692,17 @@ const applyBlockedFilter = async (filter, query) => {
 const excludeBlockedFromAll = async (filter, query) => {
   if (String(query.blocked) === "true") return;
 
-  const variants = await require("./blocklist.service").getBlockedNumberVariants();
-  if (!variants.length) return;
-  filter.$and = [
-    ...(filter.$and || []),
-    { whatsappNumber: { $nin: variants }, spouseMobile: { $nin: variants } },
-  ];
+  const blocklist = require("./blocklist.service");
+  const variants = await blocklist.getBlockedNumberVariants();
+  const nameRegexes = await blocklist.getBlockedNameRegexes();
+  const notBlocked = {};
+  if (variants.length) {
+    notBlocked.whatsappNumber = { $nin: variants };
+    notBlocked.spouseMobile = { $nin: variants };
+  }
+  if (nameRegexes.length) notBlocked.fullName = { $nin: nameRegexes };
+  if (!Object.keys(notBlocked).length) return;
+  filter.$and = [...(filter.$and || []), notBlocked];
 };
 
 // ================= APPROVAL STATUS COUNTS =================
@@ -708,10 +721,15 @@ const getApprovalStatusCounts = async (editionEventId = null) => {
   // count (the list for those tabs leaves them out too).
   let visible = match;
   try {
-    const variants = await require("./blocklist.service").getBlockedNumberVariants();
+    const blocklist = require("./blocklist.service");
+    const variants = await blocklist.getBlockedNumberVariants();
+    const nameRegexes = await blocklist.getBlockedNameRegexes();
+    visible = { ...match };
     if (variants.length) {
-      visible = { ...match, whatsappNumber: { $nin: variants }, spouseMobile: { $nin: variants } };
+      visible.whatsappNumber = { $nin: variants };
+      visible.spouseMobile = { $nin: variants };
     }
+    if (nameRegexes.length) visible.fullName = { $nin: nameRegexes };
   } catch (error) {
     console.error("Could not read Block List for counts:", error.message);
   }
@@ -2027,10 +2045,11 @@ const getAllContacts = async (query) => {
   }
 
   // Block List flag: same WhatsApp / spouse number as a blocked person.
-  await require("./blocklist.service").attachBlockedFlag(rows, (r) => [
-    r.whatsappNumber,
-    r.spouseMobile,
-  ]);
+  await require("./blocklist.service").attachBlockedFlag(
+    rows,
+    (r) => [r.whatsappNumber, r.spouseMobile],
+    (r) => r.fullName
+  );
 
   return {
     success: true,
@@ -2069,10 +2088,11 @@ const exportContacts = async (query, res) => {
   ).lean();
 
   // Block List flag for the "Blocked" columns of the sheet.
-  await require("./blocklist.service").attachBlockedFlag(contacts, (c) => [
-    c.whatsappNumber,
-    c.spouseMobile,
-  ]);
+  await require("./blocklist.service").attachBlockedFlag(
+    contacts,
+    (c) => [c.whatsappNumber, c.spouseMobile],
+    (c) => c.fullName
+  );
 
   // ================= WORKBOOK =================
   const ExcelJS = require("exceljs");
@@ -2248,10 +2268,11 @@ const getContactById = async (id) => {
   }
 
   const out = contact.toObject();
-  await require("./blocklist.service").attachBlockedFlag([out], (r) => [
-    r.whatsappNumber,
-    r.spouseMobile,
-  ]);
+  await require("./blocklist.service").attachBlockedFlag(
+    [out],
+    (r) => [r.whatsappNumber, r.spouseMobile],
+    (r) => r.fullName
+  );
   return out;
 };
 

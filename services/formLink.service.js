@@ -99,9 +99,10 @@ const createFormLink = async (body = {}, adminId = null) => {
 const SORTABLE = ["name", "quantity", "usedCount", "createdAt"];
 const escapeRegex = (text) => String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-// Supports ?page=&limit=&search=&target=&sortBy=&sortOrder=
+// Supports ?page=&limit=&search=&target=&editionEventId=&sortBy=&sortOrder=
 const listFormLinks = async ({
   target,
+  editionEventId,
   search = "",
   sortBy = "createdAt",
   sortOrder = "desc",
@@ -113,6 +114,23 @@ const listFormLinks = async ({
 
   const filter = {};
   if (TARGETS.includes(target)) filter.target = target;
+
+  // Edition filter: one edition or several (?editionEventId=a&editionEventId=b).
+  const editionIds = [
+    ...new Set(
+      (Array.isArray(editionEventId) ? editionEventId : [editionEventId])
+        .flatMap((v) => String(v || "").split(","))
+        .map((v) => v.trim())
+        .filter(Boolean)
+    ),
+  ];
+  if (editionIds.length) {
+    if (!editionIds.every((id) => mongoose.Types.ObjectId.isValid(id))) {
+      throw new AppError("Invalid edition.", 400);
+    }
+    filter.editionEventId = { $in: editionIds.map((id) => new mongoose.Types.ObjectId(id)) };
+  }
+
   const term = cleanName(search);
   if (term) filter.name = new RegExp(escapeRegex(term), "i");
 

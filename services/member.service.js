@@ -301,6 +301,11 @@ const importMembers = async (
   const blockedRows = await require("./blocklist.service").findBlockedByNumbers(
     rows.map((r) => r.data.mobile).filter(Boolean)
   );
+  const blockedNames = await require("./blocklist.service").findBlockedByNames();
+  const blockedByName = (name) => {
+    const w = require("./blocklist.service").usableNameWords(name);
+    return w ? blockedNames.get(w.join(" ")) || null : null;
+  };
   let blockedCount = 0;
 
   // Same mobile number again (already saved, or repeated in the file) is no
@@ -416,7 +421,7 @@ const importMembers = async (
       continue;
     }
 
-    const blockedHit = blockedRows.get(normalizeMobileNumber(mobile));
+    const blockedHit = blockedRows.get(normalizeMobileNumber(mobile)) || blockedByName(data.name);
     if (blockedHit) {
       blockedCount += 1;
       if (problems.length < MAX_IMPORT_PROBLEM_ROWS) {
@@ -424,7 +429,7 @@ const importMembers = async (
           row: rowNumber,
           name: data.name || "",
           mobileNumber: mobile,
-          error: `Blocked number - not imported. Reason: ${blockedHit.reason}`,
+          error: `Blocked guest (number or same name) - not imported. Reason: ${blockedHit.reason}`,
           duplicate: false,
           blocked: true,
           data,
@@ -732,7 +737,7 @@ const getAllMembers = async (query = {}) => {
     return { ...m, currentMovedTo: [...fromMoved, ...fromGuestList] };
   });
   // Block List flag (same mobile number as a blocked person).
-  await require("./blocklist.service").attachBlockedFlag(data, (m) => [m.mobile]);
+  await require("./blocklist.service").attachBlockedFlag(data, (m) => [m.mobile], (m) => m.name);
 
   return {
     success: true,

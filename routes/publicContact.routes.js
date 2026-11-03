@@ -88,7 +88,7 @@ const requireLinkWhileClosed = (req, res, next) => {
   return res.status(410).json({
     success: false,
     message:
-      "Registrations are full, and we are no longer able to accept new bookings. Thank you for your interest in Parv.",
+      "Registrations are full for this event. Thank you for your interest in Parv - we will meet you at the next event!",
   });
 };
 
@@ -108,22 +108,20 @@ router.post(
   formLinkService.attachLink, // ?link=<token>: forces the link's name as Reference
   createContactValidation,
   validate,
-  // Block List: a blocked number (or blocked spouse number) cannot register.
-  // Runs before the handler, so a share link's place is NOT used up.
-  // The reason stays private - the person only sees a generic message.
+  // Block List: a blocked number (or blocked spouse number) is STILL saved,
+  // so the team can see it in the Guest List "Blocked" tab. It is saved like
+  // any other submission (pending, never auto-approved) and gets the normal
+  // "Registration received" WhatsApp message + thank-you page. The block /
+  // reason stays private.
   async (req, res, next) => {
     try {
-      const blocked = await require("../services/blocklist.service").findBlockedByNumbers([
-        req.body.whatsappNumber,
-        req.body.spouseMobile,
-      ]);
-      if (blocked.size > 0) {
-        return res.status(403).json({
-          success: false,
-          message:
-            "This mobile number is blocked and cannot be registered. Please contact the organizer.",
-        });
-      }
+      // Same number, OR same full name with a different number.
+      const hits = await require("../services/blocklist.service").findBlockedRows(
+        [req.body],
+        (b) => [b.whatsappNumber, b.spouseMobile],
+        (b) => b.fullName
+      );
+      req.isBlockedSubmission = hits.length > 0;
       return next();
     } catch (error) {
       return next(error);
@@ -172,6 +170,8 @@ router.post(
 
       // "Registration received" WhatsApp message. Fire-and-forget: it never
       // delays or fails the form (errors are logged inside the service).
+      // Sent to EVERY submission, blocked numbers included, so a blocked
+      // person gets the same reply as everyone else and cannot tell.
       sendRegistrationAck({
         name: req.body.fullName,
         phone: req.body.whatsappNumber,

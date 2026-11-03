@@ -361,7 +361,7 @@ const listDuplicates = async (query = {}) => {
     ContactDuplicate.countDocuments(filter),
   ]);
 
-  await require("./blocklist.service").attachBlockedFlag(rows, (r) => [r.whatsappNumber, r.spouseMobile]);
+  await require("./blocklist.service").attachBlockedFlag(rows, (r) => [r.whatsappNumber, r.spouseMobile], (r) => r.fullName);
 
   return {
     success: true,
