@@ -286,22 +286,6 @@ const createContact = async (data, adminId, files = {}, options = {}) => {
     ? { editionEventId: ownEvent._id, editionName: ownEvent.edition || ownEvent.title }
     : {};
 
-  // A guest whose number (or spouse number) is on the Block List is saved as
-  // "rejected", not "approved". An admin can still approve them later, but
-  // that asks for an explicit confirmation (see assertBlockedConfirmed).
-  let blockedStatus = {};
-  if (!options.approvalStatus) {
-    try {
-      const blockedMap = await require("./blocklist.service").findBlockedByNumbers([
-        whatsappNumber,
-        spouseMobile,
-      ]);
-      if (blockedMap.size > 0) blockedStatus = { approvalStatus: "rejected" };
-    } catch (error) {
-      console.error("Could not check Block List:", error.message);
-    }
-  }
-
   try {
     const contact = await Contact.create({
       fullName,
@@ -332,7 +316,6 @@ const createContact = async (data, adminId, files = {}, options = {}) => {
         ? { approvalStatus: options.approvalStatus }
         : {}),
       ...(options.formLinkId ? { formLinkId: options.formLinkId } : {}),
-      ...blockedStatus,
       ...eventFields,
       createdBy: adminId,
       ...imageFields(images),
@@ -688,16 +671,11 @@ const applyBlockedFilter = async (filter, query) => {
   }
 };
 
-// "All" tab of the Guest List: guests on the Block List are NOT shown there
-// (they only appear in the Blocked tab). Applies only when no status tab is
-// selected (no approvalStatus / passStatus / hamper / blocked filter).
+// Guests on the Block List are NOT shown in All / Pending / Approved /
+// Rejected / Pass Cancelled / Hamper - they only appear in the Blocked tab
+// (status "Blocked"). Skipped when the Blocked tab itself is requested.
 const excludeBlockedFromAll = async (filter, query) => {
-  const isAllTab =
-    String(query.blocked) !== "true" &&
-    !query.approvalStatus &&
-    !query.passStatus &&
-    !query.hamper;
-  if (!isAllTab) return;
+  if (String(query.blocked) === "true") return;
 
   const variants = await require("./blocklist.service").getBlockedNumberVariants();
   if (!variants.length) return;
@@ -719,8 +697,20 @@ const getApprovalStatusCounts = async (editionEventId = null) => {
     match.editionEventId = new mongoose.Types.ObjectId(editionEventId);
   }
 
+  // Blocked guests have their own tab, so they are left out of every other
+  // count (the list for those tabs leaves them out too).
+  let visible = match;
+  try {
+    const variants = await require("./blocklist.service").getBlockedNumberVariants();
+    if (variants.length) {
+      visible = { ...match, whatsappNumber: { $nin: variants }, spouseMobile: { $nin: variants } };
+    }
+  } catch (error) {
+    console.error("Could not read Block List for counts:", error.message);
+  }
+
   const rows = await Contact.aggregate([
-    { $match: match },
+    { $match: visible },
     {
       $group: {
         _id: { $ifNull: ["$approvalStatus", "approved"] },
@@ -736,7 +726,7 @@ const getApprovalStatusCounts = async (editionEventId = null) => {
   // Guests whose pass was cancelled (and not brought back) have their own
   // "Pass Cancelled" tab, so they are not counted under Rejected.
   counts.passCancelled = await Contact.countDocuments({
-    ...match,
+    ...visible,
     approvalStatus: "rejected",
     passSentAt: null,
     passCancelledAt: { $ne: null },
@@ -746,7 +736,7 @@ const getApprovalStatusCounts = async (editionEventId = null) => {
   // Hamper tab: approved guests added to the hamper, and how many of them
   // have / have not been sent yet.
   const hamperMatch = {
-    ...match,
+    ...visible,
     inHamper: true,
     approvalStatus: { $in: ["approved", null] },
   };
@@ -768,8 +758,6 @@ const getApprovalStatusCounts = async (editionEventId = null) => {
   } catch (error) {
     counts.blocked = 0;
   }
-  // Blocked guests are not listed under "All", so they are not counted there.
-  counts.all = Math.max(0, counts.all - counts.blocked);
 
   return counts;
 };
