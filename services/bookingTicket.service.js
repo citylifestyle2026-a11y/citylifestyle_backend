@@ -8,6 +8,7 @@ const whatsappService = require("./whatsapp.service");
 const pdfService = require("./pdf.service");
 const buildTicketDownloadBodyParams = require("../utils/buildTicketDownloadBodyParams");
 const ticketDeliveryService = require("./ticketDelivery.service");
+const faceService = require("./faceRecognition.service");
 // NEW single-QR invitation flow
 const invitationService = require("./invitation.service");
 const Event = require("../models/event.model");
@@ -65,6 +66,11 @@ const registerUser = async (ticketId, data, file, userId) => {
     ticket.attendee.profileImage = upload.url;
     ticket.attendee.profileImagePublicId =
       upload.public_id;
+
+    // Face Scan: store the face fingerprint of this photo (best-effort,
+    // never fails the registration). Empty array = no clear face found.
+    ticket.attendee.faceDescriptor =
+      (await faceService.getDescriptorFromStoredPhoto(upload.public_id)) || [];
   }
 
   ticket.attendee.name = name;

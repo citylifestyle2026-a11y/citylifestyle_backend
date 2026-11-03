@@ -56,7 +56,38 @@ const undoCheckInQr = async (req, res, next) => {
     next(error);
   }
 };
+// ================= FACE MATCH (search only, nothing is checked in) =================
+const faceMatch = async (req, res, next) => {
+  try {
+    const result = await qrService.matchFace({ descriptor: req.body.descriptor });
+    return res.status(200).json({
+      success: true,
+      message: result.matched ? "Face matched." : "No matching face found.",
+      data: result,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+// ================= FACE CHECK-IN (staff confirmed the match) =================
+const faceCheckIn = async (req, res, next) => {
+  try {
+    const result = await qrService.faceCheckInQr({
+      ticketId: req.body.ticketId,
+      scannedBy: req.user._id,
+    });
+    return res.status(200).json({
+      success: true,
+      message: "Ticket checked in successfully.",
+      data: result,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
 module.exports = {
+  faceMatch,
+  faceCheckIn,
   verifyQr,
   checkInQr,
   undoCheckInQr,

@@ -152,6 +152,15 @@ const bookingTicketSchema = new mongoose.Schema(
         default: "",
       },
 
+      // Face "fingerprint" (128 numbers) of profileImage, used by the
+      // scanner app's Face Scan. select:false => never sent in normal API
+      // responses; read it only with .select("+attendee.faceDescriptor").
+      faceDescriptor: {
+        type: [Number],
+        default: undefined,
+        select: false,
+      },
+
       registeredAt: {
         type: Date,
         default: null,

@@ -135,6 +135,32 @@ const attachBlockedFlag = async (rows, numbersOf) => {
   return rows;
 };
 
+/**
+ * Server-side guard: if any of the given rows has a number on the Block List,
+ * the action is refused unless the admin explicitly confirmed (confirmBlocked).
+ * `numbersOf(row)` returns the mobile numbers of that row.
+ */
+const assertBlockedConfirmed = async (rows, confirmBlocked, numbersOf) => {
+  if (confirmBlocked === true || confirmBlocked === "true") return;
+  const list = Array.isArray(rows) ? rows : [];
+  if (list.length === 0) return;
+
+  const map = await findBlockedByNumbers(list.flatMap((r) => numbersOf(r) || []));
+  if (map.size === 0) return;
+
+  const names = list
+    .filter((r) => (numbersOf(r) || []).some((n) => map.has(normalizeMobileNumber(n))))
+    .map((r) => r.fullName || r.name)
+    .filter(Boolean)
+    .slice(0, 5)
+    .join(", ");
+
+  throw new AppError(
+    `Blocked number found${names ? ` (${names})` : ""}. Please confirm to continue.`,
+    409
+  );
+};
+
 module.exports = {
   createBlock,
   listBlocks,
@@ -143,4 +169,5 @@ module.exports = {
   findBlockedByNumbers,
   findBlockedByNumber,
   attachBlockedFlag,
+  assertBlockedConfirmed,
 };

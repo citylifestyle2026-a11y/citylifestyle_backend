@@ -29,6 +29,7 @@
 
 const BookingTicket = require("../models/bookingTicket.model");
 const uploadImage = require("../utils/localUpload.util");
+const faceService = require("./faceRecognition.service");
 const deleteImage = require("../utils/deleteLocalFile");
 const AppError = require("../utils/AppError");
 const verifyRegistrationToken = require("../utils/verifyRegistrationToken");
@@ -132,6 +133,11 @@ const registerPublicUser = async (token, data, file) => {
 
     ticket.attendee.profileImage = upload.url;
     ticket.attendee.profileImagePublicId = upload.public_id;
+
+    // Face Scan: store the face fingerprint of this photo (best-effort,
+    // never fails the registration). Empty array = no clear face found.
+    ticket.attendee.faceDescriptor =
+      (await faceService.getDescriptorFromStoredPhoto(upload.public_id)) || [];
   }
 
   ticket.attendee.name = name;

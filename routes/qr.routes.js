@@ -8,6 +8,8 @@ const qrController = require("../controllers/qr.controller");
 const {
   verifyQrValidation,
   checkInQrValidation,
+  faceMatchValidation,
+  faceCheckInValidation,
   validate,
 } = require("../validators/qr.validation");
 
@@ -39,5 +41,23 @@ router.post(
   checkInQrValidation,
   validate,
   qrController.undoCheckInQr
+);
+// face scan: find the registered person for a live face (no check-in yet)
+router.post(
+  "/face-match",
+  protect,
+  authorize("admin", "checker", { permission: "QR Pass" }),
+  faceMatchValidation,
+  validate,
+  qrController.faceMatch
+);
+// face scan: staff confirmed the matched person -> check that ticket in
+router.post(
+  "/face-check-in",
+  protect,
+  authorize("admin", "checker", { permission: "QR Pass" }),
+  faceCheckInValidation,
+  validate,
+  qrController.faceCheckIn
 );
 module.exports = router;

@@ -2,7 +2,9 @@ const jwt = require("jsonwebtoken");
 
 const BookingTicket = require("../models/bookingTicket.model");
 const Booking = require("../models/booking.model");
+const Event = require("../models/event.model");
 const AppError = require("../utils/AppError");
+const faceService = require("./faceRecognition.service");
 
 // ================= WHAT A SCANNED QR CAN CONTAIN =================
 // NEW single-QR pass (public /ticket?qr=<id> page): the QR encodes ONLY the
@@ -503,8 +505,141 @@ const undoCheckInQr = async ({ qrToken, guests }) => {
   };
 };
 
+// ================= FACE SCAN =================
+// Second way to let a person in, next to the QR: the scanner app sends the
+// 128-number face fingerprint of the face in front of the camera. It is
+// compared with the fingerprints saved when each attendee registered their
+// photo (see faceRecognition.service.js). Nothing is checked in here - the
+// app shows the matched person to the staff, who confirm, and only then
+// faceCheckInQr() marks that exact ticket as Used.
+const toFaceDto = (ticket) => ({
+  ticketId: ticket._id,
+  ticketNumber: ticket.ticketNumber,
+  status: ticket.status,
+  scannedAt: ticket.scannedAt || null,
+  attendee: {
+    name: ticket.attendee?.name || "",
+    mobileNumber: ticket.attendee?.mobileNumber || "",
+    profileImage: ticket.attendee?.profileImage || "",
+  },
+  booking: ticket.bookingId
+    ? {
+        name: ticket.bookingId.name,
+        invitationId: ticket.bookingId.invitationId || null,
+        quantity: ticket.bookingId.quantity,
+      }
+    : null,
+  event: ticket.eventId ? { id: ticket.eventId._id, title: ticket.eventId.title } : null,
+  ticketType: ticket.ticketTypeId ? { ticketName: ticket.ticketTypeId.ticketName } : null,
+});
+
+const matchFace = async ({ descriptor }) => {
+  if (!faceService.isValidDescriptor(descriptor)) {
+    throw new AppError("Invalid face data. Please scan the face again.", 400);
+  }
+
+  // Only people of events that are running / upcoming can be matched.
+  const events = await Event.find({
+    isActive: true,
+    endDateTime: { $gte: new Date() },
+  }).select("_id");
+
+  if (events.length === 0) {
+    return { matched: false, reason: "no_active_event" };
+  }
+
+  const candidates = await BookingTicket.find({
+    eventId: { $in: events.map((e) => e._id) },
+    isRegistered: true,
+    status: { $in: ["Active", "Used"] },
+    "attendee.faceDescriptor.0": { $exists: true },
+  })
+    .select("+attendee.faceDescriptor ticketNumber status scannedAt attendee eventId ticketTypeId bookingId")
+    .populate({ path: "bookingId", select: "name quantity invitationId isDeleted" })
+    .populate({ path: "eventId", select: "title" })
+    .populate({ path: "ticketTypeId", select: "ticketName" })
+    .lean();
+
+  const enrolled = candidates.filter((t) => t.bookingId && !t.bookingId.isDeleted);
+
+  if (enrolled.length === 0) {
+    return { matched: false, reason: "no_faces_enrolled" };
+  }
+
+  let best = null;
+  let bestDistance = Infinity;
+  for (const ticket of enrolled) {
+    const d = faceService.distance(descriptor, ticket.attendee.faceDescriptor);
+    if (d < bestDistance) {
+      bestDistance = d;
+      best = ticket;
+    }
+  }
+
+  if (!best || bestDistance > faceService.MATCH_THRESHOLD) {
+    return { matched: false, reason: "no_match" };
+  }
+
+  return {
+    matched: true,
+    distance: Number(bestDistance.toFixed(3)),
+    // Easy label for the staff screen.
+    level: bestDistance <= 0.35 ? "high" : bestDistance <= 0.45 ? "good" : "check",
+    alreadyEntered: best.status === "Used",
+    ...toFaceDto(best),
+  };
+};
+
+// Staff confirmed the face match -> mark THAT ticket as Used.
+const faceCheckInQr = async ({ ticketId, scannedBy }) => {
+  const ticket = await BookingTicket.findById(ticketId)
+    .populate({ path: "bookingId", select: "name quantity invitationId isDeleted entryMode" })
+    .populate({ path: "eventId", select: "title isActive endDateTime" })
+    .populate({ path: "ticketTypeId", select: "ticketName" });
+
+  if (!ticket) throw new AppError("Ticket not found.", 404);
+  if (!ticket.bookingId) throw new AppError("Booking not found.", 404);
+  if (ticket.bookingId.isDeleted) throw new AppError("This booking has been cancelled.", 400);
+  if (ticket.status === "Cancelled") throw new AppError("This ticket has been cancelled.", 400);
+  if (ticket.status === "Used") throw new AppError("This ticket has already been checked in.", 400);
+  if (!ticket.eventId) throw new AppError("Event not found.", 404);
+  if (!ticket.eventId.isActive) throw new AppError("This event is inactive.", 400);
+  if (ticket.eventId.endDateTime && new Date() > new Date(ticket.eventId.endDateTime)) {
+    throw new AppError("This event has ended.", 400);
+  }
+
+  // Atomic: two phones can never let the same person in twice.
+  const scannedAt = new Date();
+  const marked = await BookingTicket.findOneAndUpdate(
+    { _id: ticket._id, status: "Active" },
+    { $set: { status: "Used", scannedAt, scannedBy } }
+  );
+  if (!marked) throw new AppError("This ticket has already been checked in.", 400);
+
+  ticket.status = "Used";
+  ticket.scannedAt = scannedAt;
+
+  const isGroupEntry = ticket.bookingId.entryMode === "single_qr";
+  const remaining = isGroupEntry
+    ? await BookingTicket.countDocuments({ bookingId: ticket.bookingId._id, status: "Active" })
+    : 0;
+
+  console.log(
+    `[face-check-in] ticket ${ticket.ticketNumber} (${ticket.attendee?.name || "-"}) by ${scannedBy}`
+  );
+
+  return {
+    ...toFaceDto(ticket),
+    isGroupEntry,
+    remaining,
+    guests: 1,
+  };
+};
+
 module.exports = {
   verifyQr,
+  matchFace,
+  faceCheckInQr,
   checkInQr,
   undoCheckInQr,
 };
