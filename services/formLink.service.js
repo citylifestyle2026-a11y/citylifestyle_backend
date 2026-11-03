@@ -534,6 +534,25 @@ const numberVariants = (value) => {
   return [...new Set([raw, canonical, canonical ? canonical.slice(2) : null].filter(Boolean))];
 };
 
+// Same person submitted through a second link (or twice): the details are
+// merged into the ONE existing guest automatically (same result as pressing
+// "Fix" in the Duplicate tab). The place stays counted on the first link only.
+// If the automatic fix fails, the submission stays in the Duplicate tab so the
+// admin can still fix it by hand.
+const mergeIntoExistingGuest = async (existingGuest, link, data, files) => {
+  const row = await contactDuplicateService.saveDuplicate(existingGuest, data, files, {
+    source: "link",
+    formLinkId: link._id,
+    countSlot: false,
+  });
+
+  try {
+    await contactDuplicateService.fixDuplicate(row._id, {});
+  } catch (error) {
+    console.error("Form link: automatic duplicate fix failed (left in Duplicate tab):", error.message);
+  }
+};
+
 // Handles one public submission that came through a link.
 //
 // The person is saved in BOTH lists:
@@ -548,9 +567,9 @@ const numberVariants = (value) => {
 const submitThroughLink = async (link, data, files) => {
   const variants = numberVariants(data.whatsappNumber);
 
-  // A number that is already in the Guest List is NOT refused: the submission
-  // is saved in the Guest List "Duplicate" tab (it uses one place on the link,
-  // creates no guest row / pass) and the admin fixes + syncs it from there.
+  // A number that is already in the Guest List is NOT refused: it is merged
+  // into that guest automatically (no new guest row / pass, and NO place is
+  // used on this link - the first link that brought the guest keeps the count).
   // Only a guest of THIS link's edition counts: the same number can already be
   // a guest of another event (e.g. Parv 6) and still register for this one.
   const targetEvent = await require("../utils/defaultEvent").resolveEventForNewRecord(
@@ -574,20 +593,16 @@ const submitThroughLink = async (link, data, files) => {
     persons: data.persons,
   });
 
-  await reserveSlot(link._id, persons);
-
+  // The number is ALREADY a guest (for example it came first through Mukund's
+  // link and now comes through Rahul's link): fix it automatically. No place is
+  // used on THIS link - the person stays counted on the link that was filled
+  // FIRST - and this link's name is only added to the guest's References.
   if (alreadyGuest) {
-    try {
-      await contactDuplicateService.saveDuplicate(alreadyGuest, data, files, {
-        source: "link",
-        formLinkId: link._id,
-      });
-    } catch (error) {
-      await releaseSlot(link._id, persons);
-      throw error;
-    }
+    await mergeIntoExistingGuest(alreadyGuest, link, data, files);
     return;
   }
+
+  await reserveSlot(link._id, persons);
 
   try {
     // Guest List first: it is the one that must succeed.
@@ -597,7 +612,20 @@ const submitThroughLink = async (link, data, files) => {
     });
   } catch (error) {
     await releaseSlot(link._id, persons);
-    throw error;
+
+    // Two forms with the SAME new number sent at the same moment: the second
+    // one lost the race, so it is a duplicate now - handle it like one.
+    const lostRace = error?.code === 11000 || /already exists/i.test(error?.message || "");
+    const winner = lostRace
+      ? await contactDuplicateService.findGuestByNumber(
+          data.whatsappNumber,
+          targetEvent ? targetEvent._id : null
+        )
+      : null;
+    if (!winner) throw error;
+
+    await mergeIntoExistingGuest(winner, link, data, files);
+    return;
   }
 
   // Contact Book: only when the number is not there yet; never fails the submit.

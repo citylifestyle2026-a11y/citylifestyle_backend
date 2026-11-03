@@ -238,26 +238,54 @@ const getAllEventHistory = async (query = {}) => {
   const page = parseInt(query.page) || 1;
   const limit = parseInt(query.limit) || 10;
 
-  const [agg] = await ContactEventHistory.aggregate([
-    { $match: matchStage },
-    {
-      $group: {
-        _id: { contactId: "$contactId", isSpouse: { $ifNull: ["$isSpouse", false] } },
-        latest: { $max: "$createdAt" },
-        entryIds: { $push: "$_id" },
-      },
-    },
-    { $sort: { latest: -1, "_id.contactId": 1 } },
-    {
-      $facet: {
-        meta: [{ $count: "total" }],
-        rows: [{ $skip: (page - 1) * limit }, { $limit: limit }],
-      },
-    },
-  ]);
+  // ONE row per person NUMBER (not per Contact document): a Contact belongs to
+  // one edition, so the same guest in two editions has two Contacts with the
+  // same number. Grouping by number puts every edition of that person on ONE
+  // row (an edition badge each), so a new edition only adds a badge.
+  const rawRows = await ContactEventHistory.find(matchStage)
+    .select("_id contactId isSpouse createdAt contactSnapshot")
+    .lean();
 
-  const total = agg?.meta?.[0]?.total || 0;
-  const groups = agg?.rows || [];
+  const contactDocs = await Contact.find({
+    _id: { $in: [...new Set(rawRows.map((r) => String(r.contactId)))] },
+  })
+    .select("whatsappNumber spouseMobile")
+    .lean();
+  const numberById = new Map(contactDocs.map((c) => [String(c._id), c]));
+
+  const last10 = (value) => {
+    const digits = String(value || "").replace(/\D/g, "");
+    return digits.length >= 10 ? digits.slice(-10) : digits;
+  };
+
+  const groupMap = new Map();
+  rawRows.forEach((row) => {
+    const isSpouse = !!row.isSpouse;
+    const live = numberById.get(String(row.contactId)) || {};
+    const saved = row.contactSnapshot || {};
+    const number = last10(
+      isSpouse
+        ? live.spouseMobile || saved.spouseMobile
+        : live.whatsappNumber || saved.whatsappNumber
+    );
+    // No number at all (very old data): keep it per contact, as before.
+    const key = `${isSpouse ? "spouse" : "main"}:${number || `id-${row.contactId}`}`;
+
+    let group = groupMap.get(key);
+    if (!group) {
+      group = { _id: { key, isSpouse }, latest: row.createdAt, entryIds: [] };
+      groupMap.set(key, group);
+    }
+    group.entryIds.push(row._id);
+    if (new Date(row.createdAt) > new Date(group.latest)) group.latest = row.createdAt;
+  });
+
+  const sortedGroups = [...groupMap.values()].sort(
+    (x, y) => new Date(y.latest) - new Date(x.latest) || x._id.key.localeCompare(y._id.key)
+  );
+
+  const total = sortedGroups.length;
+  const groups = sortedGroups.slice((page - 1) * limit, page * limit);
 
   const allIds = groups.flatMap((g) => g.entryIds);
   const entries = allIds.length
@@ -279,24 +307,24 @@ const getAllEventHistory = async (query = {}) => {
           new Date(x.createdAt) - new Date(y.createdAt)
       );
 
-    const first = groupEntries[0];
-    const live = first?.contactId || null;
-    const rowCategory = live
-      ? g._id.isSpouse
-        ? live.professionCategory
-        : live.companyCategory
-      : null;
+    // Newest edition's contact is the "live" one (latest details win).
+    const withContact = groupEntries.filter((e) => e.contactId);
+    const live = withContact.length ? withContact[withContact.length - 1].contactId : null;
+    // Category: newest edition that has one (a guest may have it in one edition only).
+    const categoryOf = (c) => (g._id.isSpouse ? c?.professionCategory : c?.companyCategory);
+    const rowCategory =
+      [...withContact].reverse().map((e) => categoryOf(e.contactId)).find((c) => c?._id) || null;
     return {
-      _id: `${g._id.contactId}:${g._id.isSpouse ? "spouse" : "main"}`,
+      _id: g._id.key,
       contactId: live,
       // Shown as the Category / Qty / Reference columns.
       categoryId: rowCategory?._id ? String(rowCategory._id) : "",
       category: rowCategory?.name || "",
-      // ONE merged Reference cell: the contact's current references PLUS
-      // the reference saved on each event entry (PV6 -> Mukund,
-      // PV7 -> Dhaval  =>  Mukund, Dhaval).
+      // ONE merged Reference cell: the references of every edition's contact
+      // PLUS the reference saved on each event entry
+      // (PV6 -> Mukund, PV7 -> Dhaval  =>  Mukund, Dhaval).
       references: mergeReferences(
-        Array.isArray(live?.references) ? live.references : [],
+        withContact.map((e) => (Array.isArray(e.contactId.references) ? e.contactId.references : [])),
         groupEntries.map((e) => e.references || [])
       ),
       // Saved copy of the person (see model) - used when the live Contact
