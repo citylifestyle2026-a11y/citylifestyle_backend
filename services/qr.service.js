@@ -6,6 +6,11 @@ const Event = require("../models/event.model");
 const AppError = require("../utils/AppError");
 const faceService = require("./faceRecognition.service");
 
+// TEMPORARY (testing only): set QR_TEST_MODE=true in the server env to skip
+// the "event inactive" / "event ended" checks while testing scans.
+// Remove the variable (or set it to false) before the real event.
+const QR_TEST_MODE = String(process.env.QR_TEST_MODE || "").toLowerCase() === "true";
+
 // ================= WHAT A SCANNED QR CAN CONTAIN =================
 // NEW single-QR pass (public /ticket?qr=<id> page): the QR encodes ONLY the
 // short 8-digit Invitation ID. That keeps the QR a small, low-density
@@ -127,11 +132,11 @@ const verifyQr = async ({ qrToken }) => {
     throw new AppError("Event not found.", 404);
   }
 
-  if (!ticket.eventId.isActive) {
+  if (!QR_TEST_MODE && !ticket.eventId.isActive) {
     throw new AppError("This event is inactive.", 400);
   }
 
-  if (new Date() > new Date(ticket.eventId.endDateTime)) {
+  if (!QR_TEST_MODE && new Date() > new Date(ticket.eventId.endDateTime)) {
     throw new AppError("This event has already ended.", 400);
   }
 
@@ -279,12 +284,12 @@ const checkInQr = async ({ qrToken, scannedBy, guests, askGuests }) => {
     throw new AppError("Event not found.", 404);
   }
 
-  if (!ticket.eventId.isActive) {
+  if (!QR_TEST_MODE && !ticket.eventId.isActive) {
     throw new AppError("This event is inactive.", 400);
   }
 
   // (worded without "already" so the app does not show it as "ticket used")
-  if (ticket.eventId.endDateTime && new Date() > new Date(ticket.eventId.endDateTime)) {
+  if (!QR_TEST_MODE && ticket.eventId.endDateTime && new Date() > new Date(ticket.eventId.endDateTime)) {
     throw new AppError("This event has ended.", 400);
   }
 
@@ -603,8 +608,8 @@ const faceCheckInQr = async ({ ticketId, scannedBy }) => {
   if (ticket.status === "Cancelled") throw new AppError("This ticket has been cancelled.", 400);
   if (ticket.status === "Used") throw new AppError("This ticket has already been checked in.", 400);
   if (!ticket.eventId) throw new AppError("Event not found.", 404);
-  if (!ticket.eventId.isActive) throw new AppError("This event is inactive.", 400);
-  if (ticket.eventId.endDateTime && new Date() > new Date(ticket.eventId.endDateTime)) {
+  if (!QR_TEST_MODE && !ticket.eventId.isActive) throw new AppError("This event is inactive.", 400);
+  if (!QR_TEST_MODE && ticket.eventId.endDateTime && new Date() > new Date(ticket.eventId.endDateTime)) {
     throw new AppError("This event has ended.", 400);
   }
 
