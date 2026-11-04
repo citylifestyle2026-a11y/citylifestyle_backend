@@ -70,6 +70,14 @@ const contactEventHistorySchema = new mongoose.Schema(
       default: false,
     },
 
+    // true = the pass WAS really scanned at the gate, but an admin later
+    // marked this person "Not Attended" by hand. The Dashboard and the Event
+    // History counts then leave this person out of the scanned numbers.
+    scanOverriddenOff: {
+      type: Boolean,
+      default: false,
+    },
+
     markedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Admin",

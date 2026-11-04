@@ -534,7 +534,9 @@ const toFaceDto = (ticket) => ({
         quantity: ticket.bookingId.quantity,
       }
     : null,
-  event: ticket.eventId ? { id: ticket.eventId._id, title: ticket.eventId.title } : null,
+  event: ticket.eventId
+    ? { id: ticket.eventId._id, title: ticket.eventId.title, startDateTime: ticket.eventId.startDateTime || null }
+    : null,
   ticketType: ticket.ticketTypeId ? { ticketName: ticket.ticketTypeId.ticketName } : null,
 });
 
@@ -562,7 +564,7 @@ const matchFace = async ({ descriptor }) => {
   })
     .select("+attendee.faceDescriptor attendee.name attendee.mobileNumber attendee.profileImage ticketNumber status scannedAt eventId ticketTypeId bookingId")
     .populate({ path: "bookingId", select: "name mobileNumber quantity invitationId isDeleted" })
-    .populate({ path: "eventId", select: "title" })
+    .populate({ path: "eventId", select: "title startDateTime" })
     .populate({ path: "ticketTypeId", select: "ticketName" })
     .lean();
 
@@ -605,16 +607,35 @@ const matchFace = async ({ descriptor }) => {
     }))
     .sort((a, b) => a.distance - b.distance);
 
-  const best = ranked[0];
-  if (!best || best.distance > faceService.LOOSE_THRESHOLD) {
+  const closest = ranked[0];
+  if (!closest || closest.distance > faceService.LOOSE_THRESHOLD) {
     return { matched: false, reason: "no_match" };
   }
+
+  // ONE person can hold tickets for SEVERAL running / upcoming events (each
+  // with its own copy of the face). All of those tickets match the same live
+  // face, so pick the person's FIRST event (earliest start) - the face scan
+  // must check them into that event, never into a later one.
+  const last10 = (v) => String(v || "").replace(/\D/g, "").slice(-10);
+  const mobileOf = (t) => last10(t.attendee?.mobileNumber || t.bookingId?.mobileNumber);
+  const closestMobile = mobileOf(closest.ticket);
+  const isSamePerson = (r) =>
+    (closestMobile.length === 10 && mobileOf(r.ticket) === closestMobile) ||
+    (r.distance <= closest.distance + 0.05 && r.distance <= faceService.MATCH_THRESHOLD);
+
+  const samePerson = ranked.filter(isSamePerson);
+  const startOf = (r) => new Date(r.ticket.eventId?.startDateTime || 0).getTime();
+  samePerson.sort((a, b) => startOf(a) - startOf(b) || a.distance - b.distance);
+
+  const best = samePerson[0] || closest;
+  // The other tickets of the same person are not "other candidates".
+  const otherPeople = ranked.filter((r) => !samePerson.includes(r));
 
   const levelOf = (d) =>
     d <= 0.4 ? "high" : d <= faceService.MATCH_THRESHOLD ? "good" : "check";
 
-  const alternatives = ranked
-    .slice(1, 4)
+  const alternatives = otherPeople
+    .slice(0, 3)
     .filter((r) => r.distance <= faceService.LOOSE_THRESHOLD)
     .map((r) => ({
       distance: Number(r.distance.toFixed(3)),

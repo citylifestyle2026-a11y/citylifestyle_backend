@@ -599,25 +599,102 @@ const markAttendance = async (id, attended, adminId) => {
     throw new AppError("Event history entry not found", 404);
   }
 
-  if (attended) {
-    // Already Attended (e.g. really scanned) - nothing to do, and it must not
-    // be relabelled as "manual".
-    if (history.status === "Attended") return populateHistory(history);
+  // Already in the wanted state - nothing to do.
+  if (attended && history.status === "Attended") return populateHistory(history);
+  if (!attended && history.status === "Not Attended") return populateHistory(history);
 
+  if (attended) {
+    if (history.scanOverriddenOff) {
+      // Was really scanned, then un-ticked by hand: ticking it again simply
+      // restores the real scan (no extra "manual" person on the Dashboard).
+      history.scanOverriddenOff = false;
+      history.markedManually = false;
+    } else {
+      history.markedManually = true; // counted as +Attended on the Dashboard
+    }
     history.status = "Attended";
-    history.markedManually = true;
-    history.markedBy = adminId || null;
-    history.markedAt = new Date();
   } else {
+    if (history.markedManually) {
+      // A manual Attended is simply taken back.
+      history.markedManually = false;
+      history.scanOverriddenOff = false;
+    } else {
+      // Attended because the pass was really scanned: keep that fact, but
+      // leave this person out of the scanned numbers (-1 on the Dashboard).
+      history.scanOverriddenOff = true;
+    }
     history.status = "Not Attended";
-    history.markedManually = false;
-    history.markedBy = adminId || null;
-    history.markedAt = new Date();
   }
+  history.markedBy = adminId || null;
+  history.markedAt = new Date();
 
   await history.save();
 
   return populateHistory(history);
+};
+
+// ================= MANUAL MARKS -> DASHBOARD NUMBERS =================
+// The Dashboard counts scanned tickets. A person ticked Attended by hand (pass
+// never scanned) must still be counted, and a really scanned person who was
+// un-ticked by hand must not. This returns, for ONE edition:
+//   addQty / addEntries   = persons / entries marked Attended by hand  (+)
+//   subQty / subEntries   = scanned persons / entries un-ticked by hand (-)
+// Qty follows the Event History rule: a contact stands for its persons
+// (couple = 2); a spouse entry is 1; a main entry next to a spouse entry only
+// counts the remaining persons.
+const getManualAttendanceAdjustments = async (eventId) => {
+  const empty = { addQty: 0, addEntries: 0, subQty: 0, subEntries: 0 };
+  try {
+    const rows = await ContactEventHistory.find({
+      eventId,
+      isDeleted: { $ne: true },
+      $or: [
+        { status: "Attended", markedManually: true },
+        { status: "Not Attended", scanOverriddenOff: true },
+      ],
+    })
+      .select("contactId isSpouse status markedManually")
+      .lean();
+    if (rows.length === 0) return empty;
+
+    const contactIds = [...new Set(rows.map((r) => String(r.contactId)))];
+    const [contacts, spouseRows] = await Promise.all([
+      Contact.find({ _id: { $in: contactIds } })
+        .select("persons entryType relationship")
+        .lean(),
+      ContactEventHistory.find({
+        eventId,
+        isDeleted: { $ne: true },
+        isSpouse: true,
+        contactId: { $in: contactIds },
+      })
+        .select("contactId")
+        .lean(),
+    ]);
+    const contactById = new Map(contacts.map((c) => [String(c._id), c]));
+    const hasSpouse = new Set(spouseRows.map((r) => String(r.contactId)));
+
+    const out = { ...empty };
+    rows.forEach((row) => {
+      let qty = 1;
+      if (!row.isSpouse) {
+        const contact = contactById.get(String(row.contactId));
+        const persons = contact ? personsOf(contact) : 1;
+        qty = Math.max(1, hasSpouse.has(String(row.contactId)) ? persons - 1 : persons);
+      }
+      if (row.status === "Attended") {
+        out.addQty += qty;
+        out.addEntries += 1;
+      } else {
+        out.subQty += qty;
+        out.subEntries += 1;
+      }
+    });
+    return out;
+  } catch (error) {
+    console.error("Event History: could not read manual attendance marks:", error.message);
+    return empty;
+  }
 };
 
 // ================= EXPORT TO EXCEL =================
@@ -1056,6 +1133,7 @@ module.exports = {
   getAllEventHistory,
   getHistoryStats,
   markAttendance,
+  getManualAttendanceAdjustments,
   exportEventHistory,
   getHistoryEditions,
   getHistoryFilterOptions,

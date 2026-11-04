@@ -290,7 +290,13 @@ const getBookingAttendanceCounts = async (eventId) => {
         status: "Used",
         bookingId: { $in: bookingIds },
     });
-    return { bookings: bookingIds.length, attendedBookings: attendedIds.length };
+    // + / - the people marked by hand on Event History (see getDashboardCounts).
+    const manual = await require("./contactEventHistory.service").getManualAttendanceAdjustments(eventId);
+    const attendedBookings = Math.min(
+        bookingIds.length,
+        Math.max(0, attendedIds.length + manual.addEntries - manual.subEntries)
+    );
+    return { bookings: bookingIds.length, attendedBookings };
 };
 
 // Total Booking Details (Day Wise)
@@ -457,12 +463,19 @@ const getDashboardCounts = async (eventId) => {
             }),
         ]);
 
+    // Event History "Mark as Attended / Not Attended" by hand: a person ticked
+    // Attended (pass never scanned) counts as scanned, and a scanned person
+    // who was un-ticked does not. Everything else is untouched.
+    const manual = await require("./contactEventHistory.service").getManualAttendanceAdjustments(eventId);
+    const adjustedScanned = Math.max(0, scannedEntries + manual.addQty - manual.subQty);
+    const adjustedNotScanned = Math.max(0, registeredNotScanned - manual.addQty + manual.subQty);
+
     return {
         totalBookings: totalBookingsAgg[0]?.qty || 0,
         registeredTickets,
         pendingRegistrations,
-        scannedEntries,
-        registeredNotScanned,
+        scannedEntries: adjustedScanned,
+        registeredNotScanned: adjustedNotScanned,
     };
 };
 

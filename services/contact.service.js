@@ -963,7 +963,12 @@ const syncPassQuantityFromContact = async (contact, persons) => {
 // photo, that photo replaces this one (and is never deleted from here: only
 // the URL is copied, profileImagePublicId stays empty).
 // Never throws and is meant to be run without `await` (it can take a while).
-const syncContactPhotoToPass = async (contact) => {
+//
+// `options.force` (true when an admin uploads a NEW photo in the Guest List):
+// the new photo replaces even the guest's own registration photo on the pass,
+// so Face Scan (website and mobile app) recognises the new face right away.
+const syncContactPhotoToPass = async (contact, options = {}) => {
+  const force = options.force === true;
   try {
     if (!contact) return;
     const BookingTicket = require("../models/bookingTicket.model");
@@ -988,8 +993,8 @@ const syncContactPhotoToPass = async (contact) => {
         .select("_id attendee.profileImagePublicId");
 
       if (!ticket) continue;
-      // The guest's own registration photo always wins.
-      if (ticket.attendee?.profileImagePublicId) continue;
+      // Without `force` the guest's own registration photo wins.
+      if (!force && ticket.attendee?.profileImagePublicId) continue;
 
       await BookingTicket.updateOne(
         { _id: ticket._id },
@@ -997,6 +1002,9 @@ const syncContactPhotoToPass = async (contact) => {
           $set: {
             "attendee.profileImage": contact.profileImage || "",
             "attendee.faceDescriptor": descriptor || [],
+            // Forced: the pass now uses the Guest List photo (URL only - the
+            // old uploaded file is not deleted from here).
+            ...(force ? { "attendee.profileImagePublicId": "" } : {}),
           },
         }
       );
@@ -2543,7 +2551,9 @@ const updateContact = async (id, data, files = {}) => {
 
   // Photo added / changed / removed in the Guest List -> keep Face Scan in sync.
   if (updatedContact && (images.profile || isTrue(data.removeProfileImage))) {
-    syncContactPhotoToPass(updatedContact);
+    // A NEW photo replaces the face on the pass even if the guest registered
+    // with another photo; removing the photo never wipes a registration photo.
+    syncContactPhotoToPass(updatedContact, { force: Boolean(images.profile) });
   }
 
   // Event History keeps the spouse: when the spouse's name is about to
