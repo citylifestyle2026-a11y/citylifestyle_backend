@@ -12,7 +12,15 @@ const toFlag = (b) => ({
   reason: b.reason,
   blockedByName: b.blockedByName || "",
   blockedAt: b.createdAt,
+  allowedNumbers: b.allowedNumbers || [],
 });
+
+// A guest matched only by NAME is still allowed when this number was unblocked
+// one-by-one (BlockedPerson.allowedNumbers). Only the guest's main number counts.
+const nameAllowed = (flag, numbers) => {
+  const first = normalizeMobileNumber((numbers || [])[0]);
+  return !!first && (flag?.allowedNumbers || []).includes(first);
+};
 
 // ---------- CRUD (admin Block List page) ----------
 
@@ -82,10 +90,70 @@ const updateBlock = async (id, { name, reason }) => {
   return doc;
 };
 
-const removeBlock = async (id) => {
-  const doc = await BlockedPerson.findByIdAndDelete(id);
+// Unblocking puts the person's Guest List rows back to PENDING (so the team
+// can review / approve them again). Rows that already have a pass sent are
+// left alone, and a row that is still blocked by ANOTHER Block List entry
+// (same number or same name) is skipped. Returns the number of guests moved.
+const movePendingAfterUnblock = async (doc, onlyNumber = null) => {
+  try {
+    const Contact = require("../models/contact.model");
+    const canon = normalizeMobileNumber(onlyNumber || doc.mobileNumber);
+    const variants = canon ? [canon.slice(2), canon, `+${canon}`] : [String(doc.mobileNumber)];
+    const words = usableNameWords(doc.name);
+    const or = [{ whatsappNumber: { $in: variants } }, { spouseMobile: { $in: variants } }];
+    // One number unblocked by itself: only THAT number's guests move to Pending.
+    if (words && !onlyNumber) {
+      or.push({ fullName: new RegExp(`^\\s*${words.map(escapeRegex).join("\\s+")}\\s*$`, "i") });
+    }
+
+    const candidates = await Contact.find({
+      isDeleted: { $ne: true },
+      historyOnly: { $ne: true },
+      passSentAt: null,
+      approvalStatus: { $ne: "pending" },
+      $or: or,
+    })
+      .select("fullName whatsappNumber spouseMobile")
+      .lean();
+    if (candidates.length === 0) return 0;
+
+    const stillBlocked = await findBlockedRows(candidates, (c) => [c.whatsappNumber, c.spouseMobile], (c) => c.fullName);
+    const skip = new Set(stillBlocked.map((h) => String(h.row._id)));
+    const ids = candidates.map((c) => c._id).filter((cid) => !skip.has(String(cid)));
+    if (ids.length === 0) return 0;
+
+    await Contact.updateMany(
+      { _id: { $in: ids } },
+      { $set: { approvalStatus: "pending", approvalUpdatedAt: new Date(), approvalUpdatedBy: null } }
+    );
+    return ids.length;
+  } catch (error) {
+    console.error("Could not move unblocked guests to Pending:", error.message);
+    return 0;
+  }
+};
+
+// removeBlock(id)         -> the Block List entry is deleted (the blocked number
+//                            and every same-name guest are free again).
+// removeBlock(id, number) -> `number` is a guest with the SAME NAME but another
+//                            number: only that number is unblocked (kept in
+//                            allowedNumbers); the entry and the blocked number
+//                            stay blocked. When `number` is the blocked number
+//                            itself the entry is deleted as above.
+const removeBlock = async (id, number = null) => {
+  const doc = await BlockedPerson.findById(id);
   if (!doc) throw new AppError("Blocked person not found", 404);
-  return doc;
+
+  const canon = number ? normalizeMobileNumber(number) : null;
+  if (canon && canon !== doc.mobileNumber) {
+    await BlockedPerson.updateOne({ _id: doc._id }, { $addToSet: { allowedNumbers: canon } });
+    const movedToPending = await movePendingAfterUnblock(doc, canon);
+    return { doc, movedToPending, entryRemoved: false };
+  }
+
+  await BlockedPerson.deleteOne({ _id: doc._id });
+  const movedToPending = await movePendingAfterUnblock(doc);
+  return { doc, movedToPending, entryRemoved: true };
 };
 
 // ---------- Flagging helpers (used by Contact / Member / Invite / public form) ----------
@@ -129,7 +197,7 @@ const attachBlockedFlag = async (rows, numbersOf, nameOf = null) => {
       if (nameOf && nameMap.size > 0) {
         const words = usableNameWords(nameOf(r));
         const nameHit = words ? nameMap.get(words.join(" ")) : null;
-        if (nameHit) r.blocked = { ...nameHit, matchedBy: "name" };
+        if (nameHit && !nameAllowed(nameHit, numbersOf(r))) r.blocked = { ...nameHit, matchedBy: "name" };
       }
     });
   } catch (error) {
@@ -163,7 +231,7 @@ const findBlockedRows = async (rows, numbersOf, nameOf = (r) => r.fullName || r.
     if (!flag && nameMap.size > 0) {
       const words = usableNameWords(nameOf(r));
       const h = words ? nameMap.get(words.join(" ")) : null;
-      if (h) flag = { ...h, matchedBy: "name" };
+      if (h && !nameAllowed(h, numbersOf(r))) flag = { ...h, matchedBy: "name" };
     }
     if (flag) hits.push({ row: r, flag });
   }
@@ -246,6 +314,36 @@ const getBlockedNameRegexes = async () => {
   return out;
 };
 
+// One rule per blocked person for Mongo queries: the name regex plus the
+// numbers (every spelling) that were unblocked one-by-one and so must NOT match.
+const getBlockedNameRules = async () => {
+  const rows = await BlockedPerson.find({}).select("name allowedNumbers").lean();
+  const out = [];
+  for (const r of rows) {
+    const words = usableNameWords(r.name);
+    if (!words) continue;
+    const allowed = [];
+    for (const n of r.allowedNumbers || []) {
+      const canon = normalizeMobileNumber(n);
+      if (canon) allowed.push(canon.slice(2), canon, `+${canon}`);
+    }
+    out.push({
+      regex: new RegExp(`^\\s*${words.map(escapeRegex).join("\\s+")}\\s*$`, "i"),
+      allowed,
+    });
+  }
+  return out;
+};
+
+// Mongo conditions (to be OR-ed) for "blocked by name": same name, unless the
+// number was unblocked one-by-one. [] when nobody is blocked.
+const nameBlockedConditions = (rules, nameField, numberField) =>
+  (rules || []).map((r) =>
+    r.allowed.length
+      ? { [nameField]: r.regex, [numberField]: { $nin: r.allowed } }
+      : { [nameField]: r.regex }
+  );
+
 // normalized blocked name -> flag
 const findBlockedByNames = async () => {
   const rows = await BlockedPerson.find({}).lean();
@@ -282,6 +380,9 @@ module.exports = {
   assertBlockedConfirmed,
   getBlockedNumberVariants,
   getBlockedNameRegexes,
+  getBlockedNameRules,
+  nameBlockedConditions,
+  nameAllowed,
   assertNoneBlocked,
   findBlockedRows,
   findBlockedByNames,

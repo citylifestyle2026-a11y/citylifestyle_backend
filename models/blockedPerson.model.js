@@ -21,6 +21,12 @@ const blockedPersonSchema = new mongoose.Schema(
     // Who blocked (name is copied so it survives the admin being renamed/removed).
     blockedBy: { type: mongoose.Schema.Types.ObjectId, ref: "Admin", default: null },
     blockedByName: { type: String, trim: true, default: "" },
+
+    // Numbers (canonical "91XXXXXXXXXX") that were UNBLOCKED one by one. A guest
+    // with the same NAME as this person but one of these numbers is no longer
+    // blocked by name; the blocked number itself and every other same-name
+    // number stay blocked.
+    allowedNumbers: { type: [String], default: [] },
   },
   { timestamps: true }
 );

@@ -14,6 +14,25 @@ const createContact = async (req, res, next) => {
       req.files
     );
 
+    // Contact Book rules (same as the public form / form links), whatever the
+    // selected event is - the Contact Book is not event-wise:
+    //   - number not in the Contact Book yet -> the person is added there too
+    //   - number already there               -> NOT added again; a different
+    //                                           Reference name is merged in
+    // Never fails the Guest List entry.
+    if (contact) {
+      await require("../services/formLink.service").addToContactBookIfMissing(
+        {
+          ...req.body,
+          fullName: contact.fullName,
+          whatsappNumber: contact.whatsappNumber,
+          references: Array.isArray(contact.references) ? contact.references : [],
+        },
+        null,
+        req.files
+      );
+    }
+
     // If this number is on the Block List, tell the admin right away.
     const blocklistService = require("../services/blocklist.service");
     const hits = await blocklistService.findBlockedRows(

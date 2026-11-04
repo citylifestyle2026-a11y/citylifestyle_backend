@@ -29,8 +29,17 @@ const updateBlock = async (req, res, next) => {
 
 const removeBlock = async (req, res, next) => {
   try {
-    await blocklistService.removeBlock(req.params.id);
-    return res.status(200).json({ success: true, message: "Person unblocked successfully" });
+    const { movedToPending } = await blocklistService.removeBlock(
+      req.params.id,
+      req.query.number || null
+    );
+    return res.status(200).json({
+      success: true,
+      message: movedToPending
+        ? `Person unblocked - ${movedToPending} guest${movedToPending === 1 ? "" : "s"} moved to Pending`
+        : "Person unblocked successfully",
+      movedToPending,
+    });
   } catch (error) {
     next(error);
   }

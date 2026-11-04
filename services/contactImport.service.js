@@ -379,6 +379,7 @@ const importContactsCsv = async (
 
       try {
         await updateExistingContact(existing._id, data, raw);
+        await require("./formLink.service").mergeReferenceIntoContactBook(data, null);
         results.push({ ...base, success: true, duplicate: false, updated: true });
       } catch (error) {
         results.push({
@@ -398,6 +399,9 @@ const importContactsCsv = async (
 
     try {
       await contactService.createContact(data, adminId, {}, { approvalStatus });
+      // Contact Book: add when the number is new, otherwise only merge a new
+      // Reference name (never a second row). Never fails the import row.
+      await require("./formLink.service").addToContactBookIfMissing(data, null, {});
       results.push({ ...base, success: true, duplicate: false });
     } catch (error) {
       results.push({

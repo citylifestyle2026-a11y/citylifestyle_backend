@@ -617,6 +617,7 @@ const submitThroughLink = async (link, data, files) => {
   // FIRST - and this link's name is only added to the guest's References.
   if (alreadyGuest) {
     await mergeIntoExistingGuest(alreadyGuest, link, data, files);
+    await mergeReferenceIntoContactBook(data, link);
     return;
   }
 
@@ -643,6 +644,7 @@ const submitThroughLink = async (link, data, files) => {
     if (!winner) throw error;
 
     await mergeIntoExistingGuest(winner, link, data, files);
+    await mergeReferenceIntoContactBook(data, link);
     return;
   }
 
@@ -650,9 +652,47 @@ const submitThroughLink = async (link, data, files) => {
   await addToContactBookIfMissing(data, link, files);
 };
 
-// Contact Book (Member): adds the person only when the number is NOT already
-// there. Never throws - a Contact Book problem must not stop the Guest List
-// entry. `link` is null for the plain public form (/city-lifestyle).
+// The Reference name(s) this submission came with: the form link's name, or
+// the references typed on the plain public form. Trimmed, no blanks / repeats.
+const submissionReferences = (data, link) => {
+  const raw = link ? [link.name] : Array.isArray(data.references) ? data.references : [data.references];
+  const seen = new Set();
+  const out = [];
+  for (const r of raw) {
+    const value = String(r ?? "").replace(/\s+/g, " ").trim();
+    const key = value.toLowerCase();
+    if (!value || seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
+  }
+  return out;
+};
+
+// Same number already in the Contact Book: nothing new is added. ONLY when
+// the submission brings a Reference name the member does not have yet, that
+// name is joined to the member's References (case-insensitive, no repeats).
+// Returns true when a reference was added.
+const mergeReferencesIntoMember = async (local, references) => {
+  if (!local || !references.length) return false;
+  const member = await Member.findOne({ mobile: local, mobileStatus: "valid" })
+    .select("references")
+    .lean();
+  if (!member) return false;
+
+  const have = new Set((member.references || []).map((r) => String(r).replace(/\s+/g, " ").trim().toLowerCase()));
+  const toAdd = references.filter((r) => !have.has(r.toLowerCase()));
+  if (!toAdd.length) return false;
+
+  await Member.updateOne({ _id: member._id }, { $push: { references: { $each: toAdd } } });
+  return true;
+};
+
+// Contact Book (Member) rules for a public / form-link submission:
+//   - number NOT in the Contact Book  -> the person is added
+//   - number already there            -> NOT added again (no duplicate row);
+//                                        only a NEW Reference name is merged in
+// Never throws - a Contact Book problem must not stop the Guest List entry.
+// `link` is null for the plain public form (/city-lifestyle).
 const addToContactBookIfMissing = async (data, link = null, files = null) => {
   try {
     const local = (normalizeMobileNumber(data.whatsappNumber) || "").slice(2);
@@ -662,9 +702,23 @@ const addToContactBookIfMissing = async (data, link = null, files = null) => {
 
     if (!inContactBook) {
       await saveAsMember(data, link, files);
+    } else {
+      await mergeReferencesIntoMember(local, submissionReferences(data, link));
     }
   } catch (error) {
     console.error("Public form: could not add to Contact Book:", error.message);
+  }
+};
+
+// Number is already a GUEST (second link / second submit): the guest row is
+// merged by mergeIntoExistingGuest; the Contact Book member (if any) only
+// gets the new Reference name. Never creates a member, never throws.
+const mergeReferenceIntoContactBook = async (data, link = null) => {
+  try {
+    const local = (normalizeMobileNumber(data.whatsappNumber) || "").slice(2);
+    await mergeReferencesIntoMember(local, submissionReferences(data, link));
+  } catch (error) {
+    console.error("Public form: could not merge reference into Contact Book:", error.message);
   }
 };
 
@@ -678,6 +732,7 @@ module.exports = {
   attachLink,
   submitThroughLink,
   addToContactBookIfMissing,
+  mergeReferenceIntoContactBook,
   releaseSlotsForContacts,
   releaseSlot,
   changePersons,

@@ -421,7 +421,10 @@ const importMembers = async (
       continue;
     }
 
-    const blockedHit = blockedRows.get(normalizeMobileNumber(mobile)) || blockedByName(data.name);
+    const nameHit = blockedByName(data.name);
+    const blockedHit =
+      blockedRows.get(normalizeMobileNumber(mobile)) ||
+      (nameHit && !require("./blocklist.service").nameAllowed(nameHit, [mobile]) ? nameHit : null);
     if (blockedHit) {
       blockedCount += 1;
       if (problems.length < MAX_IMPORT_PROBLEM_ROWS) {
@@ -548,15 +551,33 @@ const getActiveEventIds = async () =>
   });
 
 // Members whose mobile number is on the Block List live ONLY in the Blocked
-// tab. `blockedVariants` (array of every spelling of the blocked numbers) is
-// passed by the list / counts; when it is null no Block List rule is applied.
-const getBlockedMobileVariants = async () => {
+// tab - blocked by NUMBER, or by the same full NAME with a different number.
+// `blockedRules` ({ variants, nameConds }) is passed by the list / counts;
+// when it is null no Block List rule is applied.
+const getBlockedRules = async () => {
   try {
-    return await require("./blocklist.service").getBlockedNumberVariants();
+    const blocklist = require("./blocklist.service");
+    return {
+      variants: await blocklist.getBlockedNumberVariants(),
+      nameConds: blocklist.nameBlockedConditions(
+        await blocklist.getBlockedNameRules(),
+        "name",
+        "mobile"
+      ),
+    };
   } catch (error) {
     console.error("Could not read Block List:", error.message);
-    return [];
+    return { variants: [], nameConds: [] };
   }
+};
+
+// Mongo condition "this member is blocked" (null when nobody is blocked).
+const blockedMemberMatch = (rules) => {
+  if (!rules) return null;
+  const or = [];
+  if (rules.variants?.length) or.push({ mobile: { $in: rules.variants } });
+  if (rules.nameConds?.length) or.push(...rules.nameConds);
+  return or.length ? { $or: or } : null;
 };
 
 // A member counts as "In Guest List" when they were moved there (movedTo) OR
@@ -589,17 +610,18 @@ const getGuestListPresence = async (activeEventIds = []) => {
 const buildMemberQuery = (
   query = {},
   activeEventIds = [],
-  blockedVariants = null,
+  blockedRules = null,
   guestMobiles = null
 ) => {
   const filter = {};
   const and = [];
 
-  if (Array.isArray(blockedVariants)) {
+  if (blockedRules) {
+    const blockedMatch = blockedMemberMatch(blockedRules);
     if (query.moved === "blocked") {
-      and.push(blockedVariants.length ? { mobile: { $in: blockedVariants } } : { _id: null });
-    } else if (blockedVariants.length) {
-      and.push({ mobile: { $nin: blockedVariants } });
+      and.push(blockedMatch || { _id: null });
+    } else if (blockedMatch) {
+      and.push({ $nor: blockedMatch.$or });
     }
   }
 
@@ -690,10 +712,11 @@ const getAllMembers = async (query = {}) => {
     ? [new mongoose.Types.ObjectId(String(query.eventId))]
     : await getActiveEventIds();
   const activeSet = new Set(activeEventIds.map(String));
-  const blockedVariants = await getBlockedMobileVariants();
+  const blockedRules = await getBlockedRules();
+  const blockedMatch = blockedMemberMatch(blockedRules);
   const guestPresence = await getGuestListPresence(activeEventIds);
-  const filter = buildMemberQuery(query, activeEventIds, blockedVariants, guestPresence.mobiles);
-  const notBlocked = blockedVariants.length ? { mobile: { $nin: blockedVariants } } : {};
+  const filter = buildMemberQuery(query, activeEventIds, blockedRules, guestPresence.mobiles);
+  const notBlocked = blockedMatch ? { $nor: blockedMatch.$or } : {};
 
   const [rows, total] = await Promise.all([
     Member.find(filter)
@@ -719,9 +742,7 @@ const getAllMembers = async (query = {}) => {
     }),
     Member.countDocuments({ ...notBlocked, mobileStatus: "invalid" }),
     Member.countDocuments({ ...notBlocked, mobileStatus: "duplicate" }),
-    blockedVariants.length
-      ? Member.countDocuments({ mobile: { $in: blockedVariants } })
-      : Promise.resolve(0),
+    blockedMatch ? Member.countDocuments(blockedMatch) : Promise.resolve(0),
   ]);
   const needsFix = invalidCount + duplicateCount;
 
@@ -801,7 +822,7 @@ const resolveMembers = async ({ ids, selectAll, filters }) => {
     const activeIds = await getActiveEventIds();
     const presence = await getGuestListPresence(activeIds);
     return Member.find(
-      buildMemberQuery(filters || {}, activeIds, await getBlockedMobileVariants(), presence.mobiles)
+      buildMemberQuery(filters || {}, activeIds, await getBlockedRules(), presence.mobiles)
     );
   }
 
@@ -1308,7 +1329,7 @@ const buildExportRows = async (query = {}) => {
   const filter = buildMemberQuery(
     query,
     activeEventIds,
-    query.moved === "blocked" ? await getBlockedMobileVariants() : null,
+    query.moved === "blocked" ? await getBlockedRules() : null,
     (await getGuestListPresence(activeEventIds)).mobiles
   );
 

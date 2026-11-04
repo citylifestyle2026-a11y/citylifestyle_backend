@@ -669,14 +669,19 @@ function buildContactQuery(query) {
 const blockedCondition = async () => {
   const blocklist = require("./blocklist.service");
   const variants = await blocklist.getBlockedNumberVariants();
-  const nameRegexes = await blocklist.getBlockedNameRegexes();
-  if (!variants.length && !nameRegexes.length) return { _id: null }; // nobody is blocked -> empty result
-  // Same number OR (same full name, even with a different number).
+  const nameConds = blocklist.nameBlockedConditions(
+    await blocklist.getBlockedNameRules(),
+    "fullName",
+    "whatsappNumber"
+  );
+  if (!variants.length && !nameConds.length) return { _id: null }; // nobody is blocked -> empty result
+  // Same number OR (same full name with a different number - unless that number
+  // was unblocked one-by-one).
   const or = [];
   if (variants.length) {
     or.push({ whatsappNumber: { $in: variants } }, { spouseMobile: { $in: variants } });
   }
-  if (nameRegexes.length) or.push({ fullName: { $in: nameRegexes } });
+  or.push(...nameConds);
   return { $or: or };
 };
 
@@ -694,13 +699,17 @@ const excludeBlockedFromAll = async (filter, query) => {
 
   const blocklist = require("./blocklist.service");
   const variants = await blocklist.getBlockedNumberVariants();
-  const nameRegexes = await blocklist.getBlockedNameRegexes();
+  const nameConds = blocklist.nameBlockedConditions(
+    await blocklist.getBlockedNameRules(),
+    "fullName",
+    "whatsappNumber"
+  );
   const notBlocked = {};
   if (variants.length) {
     notBlocked.whatsappNumber = { $nin: variants };
     notBlocked.spouseMobile = { $nin: variants };
   }
-  if (nameRegexes.length) notBlocked.fullName = { $nin: nameRegexes };
+  if (nameConds.length) notBlocked.$nor = nameConds;
   if (!Object.keys(notBlocked).length) return;
   filter.$and = [...(filter.$and || []), notBlocked];
 };
@@ -723,13 +732,17 @@ const getApprovalStatusCounts = async (editionEventId = null) => {
   try {
     const blocklist = require("./blocklist.service");
     const variants = await blocklist.getBlockedNumberVariants();
-    const nameRegexes = await blocklist.getBlockedNameRegexes();
+    const nameConds = blocklist.nameBlockedConditions(
+      await blocklist.getBlockedNameRules(),
+      "fullName",
+      "whatsappNumber"
+    );
     visible = { ...match };
     if (variants.length) {
       visible.whatsappNumber = { $nin: variants };
       visible.spouseMobile = { $nin: variants };
     }
-    if (nameRegexes.length) visible.fullName = { $nin: nameRegexes };
+    if (nameConds.length) visible.$nor = nameConds;
   } catch (error) {
     console.error("Could not read Block List for counts:", error.message);
   }
