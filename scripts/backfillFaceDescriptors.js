@@ -36,6 +36,21 @@ const redoAll = process.argv.includes("--all");
   }
 
   console.log(`Done. Saved: ${ok}, no face: ${noFace}`);
+
+  // Guest List contacts that already got a pass: copy their photo onto the
+  // pass ticket so Face Scan works for them too.
+  const Contact = require("../models/contact.model");
+  const { syncContactPhotoToPass } = require("../services/contact.service");
+  const contacts = await Contact.find({
+    isDeleted: { $ne: true },
+    profileImage: { $nin: ["", null] },
+    $or: [{ passBookingId: { $ne: null } }, { passSentAt: { $ne: null } }],
+  });
+  console.log(`Guest List contacts with a pass and a photo: ${contacts.length}`);
+  for (const c of contacts) {
+    await syncContactPhotoToPass(c);
+    console.log(`${c.fullName}: pass ticket updated`);
+  }
   await mongoose.disconnect();
   process.exit(0);
 })().catch((e) => {

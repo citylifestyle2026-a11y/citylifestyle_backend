@@ -935,6 +935,58 @@ const syncPassDetailsFromContact = async (before, after) => {
   }
 };
 
+// ================= FACE SCAN: GUEST LIST PHOTO -> PASS TICKET =================
+// Face Scan reads the face fingerprint saved on a ticket. A guest who got a
+// pass from the Guest List usually has NO registration-form photo, only the
+// Contact's photo. So whenever the pass is sent, or the Contact's photo is
+// added / changed / removed, copy that photo onto the pass's first ticket
+// and make its face fingerprint. If the guest later registers with their own
+// photo, that photo replaces this one (and is never deleted from here: only
+// the URL is copied, profileImagePublicId stays empty).
+// Never throws and is meant to be run without `await` (it can take a while).
+const syncContactPhotoToPass = async (contact) => {
+  try {
+    if (!contact) return;
+    const BookingTicket = require("../models/bookingTicket.model");
+    const faceService = require("./faceRecognition.service");
+
+    const bookings = await findActivePassBookings(contact);
+    if (!bookings.length) return;
+
+    let descriptor = null;
+    if (contact.profileImage) {
+      descriptor =
+        (await faceService.getDescriptorFromStoredPhoto(contact.profileImagePublicId)) ||
+        (await faceService.getDescriptorFromUrl(contact.profileImage));
+    }
+
+    for (const booking of bookings) {
+      const ticket = await BookingTicket.findOne({
+        bookingId: booking._id,
+        status: { $in: ["Active", "Used"] },
+      })
+        .sort({ _id: 1 })
+        .select("_id attendee.profileImagePublicId");
+
+      if (!ticket) continue;
+      // The guest's own registration photo always wins.
+      if (ticket.attendee?.profileImagePublicId) continue;
+
+      await BookingTicket.updateOne(
+        { _id: ticket._id },
+        {
+          $set: {
+            "attendee.profileImage": contact.profileImage || "",
+            "attendee.faceDescriptor": descriptor || [],
+          },
+        }
+      );
+    }
+  } catch (error) {
+    console.error("[face] Could not copy contact photo to pass:", error.message);
+  }
+};
+
 // Invalidates the contact's pass(es) so the QR can no longer be used, gives
 // the seats back to the ticket stock and clears the "Pass sent" mark.
 // A pass whose guests already entered (a ticket is "Used") is left alone.
@@ -1974,6 +2026,16 @@ const sendPassToContacts = async (
         }
       );
 
+      // Face Scan: use the Contact's photo for this pass (runs in background).
+      syncContactPhotoToPass({
+        profileImage: contact.profileImage,
+        profileImagePublicId: contact.profileImagePublicId,
+        passBookingId: booking._id,
+        passSentAt: new Date(),
+        passEventId: event._id,
+        whatsappNumber: contact.whatsappNumber,
+      });
+
       results.push({
         ...base,
         status: "sent",
@@ -2457,6 +2519,11 @@ const updateContact = async (id, data, files = {}) => {
   // Pass already sent? Push the edited name / company / mobile into it.
   await syncPassDetailsFromContact(contact, updatedContact);
 
+  // Photo added / changed / removed in the Guest List -> keep Face Scan in sync.
+  if (updatedContact && (images.profile || isTrue(data.removeProfileImage))) {
+    syncContactPhotoToPass(updatedContact);
+  }
+
   // Event History keeps the spouse: when the spouse's name is about to
   // disappear from the Contact (switched to Single, or spouse cleared), the
   // spouse's history rows get a copy of who the person was.
@@ -2846,6 +2913,7 @@ const bulkDeleteContacts = async ({ ids }, adminId) => {
 };
 
 module.exports = {
+  syncContactPhotoToPass,
   updateHamperOfContacts,
   cancelPassesOfContacts,
   bulkDeleteContacts,

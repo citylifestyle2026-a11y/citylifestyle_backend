@@ -523,8 +523,8 @@ const toFaceDto = (ticket) => ({
   status: ticket.status,
   scannedAt: ticket.scannedAt || null,
   attendee: {
-    name: ticket.attendee?.name || "",
-    mobileNumber: ticket.attendee?.mobileNumber || "",
+    name: ticket.attendee?.name || ticket.bookingId?.name || "",
+    mobileNumber: ticket.attendee?.mobileNumber || ticket.bookingId?.mobileNumber || "",
     profileImage: ticket.attendee?.profileImage || "",
   },
   booking: ticket.bookingId
@@ -555,12 +555,13 @@ const matchFace = async ({ descriptor }) => {
 
   const candidates = await BookingTicket.find({
     eventId: { $in: events.map((e) => e._id) },
-    isRegistered: true,
+    // No isRegistered check: a Guest List pass whose Contact photo was copied
+    // onto the ticket (see contact.service syncContactPhotoToPass) counts too.
     status: { $in: ["Active", "Used"] },
     "attendee.faceDescriptor.0": { $exists: true },
   })
     .select("+attendee.faceDescriptor attendee.name attendee.mobileNumber attendee.profileImage ticketNumber status scannedAt eventId ticketTypeId bookingId")
-    .populate({ path: "bookingId", select: "name quantity invitationId isDeleted" })
+    .populate({ path: "bookingId", select: "name mobileNumber quantity invitationId isDeleted" })
     .populate({ path: "eventId", select: "title" })
     .populate({ path: "ticketTypeId", select: "ticketName" })
     .lean();
@@ -571,7 +572,6 @@ const matchFace = async ({ descriptor }) => {
     // Tell the app WHY nothing could be matched (shown to staff / developer).
     const base = {
       eventId: { $in: events.map((e) => e._id) },
-      isRegistered: true,
       status: { $in: ["Active", "Used"] },
     };
     const [registered, withPhoto, withDescriptor, emptyDescriptor] = await Promise.all([
@@ -583,7 +583,7 @@ const matchFace = async ({ descriptor }) => {
     const engine = await faceService.getEngineStatus();
     const debug = {
       activeEvents: events.length,
-      registeredTickets: registered,
+      tickets: registered,
       withPhoto,
       withFaceData: withDescriptor,
       photoButNoFaceFound: emptyDescriptor,
@@ -636,7 +636,7 @@ const matchFace = async ({ descriptor }) => {
 // Staff confirmed the face match -> mark THAT ticket as Used.
 const faceCheckInQr = async ({ ticketId, scannedBy }) => {
   const ticket = await BookingTicket.findById(ticketId)
-    .populate({ path: "bookingId", select: "name quantity invitationId isDeleted entryMode" })
+    .populate({ path: "bookingId", select: "name mobileNumber quantity invitationId isDeleted entryMode" })
     .populate({ path: "eventId", select: "title isActive endDateTime" })
     .populate({ path: "ticketTypeId", select: "ticketName" });
 
