@@ -568,7 +568,30 @@ const matchFace = async ({ descriptor }) => {
   const enrolled = candidates.filter((t) => t.bookingId && !t.bookingId.isDeleted);
 
   if (enrolled.length === 0) {
-    return { matched: false, reason: "no_faces_enrolled" };
+    // Tell the app WHY nothing could be matched (shown to staff / developer).
+    const base = {
+      eventId: { $in: events.map((e) => e._id) },
+      isRegistered: true,
+      status: { $in: ["Active", "Used"] },
+    };
+    const [registered, withPhoto, withDescriptor, emptyDescriptor] = await Promise.all([
+      BookingTicket.countDocuments(base),
+      BookingTicket.countDocuments({ ...base, "attendee.profileImagePublicId": { $nin: ["", null] } }),
+      BookingTicket.countDocuments({ ...base, "attendee.faceDescriptor.0": { $exists: true } }),
+      BookingTicket.countDocuments({ ...base, "attendee.faceDescriptor": { $size: 0 } }),
+    ]);
+    const engine = await faceService.getEngineStatus();
+    const debug = {
+      activeEvents: events.length,
+      registeredTickets: registered,
+      withPhoto,
+      withFaceData: withDescriptor,
+      photoButNoFaceFound: emptyDescriptor,
+      candidatesAfterBookingFilter: candidates.length,
+      faceEngine: engine.ready ? "ok" : `disabled: ${engine.reason}`,
+    };
+    console.log("[face-match] no_faces_enrolled", JSON.stringify(debug));
+    return { matched: false, reason: "no_faces_enrolled", debug };
   }
 
   // Rank everybody by distance. Glasses / masks / a different hairstyle push

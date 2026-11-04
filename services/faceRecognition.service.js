@@ -162,4 +162,5 @@ module.exports = {
   isValidDescriptor,
   distance,
   getStatus: () => ({ disabledReason }),
+  getEngineStatus: async () => ({ ready: await init(), reason: disabledReason }),
 };
