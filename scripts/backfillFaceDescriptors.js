@@ -20,13 +20,15 @@ const redoAll = process.argv.includes("--all");
   };
   if (!redoAll) filter["attendee.faceDescriptor"] = null; // never processed
 
-  const tickets = await BookingTicket.find(filter).select("_id attendee.profileImagePublicId ticketNumber");
+  const tickets = await BookingTicket.find(filter).select("_id attendee.profileImage attendee.profileImagePublicId ticketNumber");
   console.log(`Photos to process: ${tickets.length}`);
 
   let ok = 0;
   let noFace = 0;
   for (const t of tickets) {
-    const d = await faceService.getDescriptorFromStoredPhoto(t.attendee.profileImagePublicId);
+    const d =
+      (await faceService.getDescriptorFromStoredPhoto(t.attendee.profileImagePublicId)) ||
+      (await faceService.getDescriptorFromUrl(t.attendee.profileImage));
     await BookingTicket.updateOne({ _id: t._id }, { $set: { "attendee.faceDescriptor": d || [] } });
     if (d) ok += 1;
     else noFace += 1;

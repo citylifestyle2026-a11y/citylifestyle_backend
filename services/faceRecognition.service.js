@@ -117,6 +117,27 @@ const getDescriptorFromStoredPhoto = async (publicId) => {
   }
 };
 
+// Fallback when the file is not on this machine's disk (e.g. running the
+// backfill from a PC, or the host's disk was wiped): download the photo from
+// its public URL instead. Never throws.
+const getDescriptorFromUrl = async (url) => {
+  try {
+    if (!url || typeof fetch !== "function") return null;
+    const candidates = [url, url.replace(/^(https?:\/\/[^/]+)\/uploads\//, "$1/api/uploads/")];
+    for (const u of [...new Set(candidates)]) {
+      const res = await fetch(u);
+      if (!res.ok) continue;
+      const buffer = Buffer.from(await res.arrayBuffer());
+      const d = await getDescriptorFromBuffer(buffer);
+      if (d) return d;
+    }
+    return null;
+  } catch (error) {
+    console.error(`[face] Photo download failed (${url}):`, error.message);
+    return null;
+  }
+};
+
 const isValidDescriptor = (value) =>
   Array.isArray(value) &&
   value.length === DESCRIPTOR_LENGTH &&
@@ -137,6 +158,7 @@ module.exports = {
   DESCRIPTOR_LENGTH,
   getDescriptorFromBuffer,
   getDescriptorFromStoredPhoto,
+  getDescriptorFromUrl,
   isValidDescriptor,
   distance,
   getStatus: () => ({ disabledReason }),
