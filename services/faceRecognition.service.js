@@ -20,7 +20,9 @@ const { UPLOAD_ROOT } = require("../config/uploadPaths");
 // Distance below which two faces count as the same person. Lower = stricter.
 // 0.6 is the library default; 0.5 is a safer gate-entry value. The scanner
 // app also asks the staff to confirm the match, so this is a second safety.
-const MATCH_THRESHOLD = Number(process.env.FACE_MATCH_THRESHOLD) || 0.5;
+const MATCH_THRESHOLD = Number(process.env.FACE_MATCH_THRESHOLD) || 0.55;
+// Upper limit for "please compare carefully" candidates (glasses / mask).
+const LOOSE_THRESHOLD = Number(process.env.FACE_LOOSE_THRESHOLD) || 0.68;
 const DESCRIPTOR_LENGTH = 128;
 
 let faceapi = null;
@@ -131,6 +133,7 @@ const distance = (a, b) => {
 
 module.exports = {
   MATCH_THRESHOLD,
+  LOOSE_THRESHOLD,
   DESCRIPTOR_LENGTH,
   getDescriptorFromBuffer,
   getDescriptorFromStoredPhoto,

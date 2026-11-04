@@ -559,7 +559,7 @@ const matchFace = async ({ descriptor }) => {
     status: { $in: ["Active", "Used"] },
     "attendee.faceDescriptor.0": { $exists: true },
   })
-    .select("+attendee.faceDescriptor ticketNumber status scannedAt attendee eventId ticketTypeId bookingId")
+    .select("+attendee.faceDescriptor attendee.name attendee.mobileNumber attendee.profileImage ticketNumber status scannedAt eventId ticketTypeId bookingId")
     .populate({ path: "bookingId", select: "name quantity invitationId isDeleted" })
     .populate({ path: "eventId", select: "title" })
     .populate({ path: "ticketTypeId", select: "ticketName" })
@@ -571,27 +571,42 @@ const matchFace = async ({ descriptor }) => {
     return { matched: false, reason: "no_faces_enrolled" };
   }
 
-  let best = null;
-  let bestDistance = Infinity;
-  for (const ticket of enrolled) {
-    const d = faceService.distance(descriptor, ticket.attendee.faceDescriptor);
-    if (d < bestDistance) {
-      bestDistance = d;
-      best = ticket;
-    }
-  }
+  // Rank everybody by distance. Glasses / masks / a different hairstyle push
+  // the distance of the SAME person up, so besides the strict match we also
+  // return a short list of close candidates; the staff confirm by comparing
+  // the photos, so a slightly looser limit is safe.
+  const ranked = enrolled
+    .map((ticket) => ({
+      ticket,
+      distance: faceService.distance(descriptor, ticket.attendee.faceDescriptor),
+    }))
+    .sort((a, b) => a.distance - b.distance);
 
-  if (!best || bestDistance > faceService.MATCH_THRESHOLD) {
+  const best = ranked[0];
+  if (!best || best.distance > faceService.LOOSE_THRESHOLD) {
     return { matched: false, reason: "no_match" };
   }
 
+  const levelOf = (d) =>
+    d <= 0.4 ? "high" : d <= faceService.MATCH_THRESHOLD ? "good" : "check";
+
+  const alternatives = ranked
+    .slice(1, 4)
+    .filter((r) => r.distance <= faceService.LOOSE_THRESHOLD)
+    .map((r) => ({
+      distance: Number(r.distance.toFixed(3)),
+      level: levelOf(r.distance),
+      alreadyEntered: r.ticket.status === "Used",
+      ...toFaceDto(r.ticket),
+    }));
+
   return {
     matched: true,
-    distance: Number(bestDistance.toFixed(3)),
-    // Easy label for the staff screen.
-    level: bestDistance <= 0.35 ? "high" : bestDistance <= 0.45 ? "good" : "check",
-    alreadyEntered: best.status === "Used",
-    ...toFaceDto(best),
+    distance: Number(best.distance.toFixed(3)),
+    level: levelOf(best.distance),
+    alreadyEntered: best.ticket.status === "Used",
+    ...toFaceDto(best.ticket),
+    alternatives,
   };
 };
 
