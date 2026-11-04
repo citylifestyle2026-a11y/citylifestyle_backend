@@ -492,17 +492,84 @@ const getHistoryStats = async (query = {}) => {
   let notAttended = 0;
   // Qty-wise PERSON counts - shown below the cards.
   const persons = { total: 0, attended: 0, notAttended: 0 };
+  // The same split per edition, so an edition can be swapped for its real
+  // ticket numbers below.
+  const personsByEvent = new Map();
   rows.forEach((row) => {
     const qty = qtyOf(row);
+    const key = String(row.eventId);
+    if (!personsByEvent.has(key)) {
+      personsByEvent.set(key, {
+        total: 0, attended: 0, notAttended: 0, // persons (qty)
+        entries: 0, entriesAttended: 0, entriesNotAttended: 0, // entries
+      });
+    }
+    const ev = personsByEvent.get(key);
+    ev.total += qty;
+    ev.entries += 1;
     persons.total += qty;
     if (row.status === "Attended") {
       attended += 1;
       persons.attended += qty;
+      ev.attended += qty;
+      ev.entriesAttended += 1;
     } else if (row.status === "Not Attended") {
       notAttended += 1;
       persons.notAttended += qty;
+      ev.notAttended += qty;
+      ev.entriesNotAttended += 1;
     }
   });
+
+  // Person Wise Bookings = the Dashboard numbers. With no search / category /
+  // reference / status filter the view is a whole edition, so for every
+  // edition that has bookings the persons are its real TICKETS - exactly what
+  // the Dashboard shows: Total = sum of booking quantities, Attended = scanned
+  // tickets (Checked In), Not Attended = the rest. An edition without
+  // bookings (an old event added by hand) keeps the contact-based persons.
+  const wholeEditions = !query.search && !query.category && !query.reference && !query.status;
+  if (wholeEditions) {
+    try {
+      const dashboardService = require("./dashboard.service");
+      const eventIds = [...personsByEvent.keys()];
+      const totals = { total: 0, attended: 0, notAttended: 0 };
+      // Total Bookings cards: the number of BOOKINGS (Dashboard "quantity wise"
+      // bookings, e.g. 273+616+2+6+1+1 = 899); Attended = bookings with a scanned ticket.
+      const bookingTotals = { total: 0, attended: 0, notAttended: 0 };
+      for (const id of eventIds) {
+        const oid = new mongoose.Types.ObjectId(id);
+        const counts = await dashboardService.getDashboardCounts(oid);
+        const ev = personsByEvent.get(id);
+        if (counts.totalBookings > 0) {
+          const attendedQty = Math.min(counts.scannedEntries, counts.totalBookings);
+          totals.total += counts.totalBookings;
+          totals.attended += attendedQty;
+          totals.notAttended += counts.totalBookings - attendedQty;
+
+          const bk = await dashboardService.getBookingAttendanceCounts(oid);
+          const attendedBookings = Math.min(bk.attendedBookings, bk.bookings);
+          bookingTotals.total += bk.bookings;
+          bookingTotals.attended += attendedBookings;
+          bookingTotals.notAttended += bk.bookings - attendedBookings;
+        } else {
+          totals.total += ev.total;
+          totals.attended += ev.attended;
+          totals.notAttended += ev.notAttended;
+          bookingTotals.total += ev.entries;
+          bookingTotals.attended += ev.entriesAttended;
+          bookingTotals.notAttended += ev.entriesNotAttended;
+        }
+      }
+      persons.total = totals.total;
+      persons.attended = totals.attended;
+      persons.notAttended = totals.notAttended;
+      total = bookingTotals.total;
+      attended = bookingTotals.attended;
+      notAttended = bookingTotals.notAttended;
+    } catch (error) {
+      console.error("Event History: could not read Dashboard ticket numbers:", error.message);
+    }
+  }
 
   return {
     total,
@@ -610,6 +677,7 @@ const exportEventHistory = async (query, res) => {
   styleHeader(sheet);
 
   const perEdition = new Map();
+  const editionEventIds = new Map(); // edition label -> its event _id
 
   entries.forEach((entry) => {
     const live = entry.contactId || {};
@@ -653,6 +721,9 @@ const exportEventHistory = async (query, res) => {
       statusCell.font = { bold: true, color: { argb: "FFB42323" } };
     }
 
+    const entryEventId = entry.eventId?._id || entry.eventId;
+    if (entryEventId && !editionEventIds.has(edition)) editionEventIds.set(edition, String(entryEventId));
+
     const counts = perEdition.get(edition) || { attended: 0, notAttended: 0, other: 0 };
     if (status === "Attended") counts.attended += 1;
     else if (status === "Not Attended") counts.notAttended += 1;
@@ -667,38 +738,67 @@ const exportEventHistory = async (query, res) => {
 
   // ---------- sheet 2: counts per edition ----------
   const summary = workbook.addWorksheet("Summary");
+  // Same numbers as the page cards (and the Dashboard): one getHistoryStats()
+  // call per edition, with the page's own search / category / reference filters.
   summary.columns = [
     { header: "Edition", key: "edition", width: 24 },
-    { header: "Attended", key: "attended", width: 14 },
-    { header: "Not Attended", key: "notAttended", width: 16 },
-    { header: "Other", key: "other", width: 12 },
-    { header: "Total", key: "total", width: 12 },
+    { header: "Total Bookings", key: "bookings", width: 16 },
+    { header: "Attended", key: "attended", width: 12 },
+    { header: "Not Attended", key: "notAttended", width: 15 },
+    { header: "Other", key: "other", width: 10 },
+    { header: "Total Persons (Qty)", key: "persons", width: 20 },
+    { header: "Persons Attended", key: "personsAttended", width: 18 },
+    { header: "Persons Not Attended", key: "personsNotAttended", width: 22 },
   ];
   styleHeader(summary);
 
-  const totals = { attended: 0, notAttended: 0, other: 0 };
-  [...perEdition.entries()]
-    .sort(([a], [b]) => String(a).localeCompare(String(b), undefined, { numeric: true }))
-    .forEach(([edition, c]) => {
-      summary.addRow({
-        edition,
-        attended: c.attended,
-        notAttended: c.notAttended,
-        other: c.other,
-        total: c.attended + c.notAttended + c.other,
-      });
-      totals.attended += c.attended;
-      totals.notAttended += c.notAttended;
-      totals.other += c.other;
+  const totals = {
+    bookings: 0, attended: 0, notAttended: 0, other: 0,
+    persons: 0, personsAttended: 0, personsNotAttended: 0,
+  };
+  const editionRows = [...perEdition.keys()].sort((a, b) =>
+    String(a).localeCompare(String(b), undefined, { numeric: true })
+  );
+  for (const edition of editionRows) {
+    const c = perEdition.get(edition);
+    let row = {
+      bookings: c.attended + c.notAttended + c.other,
+      attended: c.attended,
+      notAttended: c.notAttended,
+      other: c.other,
+      persons: c.attended + c.notAttended + c.other,
+      personsAttended: c.attended,
+      personsNotAttended: c.notAttended,
+    };
+    const eid = editionEventIds.get(edition);
+    if (eid && mongoose.Types.ObjectId.isValid(eid)) {
+      try {
+        const s = await getHistoryStats({
+          eventId: eid,
+          search: query.search,
+          category: query.category,
+          reference: query.reference,
+        });
+        row = {
+          bookings: s.total,
+          attended: s.attended,
+          notAttended: s.notAttended,
+          other: s.other,
+          persons: s.persons.total,
+          personsAttended: s.persons.attended,
+          personsNotAttended: s.persons.notAttended,
+        };
+      } catch (error) {
+        console.error("Event History export: edition numbers fell back to entries:", error.message);
+      }
+    }
+    summary.addRow({ edition, ...row });
+    Object.keys(totals).forEach((k) => {
+      totals[k] += row[k];
     });
+  }
 
-  const totalRow = summary.addRow({
-    edition: "Total",
-    attended: totals.attended,
-    notAttended: totals.notAttended,
-    other: totals.other,
-    total: totals.attended + totals.notAttended + totals.other,
-  });
+  const totalRow = summary.addRow({ edition: "Total", ...totals });
   totalRow.font = { bold: true };
 
   // ---------- download ----------

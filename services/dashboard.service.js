@@ -272,6 +272,27 @@ const getQuantityWiseBookings = async (eventId) => {
     }));
 };
 
+// Number of BOOKINGS (not tickets) of an event, and how many of them had at
+// least one ticket scanned. Same guest-only rules as the quantity-wise numbers,
+// so `bookings` always equals the sum of getQuantityWiseBookings().bookings
+// (e.g. 273 + 616 + 2 + 6 + 1 + 1 = 899). Used by Event History.
+const getBookingAttendanceCounts = async (eventId) => {
+    const bookingIds = await Booking.distinct("_id", {
+        eventId,
+        ...GUEST_ONLY,
+        isDeleted: false,
+        bookingStatus: { $ne: "Cancelled" },
+    });
+    if (bookingIds.length === 0) return { bookings: 0, attendedBookings: 0 };
+
+    const attendedIds = await BookingTicket.distinct("bookingId", {
+        eventId,
+        status: "Used",
+        bookingId: { $in: bookingIds },
+    });
+    return { bookings: bookingIds.length, attendedBookings: attendedIds.length };
+};
+
 // Total Booking Details (Day Wise)
 const getTotalBookingDetails = async (eventId) => {
     const bookings = await Booking.find({
@@ -576,4 +597,6 @@ const getCrewCounts = async (eventId) => {
 };
 module.exports = {
     getDashboardSummary,
+    getDashboardCounts,
+    getBookingAttendanceCounts,
 };
