@@ -935,6 +935,25 @@ const syncPassDetailsFromContact = async (before, after) => {
   }
 };
 
+// ================= KEEP THE PASS QUANTITY IN SYNC WITH THE CONTACT =================
+// Guest List edit changed the number of persons -> the pass (single-QR
+// booking) gets the same number of guests, also after some guests already
+// entered (booking.service updateBooking guards the entered guests).
+// Never throws: the contact edit itself must not fail because of the pass.
+const syncPassQuantityFromContact = async (contact, persons) => {
+  try {
+    const bookingService = require("./booking.service");
+    const guests = Math.min(Math.max(Number(persons) || 1, 1), MAX_PASS_GUESTS);
+    const bookings = await findActivePassBookings(contact);
+    for (const booking of bookings) {
+      if (booking.entryMode !== "single_qr" || booking.quantity === guests) continue;
+      await bookingService.updateBooking(booking._id, { quantity: guests });
+    }
+  } catch (error) {
+    console.error("Could not sync pass quantity from contact:", error.message);
+  }
+};
+
 // ================= FACE SCAN: GUEST LIST PHOTO -> PASS TICKET =================
 // Face Scan reads the face fingerprint saved on a ticket. A guest who got a
 // pass from the Guest List usually has NO registration-form photo, only the
@@ -2518,6 +2537,9 @@ const updateContact = async (id, data, files = {}) => {
 
   // Pass already sent? Push the edited name / company / mobile into it.
   await syncPassDetailsFromContact(contact, updatedContact);
+  if (updatedContact && newPersons !== oldPersons) {
+    await syncPassQuantityFromContact(updatedContact, newPersons);
+  }
 
   // Photo added / changed / removed in the Guest List -> keep Face Scan in sync.
   if (updatedContact && (images.profile || isTrue(data.removeProfileImage))) {

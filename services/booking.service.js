@@ -1636,12 +1636,11 @@ const updateBooking = async (bookingId, data = {}) => {
       .sort({ createdAt: 1, _id: 1 })
       .session(session);
 
-    if (tickets.some((t) => t.status === "Used")) {
-      throw new AppError(
-        "This booking has already been checked in at the gate, so it can no longer be edited.",
-        400
-      );
-    }
+    // Guests may already have entered (a ticket is "Used"). The details
+    // (name / mobile / email / company / remark) and the number of guests can
+    // still be edited; only entered guests can never be taken away and the
+    // ticket type cannot be changed once somebody has entered.
+    const usedCount = tickets.filter((t) => t.status === "Used").length;
 
     const isSingleQr = booking.entryMode === "single_qr";
 
@@ -1682,6 +1681,20 @@ const updateBooking = async (bookingId, data = {}) => {
 
     const typeChanged = String(newTicketTypeId) !== String(booking.ticketTypeId);
     const quantityChanged = newQuantity !== booking.quantity;
+
+    if (usedCount > 0 && typeChanged) {
+      throw new AppError(
+        "Some guests of this booking have already entered, so the ticket type can no longer be changed.",
+        400
+      );
+    }
+    if (usedCount > 0 && quantityChanged && newQuantity < usedCount) {
+      throw new AppError(
+        `${usedCount} guest${usedCount === 1 ? " has" : "s have"} already entered, so the number of guests cannot be less than ${usedCount}.`,
+        400
+      );
+    }
+
 
     if ((typeChanged || quantityChanged) && !isSingleQr) {
       throw new AppError(
@@ -1816,8 +1829,18 @@ const updateBooking = async (bookingId, data = {}) => {
 
         await BookingTicket.insertMany(extra, { session });
       } else if (newQuantity < live.length) {
-        // never touch the first ticket: its QR is the one on the WhatsApp pass
-        const toCancel = live.slice(newQuantity).map((t) => t._id);
+        // never touch the first ticket (its QR is the one on the WhatsApp pass)
+        // and never cancel a ticket that already entered: only the LAST
+        // not-yet-used tickets are cancelled.
+        const removable = live.slice(1).filter((t) => t.status === "Active");
+        const removeCount = live.length - newQuantity;
+        if (removable.length < removeCount) {
+          throw new AppError(
+            "These guests have already entered, so the number of guests cannot be reduced that much.",
+            400
+          );
+        }
+        const toCancel = removable.slice(removable.length - removeCount).map((t) => t._id);
         await BookingTicket.updateMany(
           { _id: { $in: toCancel } },
           { $set: { status: "Cancelled" } },
