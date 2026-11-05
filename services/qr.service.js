@@ -540,6 +540,8 @@ const toFaceDto = (ticket) => ({
   ticketType: ticket.ticketTypeId ? { ticketName: ticket.ticketTypeId.ticketName } : null,
 });
 
+const AUTO_ENTRY_MAX_DISTANCE = 0.6;
+
 const matchFace = async ({ descriptor }) => {
   if (!faceService.isValidDescriptor(descriptor)) {
     throw new AppError("Invalid face data. Please scan the face again.", 400);
@@ -563,7 +565,7 @@ const matchFace = async ({ descriptor }) => {
     "attendee.faceDescriptor.0": { $exists: true },
   })
     .select("+attendee.faceDescriptor attendee.name attendee.mobileNumber attendee.profileImage ticketNumber status scannedAt eventId ticketTypeId bookingId")
-    .populate({ path: "bookingId", select: "name mobileNumber quantity invitationId isDeleted" })
+    .populate({ path: "bookingId", select: "name mobileNumber quantity invitationId isDeleted entryMode" })
     .populate({ path: "eventId", select: "title startDateTime" })
     .populate({ path: "ticketTypeId", select: "ticketName" })
     .lean();
@@ -644,11 +646,38 @@ const matchFace = async ({ descriptor }) => {
       ...toFaceDto(r.ticket),
     }));
 
+  // Face Scan lets the person in by itself (no staff button), so it only does
+  // so when the match is clear: very close (<= 0.40), or close enough
+  // (<= 0.60, the usual face-api limit) AND clearly better than the next
+  // DIFFERENT person (so look-alikes never get in on a coin flip). The same
+  // face scanned in slightly different light still passes.
+  // Group pass (one QR / one face for several guests): the pass is "already
+  // entered" only when NO guest is left on it. The face's own ticket may be
+  // Used (partly entered by QR earlier) while other guests still wait.
+  let alreadyEntered = best.ticket.status === "Used";
+  let guestsLeft = 0;
+  if (best.ticket.bookingId?.entryMode === "single_qr") {
+    guestsLeft = await BookingTicket.countDocuments({
+      bookingId: best.ticket.bookingId._id,
+      status: "Active",
+    });
+    alreadyEntered = guestsLeft === 0;
+  } else if (!alreadyEntered) {
+    guestsLeft = 1;
+  }
+
+  const nextOther = otherPeople[0];
+  const margin = nextOther ? nextOther.distance - best.distance : Infinity;
+  const autoEntry =
+    best.distance <= 0.4 || (best.distance <= AUTO_ENTRY_MAX_DISTANCE && margin >= 0.05);
+
   return {
     matched: true,
+    autoEntry,
     distance: Number(best.distance.toFixed(3)),
     level: levelOf(best.distance),
-    alreadyEntered: best.ticket.status === "Used",
+    alreadyEntered,
+    guestsLeft,
     ...toFaceDto(best.ticket),
     alternatives,
   };
@@ -665,38 +694,69 @@ const faceCheckInQr = async ({ ticketId, scannedBy }) => {
   if (!ticket.bookingId) throw new AppError("Booking not found.", 404);
   if (ticket.bookingId.isDeleted) throw new AppError("This booking has been cancelled.", 400);
   if (ticket.status === "Cancelled") throw new AppError("This ticket has been cancelled.", 400);
-  if (ticket.status === "Used") throw new AppError("This ticket has already been checked in.", 400);
+
+  const isGroupEntry = ticket.bookingId.entryMode === "single_qr";
+
+  // Group pass: it is valid while ANY guest is still "Active" (the face's own
+  // ticket may already be "Used"). Single ticket: it must not be Used.
+  let activeCount = 1;
+  if (isGroupEntry) {
+    activeCount = await BookingTicket.countDocuments({
+      bookingId: ticket.bookingId._id,
+      status: "Active",
+    });
+    if (activeCount === 0) throw new AppError("This ticket has already been checked in.", 400);
+  } else if (ticket.status === "Used") {
+    throw new AppError("This ticket has already been checked in.", 400);
+  }
+
   if (!ticket.eventId) throw new AppError("Event not found.", 404);
   if (!QR_TEST_MODE && !ticket.eventId.isActive) throw new AppError("This event is inactive.", 400);
   if (!QR_TEST_MODE && ticket.eventId.endDateTime && new Date() > new Date(ticket.eventId.endDateTime)) {
     throw new AppError("This event has ended.", 400);
   }
 
-  // Atomic: two phones can never let the same person in twice.
   const scannedAt = new Date();
-  const marked = await BookingTicket.findOneAndUpdate(
-    { _id: ticket._id, status: "Active" },
-    { $set: { status: "Used", scannedAt, scannedBy } }
-  );
-  if (!marked) throw new AppError("This ticket has already been checked in.", 400);
+  let guests = 1;
+
+  if (isGroupEntry) {
+    // Face Scan cannot ask "how many guests", so - like a QR scan with no
+    // guest count - ONE face scan lets in EVERY guest still waiting on this
+    // pass. One atomic update per guest, so two phones scanning at the same
+    // moment can never admit more people than the pass has.
+    let done = 0;
+    for (let i = 0; i < activeCount; i += 1) {
+      const marked = await BookingTicket.findOneAndUpdate(
+        { bookingId: ticket.bookingId._id, status: "Active" },
+        { $set: { status: "Used", scannedAt, scannedBy } },
+        { sort: { createdAt: 1, _id: 1 } }
+      );
+      if (!marked) break;
+      done += 1;
+    }
+    if (done === 0) throw new AppError("This ticket has already been checked in.", 400);
+    guests = done;
+  } else {
+    // Atomic: two phones can never let the same person in twice.
+    const marked = await BookingTicket.findOneAndUpdate(
+      { _id: ticket._id, status: "Active" },
+      { $set: { status: "Used", scannedAt, scannedBy } }
+    );
+    if (!marked) throw new AppError("This ticket has already been checked in.", 400);
+  }
 
   ticket.status = "Used";
   ticket.scannedAt = scannedAt;
 
-  const isGroupEntry = ticket.bookingId.entryMode === "single_qr";
-  const remaining = isGroupEntry
-    ? await BookingTicket.countDocuments({ bookingId: ticket.bookingId._id, status: "Active" })
-    : 0;
-
   console.log(
-    `[face-check-in] ticket ${ticket.ticketNumber} (${ticket.attendee?.name || "-"}) by ${scannedBy}`
+    `[face-check-in] ticket ${ticket.ticketNumber} (${ticket.attendee?.name || "-"}) guests=${guests} by ${scannedBy}`
   );
 
   return {
     ...toFaceDto(ticket),
     isGroupEntry,
-    remaining,
-    guests: 1,
+    remaining: 0,
+    guests,
   };
 };
 
