@@ -63,7 +63,7 @@ const resolveTicketNumber = async (qrValue) => {
  // verfiy qr
 const verifyQr = async ({ qrToken }) => {
   // Run Registration QR (5 KM / 10 KM) - not a booking ticket.
-  if (runRegistrationService.isRunQr(qrToken)) {
+  if (await runRegistrationService.isRunQr(qrToken)) {
     return runRegistrationService.verifyRunQr(qrToken);
   }
 
@@ -208,7 +208,7 @@ const verifyQr = async ({ qrToken }) => {
 //    the rest stay "Active", so the SAME QR works again later for them.
 const checkInQr = async ({ qrToken, scannedBy, guests, askGuests }) => {
   // Run Registration QR (5 KM / 10 KM) - not a booking ticket.
-  if (runRegistrationService.isRunQr(qrToken)) {
+  if (await runRegistrationService.isRunQr(qrToken)) {
     return runRegistrationService.checkInRunQr(qrToken, scannedBy);
   }
 
@@ -450,7 +450,7 @@ const UNDO_WINDOW_MS =
   (Number(process.env.QR_UNDO_WINDOW_MINUTES) || 15) * 60 * 1000;
 
 const undoCheckInQr = async ({ qrToken, guests }) => {
-  if (runRegistrationService.isRunQr(qrToken)) {
+  if (await runRegistrationService.isRunQr(qrToken)) {
     return runRegistrationService.undoRunCheckIn(qrToken);
   }
 

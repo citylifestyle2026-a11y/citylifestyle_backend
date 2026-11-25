@@ -17,6 +17,7 @@ const mongoose = require("mongoose");
 const RunRegistration = require("../models/runRegistration.model");
 const Event = require("../models/event.model");
 const Counter = require("../models/counters.model");
+const Booking = require("../models/booking.model");
 
 const AppError = require("../utils/AppError");
 const generateQrCode = require("../utils/generateQrCode");
@@ -25,13 +26,21 @@ const deleteLocalFile = require("../utils/deleteLocalFile");
 const { normalizeMobileNumber, MOBILE_ERROR_MESSAGE } = require("../utils/normalizeMobileNumber");
 const { getDefaultEvent, resolveEventForNewRecord } = require("../utils/defaultEvent");
 const whatsappService = require("./whatsapp.service");
-const { formatEventDate, formatEventTime, buildVenueLocationUrl } = require("../utils/buildInvitationBodyParams");
+const {
+  formatEventDate,
+  formatEventTime,
+  buildVenueLocationUrl,
+  buildInvitationUrl,
+} = require("../utils/buildInvitationBodyParams");
 
 const DISTANCES = [5, 10];
 const EMAIL_RX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const QR_PREFIX = "RUN-";
-const QR_REGEX = /^RUN-[A-Z0-9]{8}$/i;
-const QR_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0 / O / 1 / I
+// The QR of a run person is an 8-digit Invitation ID - the SAME kind of ID a
+// booking pass has, so the pass page (/ticket?qr=<id>), its QR and the scanner
+// all work like they do for a booking. (Old test entries used "RUN-XXXXXXXX";
+// those still scan.)
+const LEGACY_QR_REGEX = /^RUN-[A-Z0-9]{8}$/i;
+const EIGHT_DIGITS = /^\d{8}$/;
 
 /* =========================================================
    small helpers
@@ -46,18 +55,32 @@ const toObjectId = (value) =>
 
 const randomToken = () => crypto.randomBytes(24).toString("base64url");
 
-const randomQrValue = () => {
-  const bytes = crypto.randomBytes(8);
-  let out = "";
-  for (let i = 0; i < 8; i += 1) out += QR_ALPHABET[bytes[i] % QR_ALPHABET.length];
-  return `${QR_PREFIX}${out}`;
+// Unique 8-digit Invitation ID, checked against bookings AND run people so
+// the scanner / pass page can never mix the two up.
+const generateRunInvitationId = async () => {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const candidate = String(crypto.randomInt(10000000, 100000000));
+    const [run, booking] = await Promise.all([
+      RunRegistration.exists({ qrValue: candidate }),
+      Booking.exists({ invitationId: candidate }),
+    ]);
+    if (!run && !booking) return candidate;
+  }
+  throw new AppError("Could not generate a unique invitation ID. Please retry.", 500);
 };
 
 // notRegistered | notScanned (registered, not yet scanned) | scanned
 const stateOf = (item) =>
   item.status !== "registered" ? "notRegistered" : item.scannedAt ? "scanned" : "notScanned";
 
-const isRunQr = (value) => QR_REGEX.test(String(value || "").trim());
+// Does this scanned value belong to a run person? (async: an 8-digit value is
+// only theirs when a run registration has it.)
+const isRunQr = async (value) => {
+  const v = String(value || "").trim();
+  if (LEGACY_QR_REGEX.test(v)) return true;
+  if (!EIGHT_DIGITS.test(v)) return false;
+  return Boolean(await RunRegistration.exists({ qrValue: v }));
+};
 
 const buildRunLink = (token) => {
   // Same base the digital invite link uses (PUBLIC_INVITE_URL_BASE), so
@@ -158,14 +181,13 @@ const sendLinkWhatsapp = async (run, event) => {
   });
 };
 
-// QR on WhatsApp - sent EXACTLY like the booking pass: the same body-only
+// Pass on WhatsApp - EXACTLY like the booking pass: the same body-only
 // invitation template (CHATBOX_INVITE_TEMPLATE_NAME / _LANGUAGE, e.g.
-// "parv_invitation_pass") with the same 11 body values. The "Your Digital
-// Invite" value ({{10}}) is the person's own page <base>/run/<token>, which
-// shows their QR, Download QR, name, distance and registration number.
+// "parv_invitation_pass"), the same 11 body values and the same digital pass
+// page <base>/ticket?qr=<Invitation ID> (GuestPass), which shows the QR.
 //   {{1}} name  {{2}} event  {{3}} name  {{4}} guests (1)  {{5}} date
-//   {{6}} time  {{7}} venue  {{8}} dress code  {{9}} registration no
-//   {{10}} QR page link  {{11}} venue location
+//   {{6}} time  {{7}} venue  {{8}} dress code  {{9}} Invitation ID
+//   {{10}} digital invite link  {{11}} venue location
 const sendQrWhatsapp = async (run, event) => {
   const templateName = process.env.CHATBOX_INVITE_TEMPLATE_NAME || "parv_invitation_confirmed";
   const languageCode = process.env.CHATBOX_INVITE_TEMPLATE_LANGUAGE || "en";
@@ -183,8 +205,8 @@ const sendQrWhatsapp = async (run, event) => {
       formatEventTime(event.startDateTime),
       event?.venueName || "-",
       event?.dressCode || "Sportswear",
-      run.registrationNumber,
-      buildRunLink(run.token),
+      run.qrValue,
+      buildInvitationUrl(run.qrValue),
       buildVenueLocationUrl(event) || event?.address || "-",
     ],
   });
@@ -439,8 +461,9 @@ const updateRun = async (id, body = {}) => {
 
   if (run.status === "registered") {
     if (body.email !== undefined) {
+      // Optional: empty clears it.
       const email = String(body.email || "").trim().toLowerCase();
-      if (!EMAIL_RX.test(email)) throw new AppError("Enter a valid email address.", 400);
+      if (email && !EMAIL_RX.test(email)) throw new AppError("Enter a valid email address.", 400);
       run.email = email;
     }
     if (body.distance !== undefined && body.distance !== null && body.distance !== "") {
@@ -544,7 +567,7 @@ const exportRuns = async (query, res) => {
       no: index + 1,
       name: item.name,
       // text, so a long number is never shown as 9.9E+11
-      mobile: String(item.mobileNumber || ""),
+      mobile: String(item.mobileNumber || "").replace(/^91(?=\d{10}$)/, ""),
       email: item.email || "-",
       distance: item.distance ? `${item.distance} KM` : "-",
       reg: item.registrationNumber || "-",
@@ -621,8 +644,9 @@ const submitPublicRun = async (token, body = {}) => {
 
   const name = validateName(body.name);
 
+  // Email is optional; when given it must be valid (the QR is mailed to it).
   const email = String(body.email || "").trim().toLowerCase();
-  if (!EMAIL_RX.test(email)) throw new AppError("Enter a valid email address.", 400);
+  if (email && !EMAIL_RX.test(email)) throw new AppError("Enter a valid email address.", 400);
 
   const mobileNumber =
     body.mobile !== undefined && body.mobile !== null && body.mobile !== ""
@@ -637,9 +661,8 @@ const submitPublicRun = async (token, body = {}) => {
 
   const registrationNumber = await nextRegistrationNumber(event._id);
 
-  // Random QR value; a clash is practically impossible, retry just in case.
-  let qrValue = randomQrValue();
-  for (let i = 0; i < 3 && (await RunRegistration.exists({ qrValue })); i += 1) qrValue = randomQrValue();
+  // The 8-digit Invitation ID: printed on the pass and encoded in the QR.
+  const qrValue = await generateRunInvitationId();
 
   const qrBuffer = await generateQrCode(qrValue);
   const qrUpload = await uploadImage(qrBuffer, "event-management/qr-codes", "image", { format: "png" });
@@ -685,6 +708,60 @@ const submitPublicRun = async (token, body = {}) => {
   );
 
   return publicView(updated, event);
+};
+
+/* =========================================================
+   PASS PAGE  (/ticket?qr=<Invitation ID>  ->  GET /api/public/invitation/:id)
+   Same payload as a booking pass, so the same GuestPass page shows it.
+   Returns null when no run person has this ID.
+   ========================================================= */
+
+const getRunInvitation = async (invitationId) => {
+  const run = await RunRegistration.findOne({ qrValue: String(invitationId), status: "registered" });
+  if (!run) return null;
+
+  const event = await Event.findById(run.eventId).lean();
+  if (!event || event.isDeleted) return null;
+
+  // Sent inline (not a link under /uploads) so the pass keeps working even if
+  // the server disk is wiped - same as the booking pass.
+  let qrImage = run.qrImage;
+  try {
+    qrImage = `data:image/png;base64,${(await generateQrCode(run.qrValue)).toString("base64")}`;
+  } catch (error) {
+    console.error("Run pass QR regeneration failed, using stored image:", error.message);
+  }
+
+  const scanned = Boolean(run.scannedAt);
+  return {
+    invitationId: run.qrValue,
+    guestName: run.name,
+    companyName: "",
+    mobileNumber: String(run.mobileNumber || "").replace(/^91(?=\d{10}$)/, ""),
+    contact: {
+      name: process.env.EVENT_CONTACT_NAME || "Aniket Patel",
+      number: process.env.EVENT_CONTACT_NUMBER || "7016851932",
+    },
+    numberOfGuests: 1,
+    references: [],
+    qrImage,
+    enteredGuests: scanned ? 1 : 0,
+    remainingGuests: scanned ? 0 : 1,
+    isPartiallyUsed: false,
+    isUsed: scanned,
+    isCancelled: false,
+    ticketName: `${run.distance} KM Run`,
+    event: {
+      title: event.title,
+      image: event.image,
+      date: formatEventDate(event.startDateTime),
+      time: formatEventTime(event.startDateTime),
+      venueName: event.venueName,
+      address: event.address,
+      dressCode: event.dressCode || "Sportswear",
+      locationUrl: buildVenueLocationUrl(event),
+    },
+  };
 };
 
 /* =========================================================
@@ -790,11 +867,12 @@ module.exports = {
   // public
   getPublicRun,
   submitPublicRun,
-  // scanner
+  // pass page + scanner
+  getRunInvitation,
   isRunQr,
   verifyRunQr,
   checkInRunQr,
   undoRunCheckIn,
   // for tests
-  _internal: { stateOf, buildFilter, randomQrValue, buildRunLink },
+  _internal: { stateOf, buildFilter, buildRunLink },
 };

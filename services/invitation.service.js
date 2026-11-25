@@ -125,6 +125,9 @@ const getPublicInvitation = async (invitationId) => {
   const booking = await Booking.findOne({ invitationId, isDeleted: false });
 
   if (!booking) {
+    // Not a booking: maybe a 5 KM / 10 KM Run person - same pass, same page.
+    const runPass = await require("./runRegistration.service").getRunInvitation(invitationId);
+    if (runPass) return runPass;
     throw new AppError("Invitation not found.", 404);
   }
 
