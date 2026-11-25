@@ -114,6 +114,8 @@ const serialize = (doc, event) => {
     state: stateOf(item),
     token: item.token,
     registrationNumber: item.registrationNumber || "",
+    // 8-digit Invitation ID: what the QR contains and what is printed on the pass.
+    qrNumber: item.qrValue || "",
     qrImage: item.qrImage || "",
     registeredAt: item.registeredAt || null,
     scannedAt: item.scannedAt || null,
@@ -550,6 +552,7 @@ const exportRuns = async (query, res) => {
     { header: "Email", key: "email", width: 30 },
     { header: "Distance", key: "distance", width: 10 },
     { header: "Registration No", key: "reg", width: 16 },
+    { header: "QR Number", key: "qrNumber", width: 14 },
     { header: "Status", key: "status", width: 24 },
     { header: "Registered On", key: "registeredAt", width: 22 },
     { header: "Scanned On", key: "scannedAt", width: 22 },
@@ -571,12 +574,15 @@ const exportRuns = async (query, res) => {
       email: item.email || "-",
       distance: item.distance ? `${item.distance} KM` : "-",
       reg: item.registrationNumber || "-",
+      // text, so the 8 digits are never turned into a number / scientific format
+      qrNumber: item.qrValue ? String(item.qrValue) : "-",
       status: STATE_LABEL[stateOf(item)],
       registeredAt: stamp(item.registeredAt),
       scannedAt: stamp(item.scannedAt),
     });
   });
   sheet.getColumn("mobile").numFmt = "@";
+  sheet.getColumn("qrNumber").numFmt = "@";
 
   res.setHeader(
     "Content-Type",
