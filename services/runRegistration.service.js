@@ -99,6 +99,10 @@ const buildRunLink = (token) => {
 
 const eventLabel = (event) => event?.edition || event?.title || "";
 
+// "5 KM Run" / "10 KM Run" for the link flow, "Let's Run" for the public form
+// (which has no distance).
+const ticketNameOf = (run) => (run.distance ? `${run.distance} KM Run` : "Let's Run");
+
 // DTO sent to the admin pages.
 const serialize = (doc, event) => {
   const item = doc.toObject ? doc.toObject() : doc;
@@ -717,6 +721,144 @@ const submitPublicRun = async (token, body = {}) => {
 };
 
 /* =========================================================
+   PUBLIC "LET'S RUN" FORM  (/lets-run, no login)
+   Name + mobile -> registered at once, ticket link on WhatsApp.
+   The ticket belongs to the CURRENT ACTIVE EVENT; when several are
+   active, the one that starts first (same rule as the dashboard).
+   ========================================================= */
+
+// Approved WhatsApp template (body only, 2 variables):
+//   Hello {{1}},  ...  Download your QR for entry : {{2}}  ...
+//   {{1}} name   {{2}} ticket link  <site>/ticket?qr=<Invitation ID>
+// Set CHATBOX_LETS_RUN_TEMPLATE_NAME (+ _LANGUAGE) in .env. Without it a plain
+// text message with the same words is sent (only delivered inside WhatsApp's
+// 24-hour window).
+const sendLetsRunWhatsapp = async (run) => {
+  const link = buildInvitationUrl(run.qrValue);
+  const templateName = process.env.CHATBOX_LETS_RUN_TEMPLATE_NAME;
+  const languageCode = process.env.CHATBOX_LETS_RUN_TEMPLATE_LANGUAGE || "en";
+
+  if (templateName) {
+    await whatsappService.sendTemplateMessage({
+      phone: run.mobileNumber,
+      templateName,
+      languageCode,
+      bodyParams: [run.name, link],
+    });
+    return;
+  }
+
+  await whatsappService.sendTextMessage({
+    phone: run.mobileNumber,
+    message:
+      `Hello ${run.name},\n\n` +
+      "You're one step closer to being part of Let's Run! \u{1F3C3}\u200D\u2642\uFE0F " +
+      "Get ready for a morning filled with fitness, energy, good vibes, and an amazing community.\n\n" +
+      `Download your QR for entry :\n${link}\n\n` +
+      "Run. Celebrate. Repeat. \u{1F3C1}",
+  });
+};
+
+// Event the public form registers for: the first active event. Throws a clear
+// message when none is open.
+const getOpenLetsRunEvent = async () => {
+  const event = await getDefaultEvent();
+  if (!event) throw new AppError("Registration is not open right now.", 400);
+  if (event.endDateTime && new Date() > new Date(event.endDateTime)) {
+    throw new AppError("Registration is closed because this event has ended.", 400);
+  }
+  return event;
+};
+
+// GET /api/public/lets-run -> what the form header shows.
+const getLetsRunInfo = async () => {
+  const event = await getOpenLetsRunEvent();
+  return {
+    eventTitle: event.title,
+    date: formatEventDate(event.startDateTime),
+    time: formatEventTime(event.startDateTime),
+    venueName: event.venueName || "",
+  };
+};
+
+// body: { name, mobile } -> { name, qrNumber, whatsappSent, alreadyRegistered }
+const submitLetsRun = async (body = {}) => {
+  const name = validateName(body.name);
+  const mobileNumber = validateMobile(body.mobile ?? body.mobileNumber);
+  const event = await getOpenLetsRunEvent();
+
+  let run = await RunRegistration.findOne({ eventId: event._id, mobileNumber });
+  let alreadyRegistered = false;
+
+  if (run && run.status === "registered") {
+    // Same number again: do not create a second ticket, send the same one again.
+    // (30 s gap so the form cannot be used to spam a number with messages.)
+    alreadyRegistered = true;
+    if (run.qrSentAt && Date.now() - new Date(run.qrSentAt).getTime() < 30 * 1000) {
+      throw new AppError("Your ticket was just sent on WhatsApp. Please check your messages.", 429);
+    }
+  } else {
+    const registrationNumber = await nextRegistrationNumber(event._id);
+    const qrValue = await generateRunInvitationId();
+    const qrBuffer = await generateQrCode(qrValue);
+    const qrUpload = await uploadImage(qrBuffer, "event-management/qr-codes", "image", { format: "png" });
+
+    const fields = {
+      name,
+      status: "registered",
+      registrationNumber,
+      qrValue,
+      qrImage: qrUpload.url,
+      qrImagePublicId: qrUpload.public_id,
+      registeredAt: new Date(),
+      source: "lets-run",
+    };
+
+    try {
+      if (run) {
+        // An admin had added this number (link not used yet): complete that row.
+        run = await RunRegistration.findOneAndUpdate(
+          { _id: run._id, status: "invited" },
+          { $set: fields },
+          { new: true }
+        );
+      } else {
+        run = await RunRegistration.create({
+          eventId: event._id,
+          mobileNumber,
+          token: randomToken(),
+          ...fields,
+        });
+      }
+    } catch (error) {
+      await deleteLocalFile(qrUpload.public_id);
+      if (error.code === 11000) throw new AppError("This mobile number is already registered.", 409);
+      throw error;
+    }
+
+    if (!run) {
+      await deleteLocalFile(qrUpload.public_id);
+      throw new AppError("You are already registered.", 409);
+    }
+  }
+
+  let whatsappSent = false;
+  try {
+    await sendLetsRunWhatsapp(run);
+    whatsappSent = true;
+    await RunRegistration.updateOne({ _id: run._id }, { $set: { qrSentAt: new Date(), qrError: "" } });
+  } catch (error) {
+    console.error(`[lets-run] WhatsApp failed for ${run.mobileNumber}:`, error.message);
+    await RunRegistration.updateOne(
+      { _id: run._id },
+      { $set: { qrError: String(error.message || "WhatsApp failed").slice(0, 300) } }
+    ).catch(() => {});
+  }
+
+  return { name: run.name, qrNumber: run.qrValue, whatsappSent, alreadyRegistered };
+};
+
+/* =========================================================
    PASS PAGE  (/ticket?qr=<Invitation ID>  ->  GET /api/public/invitation/:id)
    Same payload as a booking pass, so the same GuestPass page shows it.
    Returns null when no run person has this ID.
@@ -756,16 +898,24 @@ const getRunInvitation = async (invitationId) => {
     isPartiallyUsed: false,
     isUsed: scanned,
     isCancelled: false,
-    ticketName: `${run.distance} KM Run`,
+    ticketName: ticketNameOf(run),
+    isRunRegistration: true,
+    registrationNumber: run.registrationNumber || "",
+    purchasedAt: run.registeredAt || run.createdAt || null,
     event: {
       title: event.title,
       image: event.image,
       date: formatEventDate(event.startDateTime),
       time: formatEventTime(event.startDateTime),
+      endTime: event.endDateTime ? formatEventTime(event.endDateTime) : "",
+      startDateTime: event.startDateTime,
+      endDateTime: event.endDateTime || null,
       venueName: event.venueName,
       address: event.address,
       dressCode: event.dressCode || "Sportswear",
       locationUrl: buildVenueLocationUrl(event),
+      // Added when the event is created (Event -> Terms & Conditions).
+      termsConditions: event.termsConditions || "",
     },
   };
 };
@@ -824,7 +974,7 @@ const scannerDto = (run, event, { status, scannedAt }) => ({
     startDateTime: event.startDateTime,
     endDateTime: event.endDateTime,
   },
-  ticketType: { id: null, ticketName: `${run.distance} KM Run`, amount: 0 },
+  ticketType: { id: null, ticketName: ticketNameOf(run), amount: 0 },
 });
 
 const ALREADY_SCANNED = "This ticket has already been checked in.";
@@ -873,6 +1023,8 @@ module.exports = {
   // public
   getPublicRun,
   submitPublicRun,
+  getLetsRunInfo,
+  submitLetsRun,
   // pass page + scanner
   getRunInvitation,
   isRunQr,

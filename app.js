@@ -27,6 +27,7 @@ const crewCategoryRoutes = require("./routes/crewcategory.routes");
 const crewRoutes = require("./routes/crew.routes");
 const runRegistrationRoutes = require("./routes/runRegistration.routes");
 const publicRunRegistrationRoutes = require("./routes/publicRunRegistration.routes");
+const publicLetsRunRoutes = require("./routes/publicLetsRun.routes");
 
 const app = express();
 
@@ -119,6 +120,8 @@ app.use("/api/crew", crewRoutes);
 app.use("/api/run-registrations", runRegistrationRoutes);
 // ...and the public link opened from WhatsApp (/run/:token) - no login, rate-limited
 app.use("/api/public/run-registration", publicRunRegistrationRoutes);
+// Public "Let's Run" form (/lets-run): name + mobile -> ticket on WhatsApp - no login, rate-limited
+app.use("/api/public/lets-run", publicLetsRunRoutes);
 
 // Block List: block a person (by mobile) with a reason; flagged everywhere
 app.use("/api/blocklist", require("./routes/blocklist.routes"));

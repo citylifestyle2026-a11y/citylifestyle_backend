@@ -53,6 +53,10 @@ const runRegistrationSchema = new mongoose.Schema(
     qrError: { type: String, default: "" },
 
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "Admin", default: null },
+
+    // admin   = added by an admin (WhatsApp link flow, /run/<token>)
+    // lets-run = filled the public form at /lets-run (name + mobile -> ticket)
+    source: { type: String, enum: ["admin", "lets-run"], default: "admin" },
   },
   { timestamps: true }
 );
