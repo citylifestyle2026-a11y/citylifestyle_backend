@@ -78,6 +78,49 @@ const sendPasswordResetOtpEmail = async (to, name, otp) => {
   });
 };
 
+
+// ================= RUN REGISTRATION QR EMAIL =================
+// Sent right after a person completes the 5 KM / 10 KM registration. The QR
+// image is attached AND shown in the mail body (cid), so it can be shown at
+// the entry straight from the mail. Throws on failure - the caller treats the
+// email as best-effort and only logs / records the error.
+const escapeHtml = (value) =>
+  String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+const sendRunQrEmail = async ({ to, name, distance, registrationNumber, eventTitle, qrBuffer }) => {
+  if (!to) return;
+
+  const fromAddress = process.env.SMTP_FROM || process.env.SMTP_USER;
+  const safeName = escapeHtml(name || "there");
+  const km = `${distance} KM`;
+
+  await getTransporter().sendMail({
+    from: `"City Lifestyle" <${fromAddress}>`,
+    to,
+    replyTo: fromAddress,
+    subject: `Your ${km} Run registration${eventTitle ? ` - ${eventTitle}` : ""}`,
+    text:
+      `Hi ${name || "there"},\n\n` +
+      `You are registered for the ${km} run${eventTitle ? ` (${eventTitle})` : ""}.\n` +
+      `Registration No: ${registrationNumber}\n\n` +
+      `Please show the attached QR code at the entry.`,
+    html:
+      `<p>Hi ${safeName},</p>` +
+      `<p>You are registered for the <strong>${escapeHtml(km)}</strong> run` +
+      `${eventTitle ? ` (${escapeHtml(eventTitle)})` : ""}.</p>` +
+      `<p>Registration No: <strong>${escapeHtml(registrationNumber)}</strong></p>` +
+      `<p>Please show this QR code at the entry:</p>` +
+      `<p><img src="cid:run-qr" alt="QR code" width="240" height="240" /></p>`,
+    attachments: qrBuffer
+      ? [
+          { filename: `${registrationNumber || "run-qr"}.png`, content: qrBuffer, contentType: "image/png" },
+          { filename: "qr.png", content: qrBuffer, contentType: "image/png", cid: "run-qr", contentDisposition: "inline" },
+        ]
+      : [],
+  });
+};
+
 module.exports = {
   sendPasswordResetOtpEmail,
+  sendRunQrEmail,
 };

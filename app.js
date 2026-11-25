@@ -25,6 +25,8 @@ const contactEventHistoryRoutes = require("./routes/contactEventHistory.routes")
 const companyCategoryRoutes = require("./routes/companycategory.routes");
 const crewCategoryRoutes = require("./routes/crewcategory.routes");
 const crewRoutes = require("./routes/crew.routes");
+const runRegistrationRoutes = require("./routes/runRegistration.routes");
+const publicRunRegistrationRoutes = require("./routes/publicRunRegistration.routes");
 
 const app = express();
 
@@ -112,6 +114,11 @@ app.use("/api/company-categories", companyCategoryRoutes);
 // crew (Crew List + Crew Category)
 app.use("/api/crew-categories", crewCategoryRoutes);
 app.use("/api/crew", crewRoutes);
+
+// Run Registration (5 KM / 10 KM): admin side (Add Data, list, edit, delete, report)
+app.use("/api/run-registrations", runRegistrationRoutes);
+// ...and the public link opened from WhatsApp (/run/:token) - no login, rate-limited
+app.use("/api/public/run-registration", publicRunRegistrationRoutes);
 
 // Block List: block a person (by mobile) with a reason; flagged everywhere
 app.use("/api/blocklist", require("./routes/blocklist.routes"));

@@ -5,6 +5,8 @@ const Booking = require("../models/booking.model");
 const Event = require("../models/event.model");
 const AppError = require("../utils/AppError");
 const faceService = require("./faceRecognition.service");
+// 5 KM / 10 KM run QR ("RUN-XXXXXXXX") is handled by its own service.
+const runRegistrationService = require("./runRegistration.service");
 
 // TEMPORARY (testing only): set QR_TEST_MODE=true in the server env to skip
 // the "event inactive" / "event ended" checks while testing scans.
@@ -60,6 +62,11 @@ const resolveTicketNumber = async (qrValue) => {
 };
  // verfiy qr
 const verifyQr = async ({ qrToken }) => {
+  // Run Registration QR (5 KM / 10 KM) - not a booking ticket.
+  if (runRegistrationService.isRunQr(qrToken)) {
+    return runRegistrationService.verifyRunQr(qrToken);
+  }
+
   // ==========================
   // 1. Verify QR (Invitation ID or signed token)
   // ==========================
@@ -200,6 +207,11 @@ const verifyQr = async ({ qrToken }) => {
 //  - pass with 2+ guests left, count given -> exactly that many are checked in;
 //    the rest stay "Active", so the SAME QR works again later for them.
 const checkInQr = async ({ qrToken, scannedBy, guests, askGuests }) => {
+  // Run Registration QR (5 KM / 10 KM) - not a booking ticket.
+  if (runRegistrationService.isRunQr(qrToken)) {
+    return runRegistrationService.checkInRunQr(qrToken, scannedBy);
+  }
+
   // 1. Verify QR (Invitation ID or signed token)
   const payload = { ticketNumber: await resolveTicketNumber(qrToken) };
 
@@ -438,6 +450,10 @@ const UNDO_WINDOW_MS =
   (Number(process.env.QR_UNDO_WINDOW_MINUTES) || 15) * 60 * 1000;
 
 const undoCheckInQr = async ({ qrToken, guests }) => {
+  if (runRegistrationService.isRunQr(qrToken)) {
+    return runRegistrationService.undoRunCheckIn(qrToken);
+  }
+
   const ticketNumber = await resolveTicketNumber(qrToken);
 
   const ticket = await BookingTicket.findOne({ ticketNumber }).populate({
