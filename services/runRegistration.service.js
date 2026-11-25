@@ -25,7 +25,7 @@ const deleteLocalFile = require("../utils/deleteLocalFile");
 const { normalizeMobileNumber, MOBILE_ERROR_MESSAGE } = require("../utils/normalizeMobileNumber");
 const { getDefaultEvent, resolveEventForNewRecord } = require("../utils/defaultEvent");
 const whatsappService = require("./whatsapp.service");
-const buildQrNotificationBodyParams = require("../utils/buildQrNotificationBodyParams");
+const { formatEventDate, formatEventTime, buildVenueLocationUrl } = require("../utils/buildInvitationBodyParams");
 
 const DISTANCES = [5, 10];
 const EMAIL_RX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -158,33 +158,35 @@ const sendLinkWhatsapp = async (run, event) => {
   });
 };
 
-// QR on WhatsApp - sent EXACTLY like the booking QR pass: the same approved
-// template (CHATBOX_QR_TEMPLATE_NAME / CHATBOX_QR_TEMPLATE_LANGUAGE, image
-// header = the QR) and the same 5 body values, built by the same helper
-// (utils/buildQrNotificationBodyParams.js):
-//   {{1}} name  {{2}} event  {{3}} booking no  {{4}} ticket no  {{5}} ticket type
-// For a run: booking no = ticket no = registration number (RUN0001) and the
-// ticket type is "5 KM Run" / "10 KM Run".
+// QR on WhatsApp - sent EXACTLY like the booking pass: the same body-only
+// invitation template (CHATBOX_INVITE_TEMPLATE_NAME / _LANGUAGE, e.g.
+// "parv_invitation_pass") with the same 11 body values. The "Your Digital
+// Invite" value ({{10}}) is the person's own page <base>/run/<token>, which
+// shows their QR, Download QR, name, distance and registration number.
+//   {{1}} name  {{2}} event  {{3}} name  {{4}} guests (1)  {{5}} date
+//   {{6}} time  {{7}} venue  {{8}} dress code  {{9}} registration no
+//   {{10}} QR page link  {{11}} venue location
 const sendQrWhatsapp = async (run, event) => {
-  if (!run.qrImage) throw new AppError("QR image is missing.", 500);
+  const templateName = process.env.CHATBOX_INVITE_TEMPLATE_NAME || "parv_invitation_confirmed";
+  const languageCode = process.env.CHATBOX_INVITE_TEMPLATE_LANGUAGE || "en";
 
-  const templateName = process.env.CHATBOX_QR_TEMPLATE_NAME;
-  const languageCode = process.env.CHATBOX_QR_TEMPLATE_LANGUAGE;
-  if (!templateName || !languageCode) {
-    throw new AppError("CHATBOX_QR_TEMPLATE_NAME / CHATBOX_QR_TEMPLATE_LANGUAGE is not configured.", 500);
-  }
-
-  await whatsappService.sendMediaTemplateMessage({
+  await whatsappService.sendTemplateMessage({
     phone: run.mobileNumber,
     templateName,
     languageCode,
-    imageUrl: run.qrImage,
-    bodyParams: buildQrNotificationBodyParams({
-      booking: { name: run.name, bookingNumber: run.registrationNumber },
-      event: { title: event?.title || "" },
-      ticketType: { ticketName: `${run.distance} KM Run` },
-      ticket: { ticketNumber: run.registrationNumber },
-    }),
+    bodyParams: [
+      run.name,
+      event?.title || "City Lifestyle Run",
+      run.name,
+      1,
+      formatEventDate(event.startDateTime),
+      formatEventTime(event.startDateTime),
+      event?.venueName || "-",
+      event?.dressCode || "Sportswear",
+      run.registrationNumber,
+      buildRunLink(run.token),
+      buildVenueLocationUrl(event) || event?.address || "-",
+    ],
   });
 };
 
@@ -601,8 +603,9 @@ const nextRegistrationNumber = async (eventId) => {
   return `RUN${String(counter.sequence).padStart(4, "0")}`;
 };
 
-// body: { distance: 5 | 10, name, email }.  The mobile number is NOT taken from
-// the request - it is the number the link was sent to.
+// body: { distance: 5 | 10, name, email, mobile? }.  The mobile number starts as
+// the number the link was sent to; the person may change it on the form and the
+// QR then goes to the number they submit (still one number per event).
 const submitPublicRun = async (token, body = {}) => {
   const { run, event } = await findByToken(token);
 
@@ -621,6 +624,17 @@ const submitPublicRun = async (token, body = {}) => {
   const email = String(body.email || "").trim().toLowerCase();
   if (!EMAIL_RX.test(email)) throw new AppError("Enter a valid email address.", 400);
 
+  const mobileNumber =
+    body.mobile !== undefined && body.mobile !== null && body.mobile !== ""
+      ? validateMobile(body.mobile)
+      : run.mobileNumber;
+  if (
+    mobileNumber !== run.mobileNumber &&
+    (await RunRegistration.exists({ eventId: run.eventId, mobileNumber, _id: { $ne: run._id } }))
+  ) {
+    throw new AppError("This mobile number is already registered for this event.", 409);
+  }
+
   const registrationNumber = await nextRegistrationNumber(event._id);
 
   // Random QR value; a clash is practically impossible, retry just in case.
@@ -631,23 +645,34 @@ const submitPublicRun = async (token, body = {}) => {
   const qrUpload = await uploadImage(qrBuffer, "event-management/qr-codes", "image", { format: "png" });
 
   // ONE atomic update: if two phones submit the same link at once, only one wins.
-  const updated = await RunRegistration.findOneAndUpdate(
-    { _id: run._id, status: "invited" },
-    {
-      $set: {
-        name,
-        email,
-        distance,
-        status: "registered",
-        registrationNumber,
-        qrValue,
-        qrImage: qrUpload.url,
-        qrImagePublicId: qrUpload.public_id,
-        registeredAt: new Date(),
+  let updated;
+  try {
+    updated = await RunRegistration.findOneAndUpdate(
+      { _id: run._id, status: "invited" },
+      {
+        $set: {
+          name,
+          mobileNumber,
+          email,
+          distance,
+          status: "registered",
+          registrationNumber,
+          qrValue,
+          qrImage: qrUpload.url,
+          qrImagePublicId: qrUpload.public_id,
+          registeredAt: new Date(),
+        },
       },
-    },
-    { new: true }
-  );
+      { new: true }
+    );
+  } catch (error) {
+    await deleteLocalFile(qrUpload.public_id);
+    // The new number was taken by someone else in the meantime.
+    if (error.code === 11000) {
+      throw new AppError("This mobile number is already registered for this event.", 409);
+    }
+    throw error;
+  }
 
   if (!updated) {
     await deleteLocalFile(qrUpload.public_id);
