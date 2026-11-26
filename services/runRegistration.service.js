@@ -727,14 +727,16 @@ const submitPublicRun = async (token, body = {}) => {
    active, the one that starts first (same rule as the dashboard).
    ========================================================= */
 
-// Approved WhatsApp template (body only, 2 variables):
-//   Hello {{1}},  ...  Download your QR for entry : {{2}}  ...
-//   {{1}} name   {{2}} ticket link  <site>/ticket?qr=<Invitation ID>
+// Approved WhatsApp template (body only, 3 variables):
+//   Hello {{1}}, Your registration for {{2}} is confirmed. ... Entry QR: {{3}}
+//   {{1}} name   {{2}} event name (the current active event's title)
+//   {{3}} ticket link  <site>/ticket?qr=<Invitation ID>
 // Set CHATBOX_LETS_RUN_TEMPLATE_NAME (+ _LANGUAGE) in .env. Without it a plain
 // text message with the same words is sent (only delivered inside WhatsApp's
 // 24-hour window).
-const sendLetsRunWhatsapp = async (run) => {
+const sendLetsRunWhatsapp = async (run, event) => {
   const link = buildInvitationUrl(run.qrValue);
+  const eventName = String(event?.title || "Let's Run").trim();
   const templateName = process.env.CHATBOX_LETS_RUN_TEMPLATE_NAME;
   const languageCode = process.env.CHATBOX_LETS_RUN_TEMPLATE_LANGUAGE || "en";
 
@@ -743,7 +745,7 @@ const sendLetsRunWhatsapp = async (run) => {
       phone: run.mobileNumber,
       templateName,
       languageCode,
-      bodyParams: [run.name, link],
+      bodyParams: [run.name, eventName, link],
     });
     return;
   }
@@ -752,10 +754,10 @@ const sendLetsRunWhatsapp = async (run) => {
     phone: run.mobileNumber,
     message:
       `Hello ${run.name},\n\n` +
-      "You're one step closer to being part of Let's Run! \u{1F3C3}\u200D\u2642\uFE0F " +
-      "Get ready for a morning filled with fitness, energy, good vibes, and an amazing community.\n\n" +
-      `Download your QR for entry :\n${link}\n\n` +
-      "Run. Celebrate. Repeat. \u{1F3C1}",
+      `Your registration for ${eventName} is confirmed.\n\n` +
+      "Your entry QR code is available at the link below. Please show it at the venue entrance.\n\n" +
+      `Entry QR: ${link}\n\n` +
+      "Thank you for registering.",
   });
 };
 
@@ -844,7 +846,7 @@ const submitLetsRun = async (body = {}) => {
 
   let whatsappSent = false;
   try {
-    await sendLetsRunWhatsapp(run);
+    await sendLetsRunWhatsapp(run, event);
     whatsappSent = true;
     await RunRegistration.updateOne({ _id: run._id }, { $set: { qrSentAt: new Date(), qrError: "" } });
   } catch (error) {
