@@ -309,12 +309,16 @@ const deliverLink = async (run, event) => {
 
 // Sends the QR on WhatsApp AND by email. Each channel is independent: one
 // failing never stops the other. Returns { whatsapp, email } booleans.
-const deliverQr = async (run, event, qrBuffer) => {
+// useLetsRunTemplate = true (admin "Resend QR"): the WhatsApp message is the SAME
+// one the /lets-run form sends (CHATBOX_LETS_RUN_TEMPLATE_NAME, e.g.
+// lets_run_registration_confirmed) instead of the invitation-pass template.
+const deliverQr = async (run, event, qrBuffer, { useLetsRunTemplate = false } = {}) => {
   const result = { whatsapp: false, email: false };
   const errors = [];
 
   try {
-    await sendQrWhatsapp(run, event);
+    if (useLetsRunTemplate) await sendLetsRunWhatsapp(run);
+    else await sendQrWhatsapp(run, event);
     result.whatsapp = true;
   } catch (error) {
     console.error(`[run-registration] QR WhatsApp failed for ${run.mobileNumber}:`, error.message);
@@ -444,7 +448,8 @@ const listRuns = async (query = {}) => {
   const page = Math.max(1, parseInt(query.page, 10) || 1);
   const limitRaw = parseInt(query.limit, 10);
   // limit=0 (or "All") returns everything.
-  const all = limitRaw === 0 || String(query.limit).toLowerCase() === "all";
+  // The "All" choice of the rows select is sent as 100000 (ALL_ROWS): never cap it.
+  const all = limitRaw === 0 || limitRaw >= 100000 || String(query.limit).toLowerCase() === "all";
   const limit = all ? 0 : Math.min(Math.max(limitRaw || 10, 1), 500);
 
   const filter = buildFilter(scope, query);
@@ -618,7 +623,7 @@ const resendRuns = async (ids) => {
   let failed = 0;
   for (const run of runs) {
     const event = run.eventId ? await Event.findById(run.eventId).lean() : null;
-    const result = await deliverQr(run, event, null);
+    const result = await deliverQr(run, event, null, { useLetsRunTemplate: true });
     if (result.whatsapp || result.email) sent += 1;
     else failed += 1;
   }
@@ -643,7 +648,7 @@ const resendRun = async (id) => {
     return { kind: "link" };
   }
 
-  const result = await deliverQr(run, event, null);
+  const result = await deliverQr(run, event, null, { useLetsRunTemplate: true });
   if (!result.whatsapp && !result.email) {
     const fresh = await RunRegistration.findById(run._id);
     throw new AppError(fresh?.qrError || "Unable to send the QR.", 502);

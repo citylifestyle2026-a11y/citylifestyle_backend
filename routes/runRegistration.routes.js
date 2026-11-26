@@ -92,6 +92,19 @@ router.post(
   })
 );
 
+// Run Report checkboxes -> send the QR again to all ticked rows: { ids: [...] }
+router.post(
+  "/bulk-resend",
+  adminOnly,
+  asyncHandler(async (req, res) => {
+    const { sent, failed, skipped } = await runService.resendRuns(req.body?.ids);
+    const parts = [`QR sent to ${sent} ${sent === 1 ? "person" : "people"}`];
+    if (failed) parts.push(`${failed} failed`);
+    if (skipped) parts.push(`${skipped} skipped (not registered)`);
+    res.json({ success: failed === 0, message: `${parts.join(", ")}.`, data: { sent, failed, skipped } });
+  })
+);
+
 // Run Report checkboxes -> delete all ticked rows: { ids: [...] }
 router.post(
   "/bulk-delete",
