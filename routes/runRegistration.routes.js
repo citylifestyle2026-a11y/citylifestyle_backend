@@ -17,6 +17,15 @@ const reportAccess = authorize("admin");
 // Every route below works on ONE event (edition): ?eventId=<id> from the
 // header dropdown; without it the active (default) event is used.
 
+// events for the report's select (every Let's Run event + the "no event" batch)
+router.get(
+  "/events",
+  reportAccess,
+  asyncHandler(async (req, res) => {
+    res.json({ success: true, data: await runService.listRunEvents() });
+  })
+);
+
 // list + summary numbers  ?page&limit&search&status&distance&eventId
 router.get(
   "/",
@@ -80,6 +89,16 @@ router.post(
       message: result.kind === "link" ? "Registration link sent on WhatsApp." : "QR sent again.",
       data: result,
     });
+  })
+);
+
+// Run Report checkboxes -> delete all ticked rows: { ids: [...] }
+router.post(
+  "/bulk-delete",
+  adminOnly,
+  asyncHandler(async (req, res) => {
+    const { deleted } = await runService.deleteRuns(req.body?.ids);
+    res.json({ success: true, message: `${deleted} entr${deleted === 1 ? "y" : "ies"} deleted.`, data: { deleted } });
   })
 );
 

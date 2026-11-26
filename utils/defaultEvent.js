@@ -1,5 +1,5 @@
 const Event = require("../models/event.model");
-const { notRunEvent } = require("./runEvent");
+const { notRunEvent, onlyRunEvent } = require("./runEvent");
 
 // The "Active Event (Default)" of the dashboard: the running event that
 // starts first, otherwise the most recently ended one. Deleted / switched-off
@@ -27,6 +27,11 @@ const getDefaultEvent = () => pickDefault(notRunEvent());
 // Report. When several events are active, the one that starts first.
 const getDefaultEventAnyTitle = () => pickDefault({});
 
+// The current "Let's Run" event ONLY (same pick rule). Used by the public
+// /lets-run form and the Run Report, so an ordinary event created later can
+// never take over the Let's Run registrations or its report.
+const getDefaultRunEvent = () => pickDefault(onlyRunEvent());
+
 // The event a new record belongs to: the event picked in the dashboard
 // dropdown (sent as `eventId`), otherwise the default event. Null if none.
 const resolveEventForNewRecord = async (eventId) => {
@@ -38,4 +43,4 @@ const resolveEventForNewRecord = async (eventId) => {
   return getDefaultEvent();
 };
 
-module.exports = { getDefaultEvent, getDefaultEventAnyTitle, resolveEventForNewRecord };
+module.exports = { getDefaultEvent, getDefaultEventAnyTitle, getDefaultRunEvent, resolveEventForNewRecord };

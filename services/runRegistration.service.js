@@ -24,8 +24,9 @@ const generateQrCode = require("../utils/generateQrCode");
 const uploadImage = require("../utils/localUpload.util");
 const deleteLocalFile = require("../utils/deleteLocalFile");
 const { normalizeMobileNumber, MOBILE_ERROR_MESSAGE } = require("../utils/normalizeMobileNumber");
-const { getDefaultEventAnyTitle } = require("../utils/defaultEvent");
+const { getDefaultRunEvent } = require("../utils/defaultEvent");
 const { onlyRunEvent } = require("../utils/runEvent");
+const { LETS_RUN_NAME, getRunSchedule, getRunSettings, editionKeyOf } = require("../utils/letsRunConfig");
 const whatsappService = require("./whatsapp.service");
 const {
   formatEventDate,
@@ -98,7 +99,8 @@ const buildRunLink = (token) => {
   return `${base}/run/${token}`;
 };
 
-const eventLabel = (event) => event?.edition || event?.title || "";
+// Messages never carry an event name: it is always "Let's Run".
+const eventLabel = () => LETS_RUN_NAME;
 
 // "5 KM Run" / "10 KM Run" for the link flow, "Let's Run" for the public form
 // (which has no distance).
@@ -136,38 +138,80 @@ const serialize = (doc, event) => {
 // The event the Run Report is looking at: the picked one, else the current
 // active event (the first one when several are active) - the same event the
 // public /lets-run form registers people for. Returns null when no event exists.
-const resolveViewEvent = async (eventId) => {
-  const picked = toObjectId(eventId);
+// WHICH run the report / Add Data looks at (`eventId` from the select):
+//   <event id>      a Let's Run event
+//   "ed:<ISO date>" a run made without an event (its start date-time)
+//   nothing         the run that is open now: the active event, else the current
+//                   no-event run (date in Run date & time settings)
+// Returns { event, eventId, editionKey }. Nothing here ever creates or moves rows.
+const resolveScope = async (eventId) => {
+  const value = String(eventId || "");
+  if (value.startsWith("ed:")) return { event: null, eventId: null, editionKey: value.slice(3) };
+
+  const picked = toObjectId(value);
   if (picked) {
-    const event = await Event.findOne({ _id: picked, isDeleted: { $ne: true } }).lean();
-    if (event) return event;
+    const event = await Event.findOne({ _id: picked, isDeleted: { $ne: true }, ...onlyRunEvent() }).lean();
+    if (event) return { event, eventId: event._id, editionKey: "" };
   }
-  return getDefaultEventAnyTitle();
+  return currentRunScope();
 };
+
+// The run the form registers for right now. A Let's Run event that has not ended
+// takes over; otherwise the no-event run of the saved date. NEVER "closed".
+const currentRunScope = async () => {
+  const event = await getDefaultRunEvent();
+  if (event && !(event.endDateTime && new Date() > new Date(event.endDateTime))) {
+    return { event, eventId: event._id, editionKey: "" };
+  }
+  const settings = await getRunSettings();
+  return { event: null, eventId: null, editionKey: editionKeyOf(settings.startDateTime) };
+};
+
+// The Run Report / summary / Excel show EVERY entry (all runs) unless an
+// explicit eventId is sent. Add Data and the public form use resolveScope (the
+// run that is open now).
+const viewScope = async (eventId) =>
+  eventId ? resolveScope(eventId) : { all: true, event: null, eventId: null, editionKey: "" };
+
+const scopeMatch = (scope) => (scope.all ? {} : { eventId: scope.eventId, editionKey: scope.editionKey });
 
 // Events for the select in the Run Report header: EVERY "Let's Run" event -
 // active and expired (ended) ones - so the report of an old event can still be
 // opened. Newest first; plus the one the report opens with by default.
 const listRunEvents = async () => {
-  const [events, defaultEvent] = await Promise.all([
+  const [events, current, editions] = await Promise.all([
     Event.find({ isDeleted: { $ne: true }, ...onlyRunEvent() })
       .sort({ startDateTime: -1 })
       .select("_id title startDateTime endDateTime isActive")
       .lean(),
-    getDefaultEventAnyTitle(),
+    currentRunScope(),
+    RunRegistration.aggregate([
+      { $match: { eventId: null, editionKey: { $ne: "" } } },
+      { $group: { _id: "$editionKey", count: { $sum: 1 } } },
+    ]),
   ]);
   const now = Date.now();
-  return {
-    events: events.map((e) => ({
-      _id: e._id,
+  const options = [
+    ...events.map((e) => ({
+      value: String(e._id),
+      kind: "event",
       title: e.title,
-      startDateTime: e.startDateTime || null,
-      endDateTime: e.endDateTime || null,
-      isActive: e.isActive === true,
+      date: e.startDateTime || null,
       expired: Boolean(e.endDateTime) && new Date(e.endDateTime).getTime() < now,
     })),
-    defaultEventId: defaultEvent?._id || null,
-  };
+    // runs made without an event: one per date, newest first (+ the current one even if still empty)
+    ...[...new Set([...editions.map((x) => x._id), ...(current.editionKey ? [current.editionKey] : [])])]
+      .sort((a, b) => new Date(b) - new Date(a))
+      .map((key) => ({
+        value: `ed:${key}`,
+        kind: "edition",
+        title: LETS_RUN_NAME,
+        date: key,
+        expired: new Date(key).getTime() + 24 * 60 * 60 * 1000 < now,
+      })),
+  ];
+  const defaultValue = current.event ? String(current.event._id) : `ed:${current.editionKey}`;
+  return { options, defaultValue };
 };
 
 const emptySummary = () => ({
@@ -200,7 +244,7 @@ const sendLinkWhatsapp = async (run, event) => {
       phone: run.mobileNumber,
       templateName,
       languageCode,
-      bodyParams: [run.name, eventLabel(event) || "City Lifestyle Run", link],
+      bodyParams: [run.name, LETS_RUN_NAME, link],
     });
     return;
   }
@@ -209,7 +253,7 @@ const sendLinkWhatsapp = async (run, event) => {
     phone: run.mobileNumber,
     message:
       `Hello ${run.name},\n` +
-      `Please complete your 5 KM / 10 KM run registration${eventLabel(event) ? ` for ${eventLabel(event)}` : ""}:\n` +
+      `Please complete your 5 KM / 10 KM run registration for ${LETS_RUN_NAME}:\n` +
       link,
   });
 };
@@ -224,6 +268,7 @@ const sendLinkWhatsapp = async (run, event) => {
 const sendQrWhatsapp = async (run, event) => {
   const templateName = process.env.CHATBOX_INVITE_TEMPLATE_NAME || "parv_invitation_confirmed";
   const languageCode = process.env.CHATBOX_INVITE_TEMPLATE_LANGUAGE || "en";
+  const sched = await getRunSchedule(event, run.editionKey); // works with or without an event
 
   await whatsappService.sendTemplateMessage({
     phone: run.mobileNumber,
@@ -231,16 +276,16 @@ const sendQrWhatsapp = async (run, event) => {
     languageCode,
     bodyParams: [
       run.name,
-      event?.title || "City Lifestyle Run",
+      LETS_RUN_NAME,
       run.name,
       1,
-      formatEventDate(event.startDateTime),
-      formatEventTime(event.startDateTime),
-      event?.venueName || "-",
-      event?.dressCode || "Sportswear",
+      formatEventDate(sched.startDateTime),
+      formatEventTime(sched.startDateTime),
+      sched.venueName || "-",
+      sched.dressCode,
       run.qrValue,
       buildInvitationUrl(run.qrValue),
-      buildVenueLocationUrl(event) || event?.address || "-",
+      buildVenueLocationUrl(sched) || sched.address || "-",
     ],
   });
 };
@@ -284,7 +329,7 @@ const deliverQr = async (run, event, qrBuffer) => {
         name: run.name,
         distance: run.distance,
         registrationNumber: run.registrationNumber,
-        eventTitle: eventLabel(event),
+        eventTitle: LETS_RUN_NAME,
         qrBuffer,
       });
       result.email = true;
@@ -311,8 +356,8 @@ const deliverQr = async (run, event, qrBuffer) => {
    ADMIN
    ========================================================= */
 
-const buildFilter = (eventObjectId, { search, status, distance } = {}) => {
-  const filter = { eventId: eventObjectId };
+const buildFilter = (scope, { search, status, distance } = {}) => {
+  const filter = { ...scopeMatch(scope) };
 
   switch (status) {
     case "registered":
@@ -352,11 +397,12 @@ const buildFilter = (eventObjectId, { search, status, distance } = {}) => {
 };
 
 const getSummary = async (eventId) => {
-  const event = await resolveViewEvent(eventId);
-  if (!event) return { ...emptySummary(), event: null };
+  const scope = await viewScope(eventId);
+  const event = scope.event;
 
   const rows = await RunRegistration.aggregate([
-    { $match: { eventId: event._id } },
+    // no event -> the rows that belong to Let's Run without an event
+    { $match: scopeMatch(scope) },
     {
       $group: {
         _id: { status: "$status", distance: "$distance", scanned: { $cond: [{ $ne: ["$scannedAt", null] }, 1, 0] } },
@@ -383,16 +429,17 @@ const getSummary = async (eventId) => {
     }
   });
 
-  return { ...summary, event: { _id: event._id, title: event.title, edition: event.edition || "" } };
+  return {
+    ...summary,
+    event: event ? { _id: event._id, title: event.title, edition: event.edition || "" } : null,
+    editionKey: scope.editionKey,
+  };
 };
 
 // params: page, limit, search, status, distance, eventId
 const listRuns = async (query = {}) => {
-  const event = await resolveViewEvent(query.eventId);
-
-  if (!event) {
-    return { items: [], total: 0, totalPages: 1, page: 1, summary: emptySummary(), event: null };
-  }
+  const scope = await viewScope(query.eventId);
+  const event = scope.event;
 
   const page = Math.max(1, parseInt(query.page, 10) || 1);
   const limitRaw = parseInt(query.limit, 10);
@@ -400,13 +447,13 @@ const listRuns = async (query = {}) => {
   const all = limitRaw === 0 || String(query.limit).toLowerCase() === "all";
   const limit = all ? 0 : Math.min(Math.max(limitRaw || 10, 1), 500);
 
-  const filter = buildFilter(event._id, query);
+  const filter = buildFilter(scope, query);
   const total = await RunRegistration.countDocuments(filter);
 
   let cursor = RunRegistration.find(filter).sort({ createdAt: -1, _id: -1 });
   if (limit) cursor = cursor.skip((page - 1) * limit).limit(limit);
 
-  const [docs, summary] = await Promise.all([cursor, getSummary(event._id)]);
+  const [docs, summary] = await Promise.all([cursor, getSummary(query.eventId)]);
 
   return {
     items: docs.map((doc) => serialize(doc, event)),
@@ -414,7 +461,7 @@ const listRuns = async (query = {}) => {
     totalPages: limit ? Math.max(1, Math.ceil(total / limit)) : 1,
     page: limit ? page : 1,
     summary,
-    event: { _id: event._id, title: event.title, edition: event.edition || "" },
+    event: event ? { _id: event._id, title: event.title, edition: event.edition || "" } : null,
   };
 };
 
@@ -436,17 +483,17 @@ const createRun = async (body = {}, adminId = null) => {
   const name = validateName(body.name);
   const mobileNumber = validateMobile(body.mobile ?? body.mobileNumber);
 
-  const event = await resolveViewEvent(body.eventId);
-  if (!event) throw new AppError("No event found. Please create an event first.", 400);
+  const scope = await resolveScope(body.eventId); // no event needed
+  const event = scope.event;
 
-  if (await RunRegistration.exists({ eventId: event._id, mobileNumber })) {
+  if (await RunRegistration.exists({ ...scopeMatch(scope), mobileNumber })) {
     throw new AppError("This mobile number is already added for this event.", 409);
   }
 
   let run;
   try {
     run = await RunRegistration.create({
-      eventId: event._id,
+      ...scopeMatch(scope),
       name,
       mobileNumber,
       token: randomToken(),
@@ -472,7 +519,7 @@ const updateRun = async (id, body = {}) => {
   const run = await RunRegistration.findById(id);
   if (!run) throw new AppError("Entry not found.", 404);
 
-  const event = await Event.findById(run.eventId).lean();
+  const event = run.eventId ? await Event.findById(run.eventId).lean() : null;
 
   if (body.name !== undefined) run.name = validateName(body.name);
 
@@ -483,6 +530,7 @@ const updateRun = async (id, body = {}) => {
     if (mobileNumber !== run.mobileNumber) {
       const clash = await RunRegistration.exists({
         eventId: run.eventId,
+        editionKey: run.editionKey || "",
         mobileNumber,
         _id: { $ne: run._id },
       });
@@ -533,6 +581,27 @@ const deleteRun = async (id) => {
   return true;
 };
 
+// Run Report: delete the ticked rows. body: { ids: [...] } (max 5000 at once).
+// Same as deleteRun for each row: the row goes, so its QR stops working, and
+// the QR image file is removed. Returns how many rows were deleted.
+const deleteRuns = async (ids) => {
+  if (!Array.isArray(ids) || ids.length === 0) throw new AppError("Select at least one entry.", 400);
+  if (ids.length > 5000) throw new AppError("Too many entries selected at once.", 400);
+
+  const objectIds = [...new Set(ids.map((id) => String(id)))].map(toObjectId).filter(Boolean);
+  if (objectIds.length === 0) throw new AppError("Invalid selection.", 400);
+
+  const runs = await RunRegistration.find({ _id: { $in: objectIds } }).select("qrImagePublicId").lean();
+  if (runs.length === 0) throw new AppError("Entries not found.", 404);
+
+  const result = await RunRegistration.deleteMany({ _id: { $in: runs.map((run) => run._id) } });
+
+  for (const run of runs) {
+    await deleteLocalFile(run.qrImagePublicId);
+  }
+  return { deleted: result.deletedCount || 0 };
+};
+
 // Not registered yet -> link again. Registered -> QR again.
 const resendRun = async (id) => {
   if (!toObjectId(id)) throw new AppError("Invalid ID.", 400);
@@ -540,7 +609,7 @@ const resendRun = async (id) => {
   const run = await RunRegistration.findById(id);
   if (!run) throw new AppError("Entry not found.", 404);
 
-  const event = await Event.findById(run.eventId).lean();
+  const event = run.eventId ? await Event.findById(run.eventId).lean() : null;
 
   if (run.status !== "registered") {
     const sent = await deliverLink(run, event);
@@ -563,10 +632,9 @@ const STATE_LABEL = { notRegistered: "Not Registered", notScanned: "Registered, 
 
 // Excel of the current tab / distance / search for the selected event.
 const exportRuns = async (query, res) => {
-  const event = await resolveViewEvent(query.eventId);
-  if (!event) throw new AppError("No event found.", 404);
+  const scope = await viewScope(query.eventId);
 
-  const rows = await RunRegistration.find(buildFilter(event._id, query))
+  const rows = await RunRegistration.find(buildFilter(scope, query))
     .sort({ createdAt: 1, _id: 1 })
     .lean();
 
@@ -637,15 +705,16 @@ const publicView = (run, event) => ({
   registrationNumber: run.registrationNumber || "",
   qrImage: run.qrImage || "",
   registeredAt: run.registeredAt || null,
-  eventTitle: event?.title || "",
+  eventTitle: LETS_RUN_NAME,
 });
 
 const findByToken = async (token) => {
   const value = String(token || "").trim();
   const run = value ? await RunRegistration.findOne({ token: value }) : null;
   if (!run) throw new AppError("This registration link is not valid.", 404);
-  const event = await Event.findById(run.eventId).lean();
-  if (!event || event.isDeleted) throw new AppError("This registration link is not valid.", 404);
+  // No event is fine (Let's Run without an event); a DELETED event is not.
+  const event = run.eventId ? await Event.findById(run.eventId).lean() : null;
+  if (run.eventId && (!event || event.isDeleted)) throw new AppError("This registration link is not valid.", 404);
   return { run, event };
 };
 
@@ -654,9 +723,23 @@ const getPublicRun = async (token) => {
   return publicView(run, event);
 };
 
-const nextRegistrationNumber = async (eventId) => {
+const nextRegistrationNumber = async (scope) => {
+  // An event has its own counter. Runs made WITHOUT an event share ONE counter, so
+  // numbers never repeat in the Run Report that lists every run together.
+  const name = scope.eventId ? `RUN_${scope.eventId}` : "RUN_default";
+
+  if (!scope.eventId && !(await Counter.exists({ name }))) {
+    // first use: carry on after the highest number already in the report
+    const last = await RunRegistration.findOne({ registrationNumber: /^RUN\d+$/ })
+      .sort({ registrationNumber: -1 })
+      .select("registrationNumber")
+      .lean();
+    const start = last ? parseInt(String(last.registrationNumber).slice(3), 10) || 0 : 0;
+    await Counter.updateOne({ name }, { $setOnInsert: { sequence: start } }, { upsert: true }).catch(() => {});
+  }
+
   const counter = await Counter.findOneAndUpdate(
-    { name: `RUN_${eventId}` },
+    { name },
     { $inc: { sequence: 1 } },
     { new: true, upsert: true, setDefaultsOnInsert: true }
   );
@@ -691,12 +774,12 @@ const submitPublicRun = async (token, body = {}) => {
       : run.mobileNumber;
   if (
     mobileNumber !== run.mobileNumber &&
-    (await RunRegistration.exists({ eventId: run.eventId, mobileNumber, _id: { $ne: run._id } }))
+    (await RunRegistration.exists({ eventId: run.eventId || null, editionKey: run.editionKey || "", mobileNumber, _id: { $ne: run._id } }))
   ) {
     throw new AppError("This mobile number is already registered for this event.", 409);
   }
 
-  const registrationNumber = await nextRegistrationNumber(event._id);
+  const registrationNumber = await nextRegistrationNumber({ eventId: run.eventId || null, editionKey: run.editionKey || "" });
 
   // The 8-digit Invitation ID: printed on the pass and encoded in the QR.
   const qrValue = await generateRunInvitationId();
@@ -761,9 +844,11 @@ const submitPublicRun = async (token, body = {}) => {
 // Set CHATBOX_LETS_RUN_TEMPLATE_NAME (+ _LANGUAGE) in .env. Without it a plain
 // text message with the same words is sent (only delivered inside WhatsApp's
 // 24-hour window).
-const sendLetsRunWhatsapp = async (run, event) => {
+const sendLetsRunWhatsapp = async (run) => {
   const link = buildInvitationUrl(run.qrValue);
-  const eventName = String(event?.title || "Let's Run").trim();
+  // The message never uses event data: it always says "Let's Run", so it works
+  // the same with or without an event.
+  const eventName = LETS_RUN_NAME;
   const templateName = process.env.CHATBOX_LETS_RUN_TEMPLATE_NAME;
   const languageCode = process.env.CHATBOX_LETS_RUN_TEMPLATE_LANGUAGE || "en";
 
@@ -788,46 +873,61 @@ const sendLetsRunWhatsapp = async (run, event) => {
   });
 };
 
-// Event the public form registers for: the first active event. Throws a clear
-// message when none is open.
-const getOpenLetsRunEvent = async () => {
-  const event = await getDefaultEventAnyTitle();
-  if (!event) throw new AppError("Registration is not open right now.", 400);
-  if (event.endDateTime && new Date() > new Date(event.endDateTime)) {
-    throw new AppError("Registration is closed because this event has ended.", 400);
-  }
-  return event;
+// The run the public form registers for. The form is ALWAYS open: an active
+// Let's Run event (not ended) takes over, otherwise it is the no-event run of the
+// date saved in Run Report -> Run date & time. Change that date and the next
+// registrations belong to the new run; earlier ones stay where they are.
+const getOpenLetsRun = async () => {
+  const scope = await currentRunScope();
+  const sched = await getRunSchedule(scope.event, scope.editionKey);
+  return { scope, event: scope.event, sched };
 };
 
 // GET /api/public/lets-run -> what the form header shows.
 const getLetsRunInfo = async () => {
-  const event = await getOpenLetsRunEvent();
+  const { sched } = await getOpenLetsRun();
   return {
-    eventTitle: event.title,
-    date: formatEventDate(event.startDateTime),
-    time: formatEventTime(event.startDateTime),
-    venueName: event.venueName || "",
+    eventTitle: LETS_RUN_NAME,
+    date: formatEventDate(sched.startDateTime),
+    time: formatEventTime(sched.startDateTime),
+    venueName: sched.venueName || "",
   };
 };
 
 // body: { name, mobile } -> { name, qrNumber, whatsappSent, alreadyRegistered }
+// ONE number = ONE ticket PER RUN (event or no-event date): if the number is
+// already registered there, the SAME QR is sent again and the name is updated to
+// the one typed now. The same number
+// registering for a NEW event is a new registration with a new QR.
 const submitLetsRun = async (body = {}) => {
   const name = validateName(body.name);
   const mobileNumber = validateMobile(body.mobile ?? body.mobileNumber);
-  const event = await getOpenLetsRunEvent();
+  const { scope } = await getOpenLetsRun();
+  const match = scopeMatch(scope);
 
-  let run = await RunRegistration.findOne({ eventId: event._id, mobileNumber });
+  let run = await RunRegistration.findOne({ ...match, mobileNumber });
   let alreadyRegistered = false;
 
-  if (run && run.status === "registered") {
-    // Same number again: do not create a second ticket, send the same one again.
-    // (30 s gap so the form cannot be used to spam a number with messages.)
-    alreadyRegistered = true;
-    if (run.qrSentAt && Date.now() - new Date(run.qrSentAt).getTime() < 30 * 1000) {
+  // Same number, different name: the QR stays the same, the NAME follows the
+  // latest form (so the pass and the WhatsApp message show the new name).
+  const renameIfChanged = async (existing, newName) => {
+    if (existing.name === newName) return existing;
+    return (await RunRegistration.findByIdAndUpdate(existing._id, { $set: { name: newName } }, { new: true })) || existing;
+  };
+
+  const guardResend = (existing) => {
+    // 30 s gap so the form cannot be used to spam a number with messages.
+    if (existing.qrSentAt && Date.now() - new Date(existing.qrSentAt).getTime() < 30 * 1000) {
       throw new AppError("Your ticket was just sent on WhatsApp. Please check your messages.", 429);
     }
+  };
+
+  if (run && run.status === "registered") {
+    alreadyRegistered = true;
+    guardResend(run);
+    run = await renameIfChanged(run, name);
   } else {
-    const registrationNumber = await nextRegistrationNumber(event._id);
+    const registrationNumber = await nextRegistrationNumber(scope);
     const qrValue = await generateRunInvitationId();
     const qrBuffer = await generateQrCode(qrValue);
     const qrUpload = await uploadImage(qrBuffer, "event-management/qr-codes", "image", { format: "png" });
@@ -853,7 +953,7 @@ const submitLetsRun = async (body = {}) => {
         );
       } else {
         run = await RunRegistration.create({
-          eventId: event._id,
+          ...match,
           mobileNumber,
           token: randomToken(),
           ...fields,
@@ -861,19 +961,31 @@ const submitLetsRun = async (body = {}) => {
       }
     } catch (error) {
       await deleteLocalFile(qrUpload.public_id);
-      if (error.code === 11000) throw new AppError("This mobile number is already registered.", 409);
-      throw error;
+      if (error.code === 11000) {
+        // Two taps at the same moment: the other one won - give back ITS ticket.
+        const existing = await RunRegistration.findOne({ ...match, mobileNumber, status: "registered" });
+        if (!existing) throw new AppError("This mobile number is already registered.", 409);
+        run = existing;
+        alreadyRegistered = true;
+        guardResend(run);
+        run = await renameIfChanged(run, name);
+      } else {
+        throw error;
+      }
     }
 
     if (!run) {
       await deleteLocalFile(qrUpload.public_id);
-      throw new AppError("You are already registered.", 409);
+      const existing = await RunRegistration.findOne({ ...match, mobileNumber, status: "registered" });
+      if (!existing) throw new AppError("You are already registered.", 409);
+      run = await renameIfChanged(existing, name);
+      alreadyRegistered = true;
     }
   }
 
   let whatsappSent = false;
   try {
-    await sendLetsRunWhatsapp(run, event);
+    await sendLetsRunWhatsapp(run);
     whatsappSent = true;
     await RunRegistration.updateOne({ _id: run._id }, { $set: { qrSentAt: new Date(), qrError: "" } });
   } catch (error) {
@@ -897,8 +1009,10 @@ const getRunInvitation = async (invitationId) => {
   const run = await RunRegistration.findOne({ qrValue: String(invitationId), status: "registered" });
   if (!run) return null;
 
-  const event = await Event.findById(run.eventId).lean();
-  if (!event || event.isDeleted) return null;
+  // No event is fine: the date / time come from the Let's Run settings.
+  const linked = run.eventId ? await Event.findById(run.eventId).lean() : null;
+  if (run.eventId && (!linked || linked.isDeleted)) return null;
+  const event = await getRunSchedule(linked, run.editionKey);
 
   // Sent inline (not a link under /uploads) so the pass keeps working even if
   // the server disk is wiped - same as the booking pass.
@@ -932,7 +1046,7 @@ const getRunInvitation = async (invitationId) => {
     registrationNumber: run.registrationNumber || "",
     purchasedAt: run.registeredAt || run.createdAt || null,
     event: {
-      title: event.title,
+      title: LETS_RUN_NAME,
       image: event.image,
       date: formatEventDate(event.startDateTime),
       time: formatEventTime(event.startDateTime),
@@ -957,17 +1071,22 @@ const loadScannable = async (qrValue) => {
   const run = await RunRegistration.findOne({ qrValue: String(qrValue).trim().toUpperCase() });
   if (!run || run.status !== "registered") throw new AppError("QR ticket not found.", 404);
 
-  const event = await Event.findById(run.eventId).lean();
-  if (!event || event.isDeleted) throw new AppError("Event not found.", 404);
+  // NO event = the pass scans fine (Let's Run without an event). Event checks
+  // (inactive / ended) only apply when the person is linked to a real event.
+  let event = null;
+  if (run.eventId) {
+    event = await Event.findById(run.eventId).lean();
+    if (!event || event.isDeleted) throw new AppError("Event not found.", 404);
 
-  // Same test switch the booking scanner uses.
-  const testMode = String(process.env.QR_TEST_MODE || "").toLowerCase() === "true";
-  if (!testMode && !event.isActive) throw new AppError("This event is inactive.", 400);
-  if (!testMode && event.endDateTime && new Date() > new Date(event.endDateTime)) {
-    throw new AppError("This event has ended.", 400);
+    // Same test switch the booking scanner uses.
+    const testMode = String(process.env.QR_TEST_MODE || "").toLowerCase() === "true";
+    if (!testMode && !event.isActive) throw new AppError("This event is inactive.", 400);
+    if (!testMode && event.endDateTime && new Date() > new Date(event.endDateTime)) {
+      throw new AppError("This event has ended.", 400);
+    }
   }
 
-  return { run, event };
+  return { run, event: await getRunSchedule(event, run.editionKey) };
 };
 
 // Same shape the scanner already understands for a booking ticket.
@@ -996,8 +1115,8 @@ const scannerDto = (run, event, { status, scannedAt }) => ({
     discount: 0,
   },
   event: {
-    id: event._id,
-    title: event.title,
+    id: event._id || null,
+    title: LETS_RUN_NAME,
     venueName: event.venueName,
     address: event.address,
     startDateTime: event.startDateTime,
@@ -1048,6 +1167,7 @@ module.exports = {
   createRun,
   updateRun,
   deleteRun,
+  deleteRuns,
   resendRun,
   exportRuns,
   // public

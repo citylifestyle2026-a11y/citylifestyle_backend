@@ -16,7 +16,13 @@ const mongoose = require("mongoose");
  */
 const runRegistrationSchema = new mongoose.Schema(
   {
-    eventId: { type: mongoose.Schema.Types.ObjectId, ref: "Event", required: true, index: true },
+    // null = Let's Run without an event (linked to the event automatically when one is created).
+    eventId: { type: mongoose.Schema.Types.ObjectId, ref: "Event", default: null, index: true },
+
+    // Only for a run WITHOUT an event: the ISO start date-time of that run. The
+    // admin changing the Let's Run date starts a new run; old rows keep theirs.
+    // "" when the row belongs to an event.
+    editionKey: { type: String, default: "", index: true },
 
     name: { type: String, required: true, trim: true, maxlength: 60 },
 
@@ -61,11 +67,23 @@ const runRegistrationSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// A mobile number can be added only once per event.
-runRegistrationSchema.index({ eventId: 1, mobileNumber: 1 }, { unique: true });
+// A mobile number can be added only once per event / per no-event run.
+runRegistrationSchema.index({ eventId: 1, editionKey: 1, mobileNumber: 1 }, { unique: true });
 // The QR value is unique across everything (sparse: invited rows have none).
 runRegistrationSchema.index({ qrValue: 1 }, { unique: true, sparse: true });
 runRegistrationSchema.index({ eventId: 1, status: 1, scannedAt: 1 });
 runRegistrationSchema.index({ eventId: 1, createdAt: -1 });
 
-module.exports = mongoose.model("RunRegistration", runRegistrationSchema);
+const RunRegistration = mongoose.model("RunRegistration", runRegistrationSchema);
+
+// The old unique index (eventId + mobile) would stop the same number registering
+// for the next run: drop it once, then make sure the new one exists. Idempotent.
+mongoose.connection.once("open", () => {
+  RunRegistration.collection
+    .dropIndex("eventId_1_mobileNumber_1")
+    .catch(() => {})
+    .then(() => RunRegistration.createIndexes())
+    .catch((error) => console.error("[run-registration] index update failed:", error.message));
+});
+
+module.exports = RunRegistration;
