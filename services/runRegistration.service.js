@@ -24,7 +24,8 @@ const generateQrCode = require("../utils/generateQrCode");
 const uploadImage = require("../utils/localUpload.util");
 const deleteLocalFile = require("../utils/deleteLocalFile");
 const { normalizeMobileNumber, MOBILE_ERROR_MESSAGE } = require("../utils/normalizeMobileNumber");
-const { getDefaultEvent, resolveEventForNewRecord } = require("../utils/defaultEvent");
+const { getDefaultEventAnyTitle } = require("../utils/defaultEvent");
+const { onlyRunEvent } = require("../utils/runEvent");
 const whatsappService = require("./whatsapp.service");
 const {
   formatEventDate,
@@ -132,15 +133,41 @@ const serialize = (doc, event) => {
   };
 };
 
-// The event the admin screen is looking at: the picked one, else the default.
-// Returns null when no event exists at all.
+// The event the Run Report is looking at: the picked one, else the current
+// active event (the first one when several are active) - the same event the
+// public /lets-run form registers people for. Returns null when no event exists.
 const resolveViewEvent = async (eventId) => {
   const picked = toObjectId(eventId);
   if (picked) {
     const event = await Event.findOne({ _id: picked, isDeleted: { $ne: true } }).lean();
     if (event) return event;
   }
-  return getDefaultEvent();
+  return getDefaultEventAnyTitle();
+};
+
+// Events for the select in the Run Report header: EVERY "Let's Run" event -
+// active and expired (ended) ones - so the report of an old event can still be
+// opened. Newest first; plus the one the report opens with by default.
+const listRunEvents = async () => {
+  const [events, defaultEvent] = await Promise.all([
+    Event.find({ isDeleted: { $ne: true }, ...onlyRunEvent() })
+      .sort({ startDateTime: -1 })
+      .select("_id title startDateTime endDateTime isActive")
+      .lean(),
+    getDefaultEventAnyTitle(),
+  ]);
+  const now = Date.now();
+  return {
+    events: events.map((e) => ({
+      _id: e._id,
+      title: e.title,
+      startDateTime: e.startDateTime || null,
+      endDateTime: e.endDateTime || null,
+      isActive: e.isActive === true,
+      expired: Boolean(e.endDateTime) && new Date(e.endDateTime).getTime() < now,
+    })),
+    defaultEventId: defaultEvent?._id || null,
+  };
 };
 
 const emptySummary = () => ({
@@ -409,7 +436,7 @@ const createRun = async (body = {}, adminId = null) => {
   const name = validateName(body.name);
   const mobileNumber = validateMobile(body.mobile ?? body.mobileNumber);
 
-  const event = await resolveEventForNewRecord(body.eventId);
+  const event = await resolveViewEvent(body.eventId);
   if (!event) throw new AppError("No event found. Please create an event first.", 400);
 
   if (await RunRegistration.exists({ eventId: event._id, mobileNumber })) {
@@ -764,7 +791,7 @@ const sendLetsRunWhatsapp = async (run, event) => {
 // Event the public form registers for: the first active event. Throws a clear
 // message when none is open.
 const getOpenLetsRunEvent = async () => {
-  const event = await getDefaultEvent();
+  const event = await getDefaultEventAnyTitle();
   if (!event) throw new AppError("Registration is not open right now.", 400);
   if (event.endDateTime && new Date() > new Date(event.endDateTime)) {
     throw new AppError("Registration is closed because this event has ended.", 400);
@@ -1016,6 +1043,7 @@ const undoRunCheckIn = async (qrValue) => {
 module.exports = {
   // admin
   listRuns,
+  listRunEvents,
   getSummary,
   createRun,
   updateRun,

@@ -1,5 +1,6 @@
 const Booking = require("../models/booking.model");
 const Event = require("../models/event.model");
+const { notRunEvent } = require("../utils/runEvent");
 const TicketType = require("../models/ticketType.model");
 const Counter = require("../models/counters.model");
 const BookingTicket = require("../models/bookingTicket.model");
@@ -990,6 +991,7 @@ const resolveEventScope = async (eventId) => {
     const event = await Event.findOne({
       _id: eventId,
       isDeleted: { $ne: true },
+      ...notRunEvent(),
     }).select("_id title startDateTime endDateTime");
 
     return event ? { eventIds: [event._id], events: [event] } : { eventIds: [], events: [] };
@@ -998,6 +1000,7 @@ const resolveEventScope = async (eventId) => {
   const activeEvents = await Event.find({
     isActive: true,
     isDeleted: { $ne: true },
+    ...notRunEvent(),
   })
     .sort({ startDateTime: 1 })
     .select("_id title startDateTime endDateTime");

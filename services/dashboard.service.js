@@ -1,4 +1,5 @@
 const Event = require("../models/event.model.js");
+const { notRunEvent } = require("../utils/runEvent");
 const Booking = require("../models/booking.model.js");
 const BookingTicket = require("../models/bookingTicket.model.js");
 const TicketType = require("../models/ticketType.model.js");
@@ -33,8 +34,10 @@ const CREW_ONLY = {
 const getActiveEvent = async () => {
     const now = new Date();
 
+    // "Let's Run" events only show in the Run Report, never here.
     const runningEvent = await Event.findOne({
         isActive: true,
+        ...notRunEvent(),
         endDateTime: { $gte: now },
     })
         .sort({ startDateTime: 1 })
@@ -46,6 +49,7 @@ const getActiveEvent = async () => {
 
     const lastExpiredEvent = await Event.findOne({
         isActive: true,
+        ...notRunEvent(),
         endDateTime: { $lt: now },
     })
         .sort({ endDateTime: -1 })
@@ -541,6 +545,7 @@ const getCrewCounts = async (eventId) => {
         ? await Event.findOne({
             _id: requestedEventId,
             isDeleted: { $ne: true },
+            ...notRunEvent(),
         }).lean()
         : await getActiveEvent();
 

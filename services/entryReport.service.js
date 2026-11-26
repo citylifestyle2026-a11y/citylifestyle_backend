@@ -1,5 +1,6 @@
 const BookingTicket = require("../models/bookingTicket.model");
 const Event = require("../models/event.model");
+const { notRunEvent } = require("../utils/runEvent");
 const User = require("../models/user.model");
 const Admin = require("../models/admin.model");
 const TicketType = require("../models/ticketType.model");
@@ -397,8 +398,10 @@ const buildRowQrImage = async (ticket) => {
 // used to be part of this filter has been removed for that reason;
 // isActive (a separate, manually-controlled admin flag, untouched by
 // expiry) is preserved exactly as before.
+// "Let's Run" events are left out: their report is the Run Report.
 const activeEventFilter = () => ({
   isActive: true,
+  ...notRunEvent(),
 });
 
 // ================= RESOLVE EVENT SCOPE (SHARED) =================

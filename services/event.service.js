@@ -1,5 +1,7 @@
 const mongoose = require("mongoose");
 const Event = require("../models/event.model");
+const { notRunEvent, isRunEventTitle } = require("../utils/runEvent");
+const RunRegistration = require("../models/runRegistration.model");
 const TicketType = require("../models/ticketType.model");
 const Booking = require("../models/booking.model");
 const BookingTicket = require("../models/bookingTicket.model");
@@ -164,6 +166,12 @@ exports.getAllEvents = async (query) => {
 
   const filter = { isDeleted: { $ne: true } };
 
+  // "Let's Run" events only appear on the Add Event page (includeRun=true) so
+  // they can be created / edited. Every dropdown and report asks without it.
+  if (String(query.includeRun) !== "true") {
+    filter.$and = [notRunEvent()];
+  }
+
   if (search) {
     filter.title = {
       $regex: search,
@@ -302,6 +310,18 @@ exports.deleteEvent = async (id, adminId) => {
     }
   );
 
+  // "Let's Run" event: its run registrations (Run Report rows) are deleted with
+  // the event, together with their QR image files. Other events are untouched.
+  let runRegistrationsRemoved = 0;
+  if (isRunEventTitle(event.title)) {
+    const runs = await RunRegistration.find({ eventId: id }).select("qrImagePublicId").lean();
+    const result = await RunRegistration.deleteMany({ eventId: id });
+    runRegistrationsRemoved = result.deletedCount || 0;
+    for (const run of runs) {
+      await deleteLocalFile(run.qrImagePublicId);
+    }
+  }
+
   return {
     success: true,
     message: "Event deleted successfully.",
@@ -311,6 +331,7 @@ exports.deleteEvent = async (id, adminId) => {
       guestListRemoved: 0,
       guestListHidden: 0,
       contactBookCleared: 0,
+      runRegistrationsRemoved,
     },
   };
 };
