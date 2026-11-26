@@ -602,6 +602,29 @@ const deleteRuns = async (ids) => {
   return { deleted: result.deletedCount || 0 };
 };
 
+// Run Report checkboxes -> send the QR again to every ticked person who has
+// registered (WhatsApp + email, same QR). body: { ids: [...] } (max 500 at once).
+const resendRuns = async (ids) => {
+  if (!Array.isArray(ids) || ids.length === 0) throw new AppError("Select at least one entry.", 400);
+  if (ids.length > 500) throw new AppError("Too many entries selected at once (max 500).", 400);
+
+  const objectIds = [...new Set(ids.map((id) => String(id)))].map(toObjectId).filter(Boolean);
+  if (objectIds.length === 0) throw new AppError("Invalid selection.", 400);
+
+  const runs = await RunRegistration.find({ _id: { $in: objectIds }, status: "registered" });
+  if (runs.length === 0) throw new AppError("None of the selected entries has a QR to send.", 400);
+
+  let sent = 0;
+  let failed = 0;
+  for (const run of runs) {
+    const event = run.eventId ? await Event.findById(run.eventId).lean() : null;
+    const result = await deliverQr(run, event, null);
+    if (result.whatsapp || result.email) sent += 1;
+    else failed += 1;
+  }
+  return { sent, failed, skipped: objectIds.length - runs.length };
+};
+
 // Not registered yet -> link again. Registered -> QR again.
 const resendRun = async (id) => {
   if (!toObjectId(id)) throw new AppError("Invalid ID.", 400);
@@ -723,27 +746,53 @@ const getPublicRun = async (token) => {
   return publicView(run, event);
 };
 
-const nextRegistrationNumber = async (scope) => {
-  // An event has its own counter. Runs made WITHOUT an event share ONE counter, so
-  // numbers never repeat in the Run Report that lists every run together.
-  const name = scope.eventId ? `RUN_${scope.eventId}` : "RUN_default";
+// REGISTRATION NUMBER  =  RUN + <run no. 2 digits> + <serial 4 digits>
+//   1st run  -> RUN010001, RUN010002, ...
+//   2nd run  -> RUN020001, RUN020002, ...
+// A "run" is ONE Let's Run event, or ONE no-event run (identified by its start
+// date-time = editionKey, i.e. LETS_RUN_START). When the admin creates a new
+// event or changes the run date & time, the next registrations automatically get
+// the next run no. (RUN02..., RUN03...), so a number never repeats across runs
+// in the Run Report. Both counters are atomic ($inc), safe for parallel submits.
+const runScopeKey = (scope) => (scope.eventId ? `evt:${scope.eventId}` : `ed:${scope.editionKey || "default"}`);
 
-  if (!scope.eventId && !(await Counter.exists({ name }))) {
-    // first use: carry on after the highest number already in the report
-    const last = await RunRegistration.findOne({ registrationNumber: /^RUN\d+$/ })
-      .sort({ registrationNumber: -1 })
-      .select("registrationNumber")
-      .lean();
-    const start = last ? parseInt(String(last.registrationNumber).slice(3), 10) || 0 : 0;
-    await Counter.updateOne({ name }, { $setOnInsert: { sequence: start } }, { upsert: true }).catch(() => {});
-  }
+// Run no. of a run: given once (the next free one) the first time it gets a registration.
+const getRunSeriesNo = async (scope) => {
+  const name = `RUN_SERIES_OF:${runScopeKey(scope)}`;
 
-  const counter = await Counter.findOneAndUpdate(
-    { name },
+  const existing = await Counter.findOne({ name }).lean();
+  if (existing) return existing.sequence;
+
+  const global = await Counter.findOneAndUpdate(
+    { name: "RUN_SERIES" },
     { $inc: { sequence: 1 } },
     { new: true, upsert: true, setDefaultsOnInsert: true }
   );
-  return `RUN${String(counter.sequence).padStart(4, "0")}`;
+  try {
+    await Counter.updateOne({ name }, { $setOnInsert: { sequence: global.sequence } }, { upsert: true });
+  } catch (error) {
+    if (error.code !== 11000) throw error; // two first registrations at once: the other one won
+  }
+  // Re-read: if another request saved first, ITS run no. is the one that counts.
+  const saved = await Counter.findOne({ name }).lean();
+  return saved ? saved.sequence : global.sequence;
+};
+
+const nextRegistrationNumber = async (scope) => {
+  const series = await getRunSeriesNo(scope);
+  const prefix = `RUN${String(series).padStart(2, "0")}`;
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const counter = await Counter.findOneAndUpdate(
+      { name: `RUN_SEQ:${runScopeKey(scope)}` },
+      { $inc: { sequence: 1 } },
+      { new: true, upsert: true, setDefaultsOnInsert: true }
+    );
+    const candidate = `${prefix}${String(counter.sequence).padStart(4, "0")}`;
+    // Safety net: never hand out a number that already exists.
+    if (!(await RunRegistration.exists({ registrationNumber: candidate }))) return candidate;
+  }
+  throw new AppError("Could not generate a unique registration number. Please retry.", 500);
 };
 
 // body: { distance: 5 | 10, name, email, mobile? }.  The mobile number starts as
@@ -1057,8 +1106,8 @@ const getRunInvitation = async (invitationId) => {
       address: event.address,
       dressCode: event.dressCode || "Sportswear",
       locationUrl: buildVenueLocationUrl(event),
-      // Added when the event is created (Event -> Terms & Conditions).
-      termsConditions: event.termsConditions || "",
+      // The Let's Run pass has no Terms & Conditions.
+      termsConditions: "",
     },
   };
 };
@@ -1169,6 +1218,7 @@ module.exports = {
   deleteRun,
   deleteRuns,
   resendRun,
+  resendRuns,
   exportRuns,
   // public
   getPublicRun,

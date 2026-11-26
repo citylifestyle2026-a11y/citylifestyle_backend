@@ -40,7 +40,7 @@ const runRegistrationSchema = new mongoose.Schema(
     // Random, unguessable part of the WhatsApp link.
     token: { type: String, required: true, unique: true, index: true },
 
-    // "RUN0001" - shown to the person and in the reports (per event).
+    // "RUN010001" = RUN + run no. (01, 02, ...) + serial (0001...). Unique across all runs.
     registrationNumber: { type: String, default: "" },
 
     // What the QR contains ("RUN-XXXXXXXX"). Random, so it cannot be guessed.
