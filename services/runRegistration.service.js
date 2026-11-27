@@ -26,7 +26,7 @@ const deleteLocalFile = require("../utils/deleteLocalFile");
 const { normalizeMobileNumber, MOBILE_ERROR_MESSAGE } = require("../utils/normalizeMobileNumber");
 const { getDefaultRunEvent } = require("../utils/defaultEvent");
 const { onlyRunEvent } = require("../utils/runEvent");
-const { LETS_RUN_NAME, getRunSchedule, getRunSettings, editionKeyOf } = require("../utils/letsRunConfig");
+const { LETS_RUN_NAME, getRunSchedule, getRunSettings, editionKeyOf, istDay, istDayRange } = require("../utils/letsRunConfig");
 const whatsappService = require("./whatsapp.service");
 const {
   formatEventDate,
@@ -146,7 +146,11 @@ const serialize = (doc, event) => {
 // Returns { event, eventId, editionKey }. Nothing here ever creates or moves rows.
 const resolveScope = async (eventId) => {
   const value = String(eventId || "");
-  if (value.startsWith("ed:")) return { event: null, eventId: null, editionKey: value.slice(3) };
+  if (value.startsWith("ed:")) {
+    // a no-event run = a date. No / invalid date -> the one open now.
+    const key = value.slice(3);
+    return istDay(key) ? { event: null, eventId: null, editionKey: key } : currentRunScope();
+  }
 
   const picked = toObjectId(value);
   if (picked) {
@@ -173,21 +177,35 @@ const currentRunScope = async () => {
 const viewScope = async (eventId) =>
   eventId ? resolveScope(eventId) : { all: true, event: null, eventId: null, editionKey: "" };
 
-const scopeMatch = (scope) => (scope.all ? {} : { eventId: scope.eventId, editionKey: scope.editionKey });
+// A no-event run = one DATE: every row whose start falls on that day (India time), so a
+// change of TIME only never splits a run. A different DATE is a different run.
+const scopeMatch = (scope) => {
+  if (scope.all) return {};
+  if (scope.eventId) return { eventId: scope.eventId };
+  const range = istDayRange(scope.editionKey);
+  return range ? { eventId: null, editionKey: range } : { eventId: null };
+};
+
+// What a NEW row is saved with (scopeMatch is a filter: a date range for no-event runs).
+const scopeFields = (scope) => ({
+  eventId: scope.eventId || null,
+  editionKey: scope.eventId ? "" : scope.editionKey || "",
+});
 
 // Events for the select in the Run Report header: EVERY "Let's Run" event -
 // active and expired (ended) ones - so the report of an old event can still be
 // opened. Newest first; plus the one the report opens with by default.
 const listRunEvents = async () => {
-  const [events, current, editions] = await Promise.all([
+  const [events, current, settings, editions] = await Promise.all([
     Event.find({ isDeleted: { $ne: true }, ...onlyRunEvent() })
       .sort({ startDateTime: -1 })
       .select("_id title startDateTime endDateTime isActive")
       .lean(),
     currentRunScope(),
+    getRunSettings(),
     RunRegistration.aggregate([
       { $match: { eventId: null, editionKey: { $ne: "" } } },
-      { $group: { _id: "$editionKey", count: { $sum: 1 } } },
+      { $group: { _id: "$editionKey" } },
     ]),
   ]);
   const now = Date.now();
@@ -199,16 +217,25 @@ const listRunEvents = async () => {
       date: e.startDateTime || null,
       expired: Boolean(e.endDateTime) && new Date(e.endDateTime).getTime() < now,
     })),
-    // runs made without an event: one per date, newest first (+ the current one even if still empty)
-    ...[...new Set([...editions.map((x) => x._id), ...(current.editionKey ? [current.editionKey] : [])])]
-      .sort((a, b) => new Date(b) - new Date(a))
-      .map((key) => ({
-        value: `ed:${key}`,
-        kind: "edition",
-        title: LETS_RUN_NAME,
-        date: key,
-        expired: new Date(key).getTime() + 24 * 60 * 60 * 1000 < now,
-      })),
+    // runs made without an event: ONE per DATE, newest first (the date in .env now is always
+    // there, with its current time; earlier dates show the start they were registered with)
+    ...(() => {
+      const byDay = new Map();
+      editions.map((x) => x._id).filter((key) => istDay(key)).forEach((key) => {
+        const day = istDay(key);
+        if (!byDay.has(day) || key > byDay.get(day)) byDay.set(day, key);
+      });
+      byDay.set(istDay(settings.startDateTime), editionKeyOf(settings.startDateTime));
+      return [...byDay.values()]
+        .sort((a, b) => new Date(b) - new Date(a))
+        .map((key) => ({
+          value: `ed:${key}`,
+          kind: "edition",
+          title: LETS_RUN_NAME,
+          date: key,
+          expired: new Date(key).getTime() + 24 * 60 * 60 * 1000 < now,
+        }));
+    })(),
   ];
   const defaultValue = current.event ? String(current.event._id) : `ed:${current.editionKey}`;
   return { options, defaultValue };
@@ -498,7 +525,7 @@ const createRun = async (body = {}, adminId = null) => {
   let run;
   try {
     run = await RunRegistration.create({
-      ...scopeMatch(scope),
+      ...scopeFields(scope),
       name,
       mobileNumber,
       token: randomToken(),
@@ -534,8 +561,7 @@ const updateRun = async (id, body = {}) => {
     const mobileNumber = validateMobile(incomingMobile);
     if (mobileNumber !== run.mobileNumber) {
       const clash = await RunRegistration.exists({
-        eventId: run.eventId,
-        editionKey: run.editionKey || "",
+        ...scopeMatch({ eventId: run.eventId || null, editionKey: run.editionKey || "" }),
         mobileNumber,
         _id: { $ne: run._id },
       });
@@ -754,12 +780,12 @@ const getPublicRun = async (token) => {
 // REGISTRATION NUMBER  =  RUN + <run no. 2 digits> + <serial 4 digits>
 //   1st run  -> RUN010001, RUN010002, ...
 //   2nd run  -> RUN020001, RUN020002, ...
-// A "run" is ONE Let's Run event, or ONE no-event run (identified by its start
-// date-time = editionKey, i.e. LETS_RUN_START). When the admin creates a new
-// event or changes the run date & time, the next registrations automatically get
-// the next run no. (RUN02..., RUN03...), so a number never repeats across runs
-// in the Run Report. Both counters are atomic ($inc), safe for parallel submits.
-const runScopeKey = (scope) => (scope.eventId ? `evt:${scope.eventId}` : `ed:${scope.editionKey || "default"}`);
+// A "run" is ONE Let's Run event, or ONE DATE of the run without an event
+// (LETS_RUN_START in .env). Changing only the TIME keeps the run and its numbering;
+// a new DATE (or a new event) is a new run and takes the next run no. (RUN02..., RUN03...),
+// so a number never repeats across runs in the Run Report. Both counters are atomic
+// ($inc), safe for parallel submits.
+const runScopeKey = (scope) => (scope.eventId ? `evt:${scope.eventId}` : `ed:${istDay(scope.editionKey) || "default"}`);
 
 // Run no. of a run: given once (the next free one) the first time it gets a registration.
 const getRunSeriesNo = async (scope) => {
@@ -767,6 +793,30 @@ const getRunSeriesNo = async (scope) => {
 
   const existing = await Counter.findOne({ name }).lean();
   if (existing) return existing.sequence;
+
+  // This date already has registrations (made before this counter existed):
+  // carry on from the highest number given, e.g. RUN010063 -> next is RUN010064.
+  if (!scope.eventId) {
+    const top = await RunRegistration.findOne({ ...scopeMatch(scope), registrationNumber: /^RUN\d{6}$/ })
+      .sort({ registrationNumber: -1 })
+      .select("registrationNumber")
+      .lean();
+    if (top) {
+      const seriesNo = parseInt(top.registrationNumber.slice(3, 5), 10);
+      const lastSerial = parseInt(top.registrationNumber.slice(5), 10);
+      // keep the global run no. at least this high, so a new event never reuses it
+      await Counter.updateOne({ name: "RUN_SERIES" }, { $max: { sequence: seriesNo } }, { upsert: true });
+      for (const [counterName, value] of [[name, seriesNo], [`RUN_SEQ:${runScopeKey(scope)}`, lastSerial]]) {
+        try {
+          await Counter.updateOne({ name: counterName }, { $setOnInsert: { sequence: value } }, { upsert: true });
+        } catch (error) {
+          if (error.code !== 11000) throw error; // another request seeded it first
+        }
+      }
+      const seeded = await Counter.findOne({ name }).lean();
+      if (seeded) return seeded.sequence;
+    }
+  }
 
   const global = await Counter.findOneAndUpdate(
     { name: "RUN_SERIES" },
@@ -828,7 +878,7 @@ const submitPublicRun = async (token, body = {}) => {
       : run.mobileNumber;
   if (
     mobileNumber !== run.mobileNumber &&
-    (await RunRegistration.exists({ eventId: run.eventId || null, editionKey: run.editionKey || "", mobileNumber, _id: { $ne: run._id } }))
+    (await RunRegistration.exists({ ...scopeMatch({ eventId: run.eventId || null, editionKey: run.editionKey || "" }), mobileNumber, _id: { $ne: run._id } }))
   ) {
     throw new AppError("This mobile number is already registered for this event.", 409);
   }
@@ -1007,7 +1057,7 @@ const submitLetsRun = async (body = {}) => {
         );
       } else {
         run = await RunRegistration.create({
-          ...match,
+          ...scopeFields(scope),
           mobileNumber,
           token: randomToken(),
           ...fields,
@@ -1213,8 +1263,56 @@ const undoRunCheckIn = async (qrValue) => {
   return { undone: 1, remaining: 1, alreadyEntered: 0, totalGuests: 1, isGroupEntry: false };
 };
 
+// AUTOMATIC "new time" message. Runs once when the server starts (server.js).
+// The run without an event: when the TIME of LETS_RUN_START (same date) is different from
+// the time people registered with, every registered person of that date gets the Let's
+// Run message again (same QR, new time). Each time value is claimed once in the
+// database, so restarts / several servers never send it twice. Turn off with
+// LETS_RUN_AUTO_NOTIFY=false. A run with an event is skipped (its time is read live).
+const notifyRunTimeChange = async () => {
+  if (String(process.env.LETS_RUN_AUTO_NOTIFY || "").toLowerCase() === "false") return { skipped: "off" };
+
+  const scope = await currentRunScope();
+  if (scope.event) return { skipped: "event" };
+
+  const settings = await getRunSettings();
+  const start = settings.startDateTime.getTime();
+  const key = editionKeyOf(settings.startDateTime);
+
+  // Claim this time. Already claimed (nothing changed since the last start) -> E11000 -> stop.
+  try {
+    await Counter.findOneAndUpdate(
+      { name: `RUN_TIME_NOTIFIED:${istDay(key)}`, sequence: { $ne: start } },
+      { $set: { sequence: start } },
+      { upsert: true }
+    );
+  } catch (error) {
+    if (error.code === 11000) return { skipped: "unchanged" };
+    throw error;
+  }
+
+  // Registered with an earlier time of this date = has the old time in the message.
+  // (People who registered after the change already carry the new time: left alone.)
+  const match = scopeMatch(scope);
+  const runs = await RunRegistration.find({
+    ...match,
+    status: "registered",
+    editionKey: { ...match.editionKey, $ne: key },
+  });
+
+  let sent = 0;
+  let failed = 0;
+  for (const run of runs) {
+    const result = await deliverQr(run, null, null, { useLetsRunTemplate: true });
+    if (result.whatsapp || result.email) sent += 1;
+    else failed += 1;
+  }
+  return { time: key, total: runs.length, sent, failed };
+};
+
 module.exports = {
   // admin
+  notifyRunTimeChange,
   listRuns,
   listRunEvents,
   getSummary,
